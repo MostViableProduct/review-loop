@@ -17,7 +17,9 @@ import {
   removeMarker,
   pruneBaselines,
   LOCK_TTL_MS,
-  reclaimStale
+  reclaimStale,
+  writePendingSummary,
+  readPendingSummary
 } from "../../plugin/engine/lib/state.mjs";
 
 const observe = (/** @type {string} */ file) => {
@@ -39,6 +41,22 @@ beforeEach(() => {
 const ID = { kind: "spec", path: "/r/docs/specs/a.md" };
 const low = (t = "[Usability] x") => ({ severity: "low", title: t, file: "a.md" });
 const round = (rec, findings, fp = "fp") => applyRoundResult(rec, scoreFindings(findings), findings, fp);
+
+test("a pending summary with any item field the prompt hook reads missing or mistyped is quarantined and read as absent", () => {
+  const good = { key: "k", kind: "spec", label: "spec x", status: "pending", reason: null, command: "node x" };
+  writePendingSummary("s1", [good, { ...good, reason: "round_in_progress" }]);
+  assert.equal(readPendingSummary("s1")?.items.length, 2, "control: a complete summary reads back");
+  const dir = path.join(stateRoot(), "pending");
+  const file = path.join(dir, fs.readdirSync(dir).find((n) => n.endsWith(".json")));
+  const { key, command, ...noKeyCommand } = good;
+  for (const items of [[{ ...good, key: undefined }], [{ ...good, command: 7 }], [noKeyCommand], [{ ...good, reason: 1 }], [{ ...good, kind: null }], [{ ...good, label: "x".repeat(5000) }], Array.from({ length: 257 }, () => good)]) {
+    fs.writeFileSync(file, JSON.stringify({ v: 1, items, at: new Date().toISOString() }));
+    assert.equal(readPendingSummary("s1"), null, JSON.stringify(items).slice(0, 80));
+    assert.ok(fs.readdirSync(dir).some((n) => n.includes(".corrupt-")), "quarantined, not acted on");
+    assert.equal(fs.existsSync(file), false);
+  }
+  assert.ok(key && command, "fixture sanity");
+});
 
 test("records round-trip with 0600 and validate on read", () => {
   const r = newRecord(ID);

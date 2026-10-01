@@ -272,9 +272,14 @@ function summaryPath(session) {
   return path.join(stateRoot(), "pending", `${sha256hex(session).slice(0, 16)}.json`);
 }
 
-/** @param {unknown} v */
+const SUMMARY_MAX_ITEMS = 256;
+const SUMMARY_MAX_TEXT = 4096;
+const isText = (/** @type {unknown} */ s) => typeof s === "string" && s.length <= SUMMARY_MAX_TEXT;
+
+/** Every field the prompt hook interpolates is checked, so a parseable but malformed summary is quarantined. @param {unknown} v */
 function isSummary(v) {
-  return isObject(v) && v.v === 1 && Array.isArray(v.items) && v.items.every((i) => isObject(i) && typeof i.label === "string" && typeof i.status === "string");
+  return isObject(v) && v.v === 1 && Array.isArray(v.items) && v.items.length <= SUMMARY_MAX_ITEMS &&
+    v.items.every((i) => isObject(i) && isText(i.key) && isText(i.kind) && isText(i.label) && isText(i.status) && isText(i.command) && (i.reason === null || isText(i.reason)));
 }
 
 /** @param {string} session @param {Array<{ key: string, kind: string, label: string, status: string, reason: string | null, command: string }>} items */
