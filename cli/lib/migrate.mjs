@@ -31,7 +31,8 @@ const MAX_STEPS = 64;
 const STEPS_PER_RUN = 7;
 const MAX_REMOVED_GROUPS = 32;
 const COMMAND_MAX = 200;
-const RESOURCES = ["settings", "plugin", "marketplace", "skill", "pin", "config", "claude_md", "engine_dir"];
+/** @type {Record<string, string>} each resource's one action, exactly as `record` writes it */
+const ACTIONS = { settings: "swap_hooks", plugin: "install", skill: "move", pin: "move", config: "set_rubric", claude_md: "edit", engine_dir: "move" };
 const LEGACY_MODES = ["pr", "session", "track", "stop", "prompt"];
 const HOOK_KEYS = ["type", "command", "timeout"];
 const GROUP_KEYS = ["matcher", "hooks"];
@@ -152,7 +153,7 @@ function legacyGroups(obj) {
 
 /** @param {unknown} s untrusted until this returns true @param {string} dir @returns {s is Step} */
 function isStep(s, dir) {
-  if (!isObject(s) || typeof s.resource !== "string" || !RESOURCES.includes(s.resource) || typeof s.action !== "string") return false;
+  if (!isObject(s) || typeof s.resource !== "string" || !Object.hasOwn(ACTIONS, s.resource) || s.action !== ACTIONS[s.resource]) return false;
   const { before, after } = s;
   if (!isObject(before) || !isObject(after)) return false;
   if (s.resource === "settings") {
@@ -169,7 +170,11 @@ function isStep(s, dir) {
   }
   if (s.resource === "claude_md") return isSha(before.sha) && isSha(after.sha) && typeof before.backupTs === "string" && /^\d{10,16}$/.test(before.backupTs);
   if (s.resource === "pin") return isSha(before.sha);
-  return true; // plugin, marketplace, skill, engine_dir: rollback derives their paths and reads none from the manifest.
+  // Rollback uninstalls on this step, so it must be exactly what `record` wrote.
+  if (s.resource === "plugin") return before.absent === true && Object.keys(before).length === 1 && Object.keys(after).length === 0;
+  // skill, engine_dir: rollback derives their paths and reads none from the manifest; a recorded path is informational.
+  const pathOnly = (/** @type {Record<string, unknown>} */ o) => Object.keys(o).every((k) => k === "path") && (o.path === undefined || (typeof o.path === "string" && o.path.length <= 4096));
+  return pathOnly(before) && pathOnly(after);
 }
 
 /** @param {unknown} m @param {string} [dir] the Claude config dir restored hooks must name: the CURRENT one at rollback @returns {m is Manifest} */

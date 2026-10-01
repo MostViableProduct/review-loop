@@ -307,7 +307,7 @@ test("T-MIG-3b: a symlinked or oversized legacy pin is never followed or copied;
 });
 
 test("T-MIG-8: a tampered manifest is quarantined; nothing outside the migration roots moves; no hook is injected", async () => {
-  const { c } = authorShaped();
+  const { c, claude } = authorShaped();
   assert.equal(await main(["migrate", "--yes", "--skip-doctor-gate"], io()), 0);
   const mf = manifestFile();
   const victim = path.join(tmpDir(), "victim.txt");
@@ -323,7 +323,11 @@ test("T-MIG-8: a tampered manifest is quarantined; nothing outside the migration
     (m) => { m.steps.find((s) => s.resource === "config").before = { sha: "0".repeat(64), bytes: JSON.stringify({ version: 1, preset: "default", codex: { model: null, effort: null }, rubricPath: null, events: { path: null } }) }; },
     (m) => { m.steps.find((s) => s.resource === "settings").removedHooks.push({ event: "SessionStart", index: 0, group: { hooks: [{ type: "command", command: "node /tmp/attacker/.claude/review-loop/review-gate-hook.mjs session" }] } }); },
     // Every hook consistently at one foreign dir that is not a real directory of ours: invalid, never a "mismatch".
-    (m) => { for (const r of m.steps.find((s) => s.resource === "settings").removedHooks) for (const h of r.group.hooks) h.command = h.command.replace(c, "/tmp/rl-attacker-nonexistent/.claude"); }
+    (m) => { for (const r of m.steps.find((s) => s.resource === "settings").removedHooks) for (const h of r.group.hooks) h.command = h.command.replace(c, "/tmp/rl-attacker-nonexistent/.claude"); },
+    // Rollback uninstalls on a plugin step, so its action and shape must be exactly what migrate records.
+    (m) => { m.steps.push({ resource: "plugin", action: "remove_everything", before: { absent: true }, after: {} }); },
+    (m) => { m.steps.push({ resource: "plugin", action: "install", before: { absent: true, extra: 1 }, after: {} }); },
+    (m) => { m.steps.push({ resource: "marketplace", action: "noop", before: {}, after: {} }); }
   ]) {
     const m = structuredClone(good);
     tamper(m);
@@ -335,6 +339,7 @@ test("T-MIG-8: a tampered manifest is quarantined; nothing outside the migration
     assert.equal(fs.existsSync(mf), false);
     assert.equal(fs.readFileSync(victim, "utf8"), "keep");
     assert.deepEqual(fs.readFileSync(path.join(c, "settings.json")), settingsBefore, "no settings write");
+    assert.equal(claude.log().some((a) => a.includes("uninstall") || (a.includes("marketplace") && a.includes("remove"))), false, "no plugin or marketplace removal");
   }
   fs.symlinkSync(victim, mf);
   assert.equal(await main(["migrate", "--rollback", "--yes"], io()), 1, "a symlinked manifest is refused");
@@ -419,7 +424,7 @@ test("T-MIG-13: a second legacy install after a finished migration is refused be
 
 test("T-MIG-14: a record that could overflow MAX_STEPS is refused before any change", async () => {
   const { c, claude } = authorShaped();
-  const m = { v: 1, status: "in_progress", date: localDate(), steps: Array.from({ length: 60 }, () => ({ resource: "marketplace", action: "noop", before: {}, after: {} })) };
+  const m = { v: 1, status: "in_progress", date: localDate(), steps: Array.from({ length: 60 }, () => ({ resource: "engine_dir", action: "move", before: {}, after: {} })) };
   fs.writeFileSync(manifestFile(), JSON.stringify(m));
   const settingsBefore = fs.readFileSync(path.join(c, "settings.json"));
   const manifestBefore = fs.readFileSync(manifestFile());
