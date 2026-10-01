@@ -17,7 +17,7 @@ import {
 } from "../../plugin/engine/lib/git.mjs";
 import { streamHash, streamLines } from "../../plugin/engine/lib/proc.mjs";
 import { g, makeRepo, commitFile, writeFile, crissCrossRepo, tmpDir } from "./helpers.mjs";
-import { repoRoot } from "../../plugin/engine/lib/git.mjs";
+import { repoRoot, committedPaths } from "../../plugin/engine/lib/git.mjs";
 
 test("blobId matches git hash-object --stdin", () => {
   const repo = makeRepo();
@@ -292,4 +292,18 @@ test("repoRoot: a repo → its root; a confirmed non-repo → null; any other gi
   process.env.PATH = `${bin}:${saved}`;
   t.after(() => (process.env.PATH = saved));
   await assert.rejects(repoRoot(repo), { code: "repo_lookup_failed" });
+});
+
+test("committedPaths: commits since the start commit, by range not date; a start commit that is gone fails loud", async () => {
+  const repo = makeRepo();
+  assert.deepEqual(await committedPaths(repo, null), [], "no commit yet: nothing committed");
+  commitFile(repo, "a.md", "a");
+  const start = g(repo, "rev-parse", "HEAD");
+  assert.deepEqual(await committedPaths(repo, null), ["a.md"], "no commit at start: every commit is this session's");
+  assert.deepEqual(await committedPaths(repo, start), []);
+  fs.writeFileSync(path.join(repo, "old.md"), "x");
+  g(repo, "add", "old.md");
+  execFileSync("git", ["-c", "commit.gpgsign=false", "commit", "-q", "-m", "backdated"], { cwd: repo, env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@example.com", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@example.com", GIT_AUTHOR_DATE: "2001-01-01T00:00:00Z", GIT_COMMITTER_DATE: "2001-01-01T00:00:00Z" } });
+  assert.deepEqual(await committedPaths(repo, start), ["old.md"], "a backdated commit is still in the range");
+  await assert.rejects(committedPaths(repo, "0".repeat(40)), (e) => e.code === "detection_failed");
 });

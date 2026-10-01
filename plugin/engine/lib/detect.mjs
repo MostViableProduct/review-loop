@@ -140,13 +140,13 @@ export function detectPlansDir(projectRoot, dir = CLAUDE_PLANS_DIR) {
 /**
  * Specs and plans committed since the session began (author's decision: committed code stays with the PR and merge
  * gates). A committed doc is pending at its current content until a review passes at that fingerprint.
- * @param {string} root @param {string | null} startHead @param {string} since
+ * @param {string} root @param {string | null} startHead
  * @returns {Promise<Artifact[]>}
  */
-async function committedDocs(root, startHead, since) {
+async function committedDocs(root, startHead) {
   /** @type {Artifact[]} */
   const out = [];
-  for (const rel of await committedPaths(root, startHead, since)) {
+  for (const rel of await committedPaths(root, startHead)) {
     const kind = classifyRepoPath(rel);
     if (kind !== "spec" && kind !== "plan") continue;
     const abs = path.join(root, rel);
@@ -297,14 +297,16 @@ async function scanSession(session, cwd) {
       // No snapshot from this session's start: the repo's current state may already include this session's edits —
       // SessionStart never completed, or the session reached the repo later (cwd changed) and edited it through the
       // shell, which leaves no file-tool marker. Over-review rather than adopt those edits as the baseline.
-      writeBaseline(session, baseRoot, {}, readBaseline(session, START_OK) ? "first_seen_mid_session" : "session_start_failed");
+      const head = baseRoot === CLAUDE_PLANS_DIR ? null : await headSha(baseRoot).catch(() => null);
+      writeBaseline(session, baseRoot, {}, readBaseline(session, START_OK) ? "first_seen_mid_session" : "session_start_failed", false, head);
       candidates.push(...list);
       continue;
     }
     for (const a of list) if (baseline.artifacts[a.key] !== a.fingerprint) candidates.push(a);
-    if (baseRoot === CLAUDE_PLANS_DIR || typeof baseline.at !== "string") continue;
+    // A baseline without `head` predates commit tracking: its start commit is unknown, so there is no range to scan.
+    if (baseRoot === CLAUDE_PLANS_DIR || baseline.head === undefined) continue;
     try {
-      for (const a of await committedDocs(baseRoot, typeof baseline.head === "string" ? baseline.head : null, baseline.at)) {
+      for (const a of await committedDocs(baseRoot, baseline.head)) {
         if (!candidates.some((c) => c.key === a.key)) candidates.push(a);
       }
     } catch (err) {

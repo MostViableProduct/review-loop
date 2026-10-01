@@ -600,6 +600,31 @@ test("a spec edited and committed through the shell during the session stays pen
   assert.match(r.out.reason, /spec .*feature-spec\.md/);
 });
 
+test("a spec committed with a backdated committer date during the session still stays pending at Stop", () => {
+  const repo = specRepo();
+  const S = { session_id: "e2e-session", cwd: repo, stop_hook_active: false };
+  hook("session", S);
+  const abs = path.join(repo, "docs", "specs", "old-dated-spec.md");
+  fs.mkdirSync(path.dirname(abs), { recursive: true });
+  fs.writeFileSync(abs, "committed with an old date");
+  spawnSync("git", ["add", "--", "docs/specs/old-dated-spec.md"], { cwd: repo, env: GIT_ENV });
+  const c = spawnSync("git", ["-c", "commit.gpgsign=false", "commit", "-q", "-m", "backdated"], { cwd: repo, env: { ...GIT_ENV, GIT_AUTHOR_DATE: "2001-01-01T00:00:00Z", GIT_COMMITTER_DATE: "2001-01-01T00:00:00Z" } });
+  assert.equal(c.status, 0, c.stderr?.toString());
+  const r = hook("stop", S);
+  assert.equal(r.out?.decision, "block", JSON.stringify(r.out));
+  assert.match(r.out.reason, /spec .*old-dated-spec\.md/);
+});
+
+test("a repo with no commit at session start: a plan committed during the session stays pending at Stop", () => {
+  const repo = makeRepo();
+  const S = { session_id: "e2e-session", cwd: repo, stop_hook_active: false };
+  hook("session", S);
+  commitFile(repo, "docs/plans/first-plan.md", "the repo's first commit");
+  const r = hook("stop", S);
+  assert.equal(r.out?.decision, "block", JSON.stringify(r.out));
+  assert.match(r.out.reason, /plan .*first-plan\.md/);
+});
+
 test("control: code committed during the session is the PR gate's; a doc committed before the session is not flagged", () => {
   const repo = specRepo();
   commitFile(repo, "docs/specs/old-spec.md", "committed before the session");
