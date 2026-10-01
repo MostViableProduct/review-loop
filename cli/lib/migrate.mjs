@@ -41,7 +41,7 @@ const EVENT_RE = /^[A-Z][A-Za-z]{1,31}$/;
 
 /**
  * @typedef {{ event: string, index: number, group: unknown }} RemovedHook
- * @typedef {{ resource: string, action: string, before: Record<string, unknown>, after: Record<string, unknown>, removedHooks?: RemovedHook[], addedAsk?: string[] }} Step
+ * @typedef {{ resource: string, action: string, before: Record<string, unknown>, after: Record<string, unknown>, removedHooks?: RemovedHook[], addedAsk?: string[], undone?: boolean }} Step
  * @typedef {{ v: 1, status: "in_progress" | "done" | "rolled_back", date: string, steps: Step[] }} Manifest
  */
 
@@ -154,6 +154,7 @@ function legacyGroups(obj) {
 /** @param {unknown} s untrusted until this returns true @param {string} dir @returns {s is Step} */
 function isStep(s, dir) {
   if (!isObject(s) || typeof s.resource !== "string" || !Object.hasOwn(ACTIONS, s.resource) || s.action !== ACTIONS[s.resource]) return false;
+  if (s.undone !== undefined && typeof s.undone !== "boolean") return false;
   const { before, after } = s;
   if (!isObject(before) || !isObject(after)) return false;
   if (s.resource === "settings") {
@@ -430,6 +431,8 @@ async function rollback(io, ctx) {
   /** @type {string[]} */
   const skipped = [];
   for (const s of [...m.steps].reverse()) {
+    if (s.undone === true) continue;
+    const before = skipped.length;
     if (s.resource === "engine_dir") moveBack(P.engineArchived, P.engine, "legacy engine folder", skipped);
     if (s.resource === "claude_md") undoClaudeMd(s, P.claudeMd, skipped);
     if (s.resource === "skill") moveBack(P.skillArchived, P.skill, "legacy skill", skipped);
@@ -440,10 +443,16 @@ async function rollback(io, ctx) {
       await uninstallPlugin();
       await removeMarketplace();
     }
+    // Each step is marked as it completes; a skipped one stays pending, so a retry resumes there and never replays
+    // a step that already ran (a second uninstall, a re-added hook).
+    if (skipped.length === before) {
+      s.undone = true;
+      saveManifest(m);
+    }
   }
+  if (skipped.length) throw new CliError("rollback_skipped_modified", `changed after migration, left as-is: ${skipped.join(", ")}; clear them and run review-loop migrate --rollback again to finish`);
   m.status = "rolled_back";
   saveManifest(m);
-  if (skipped.length) throw new CliError("rollback_skipped_modified", `changed after migration, left as-is: ${skipped.join(", ")}`);
   io.err("Rolled back. Restart Claude Code sessions to load the old hooks.\n");
   return { code: "ok" };
 }

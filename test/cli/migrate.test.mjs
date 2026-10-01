@@ -364,17 +364,34 @@ test("T-MIG-8c: a VALID manifest carrying paths never steers rollback; every pat
   assert.ok(fs.existsSync(path.join(c, "skills", "review-loop", "SKILL.md")), "the derived skill path was restored");
 });
 
-test("T-MIG-7 (dirs): a legacy folder re-created after migration is never overwritten; rollback reports it", async () => {
-  const { c } = authorShaped();
+test("T-MIG-7 (dirs): a legacy folder re-created after migration is never overwritten; rollback reports it, and a retry finishes", async () => {
+  const { c, claude } = authorShaped();
   assert.equal(await main(["migrate", "--yes", "--skip-doctor-gate"], io()), 0);
   fs.mkdirSync(path.join(c, "skills", "review-loop"), { recursive: true });
   fs.writeFileSync(path.join(c, "skills", "review-loop", "SKILL.md"), "new");
   const o = io();
   assert.equal(await main(["migrate", "--rollback", "--yes"], o), 1);
   assert.match(o.lines.join(""), /legacy skill \(.* exists again/);
+  assert.match(o.lines.join(""), /run review-loop migrate --rollback again to finish/);
   assert.equal(fs.readFileSync(path.join(c, "skills", "review-loop", "SKILL.md"), "utf8"), "new");
   const archive = fs.readdirSync(c).find((n) => n.startsWith("review-loop-legacy-"));
   assert.ok(fs.existsSync(path.join(c, archive, "skill", "SKILL.md")), "the archived copy is kept");
+  const m = JSON.parse(fs.readFileSync(manifestFile(), "utf8"));
+  assert.notEqual(m.status, "rolled_back", "a skipped restore keeps the record open");
+  assert.equal(m.steps.find((s) => s.resource === "skill").undone, undefined, "the skipped step stays pending");
+  const removals = () => claude.log().filter((a) => a.includes("uninstall") || (a.includes("marketplace") && a.includes("remove"))).length;
+  const removedOnce = removals();
+  // The user clears the conflict; the retry resumes at the skipped step and replays nothing that already ran.
+  fs.rmSync(path.join(c, "skills", "review-loop"), { recursive: true });
+  const r = io();
+  assert.equal(await main(["migrate", "--rollback", "--yes"], r), 0, r.lines.join(""));
+  assert.ok(fs.existsSync(path.join(c, "skills", "review-loop", "SKILL.md")), "the archived skill is restored on retry");
+  assert.notEqual(fs.readFileSync(path.join(c, "skills", "review-loop", "SKILL.md"), "utf8"), "new");
+  assert.equal(removals(), removedOnce, "no step that already ran is replayed");
+  assert.equal(JSON.parse(fs.readFileSync(manifestFile(), "utf8")).status, "rolled_back");
+  const again = io();
+  assert.equal(await main(["migrate", "--rollback", "--yes"], again), 0);
+  assert.match(again.lines.join(""), /Nothing to roll back/);
 });
 
 test("T-MIG-7 (half-done pin): a copy whose original is still in place is removed only when both hash to the record, and rollback says so", async () => {

@@ -84,7 +84,7 @@ export const CODES = Object.freeze({
   plugin_uninstall_failed: { category: "user_action", remedy: "run `claude plugin uninstall review-loop@review-loop` (and `claude plugin marketplace remove review-loop`) in a terminal to see why, then re-run `review-loop uninstall`" },
   doctor_failed: { category: "user_action", remedy: "fix each check marked FAIL (each prints its fix), then re-run" },
   settings_tmp_leftover: { category: "user_action", remedy: "delete the leftover review-loop temp file next to settings.json; settings.json itself is intact" },
-  rollback_skipped_modified: { category: "user_action", remedy: "the named file changed after migration; restore it by hand from the backup if you want" },
+  rollback_skipped_modified: { category: "user_action", remedy: "the named file changed after migration; clear it and run `review-loop migrate --rollback` again to finish, or restore it by hand from the backup" },
   migration_manifest_unreadable: { category: "user_action", remedy: "check that you own ~/.claude/state/review-loop/migration.json and can read it, then re-run" },
   settings_mixed_hook_group: { category: "user_action", remedy: "move the review-loop hook into its own hook group in settings.json, then re-run" },
   settings_legacy_hook_unrecognized: { category: "user_action", remedy: "the command must be exactly `node <your Claude config dir>/review-loop/review-gate-hook.mjs <mode>`, alone in its hook group: rewrite the named hook in that form or remove it by hand, then re-run" },
