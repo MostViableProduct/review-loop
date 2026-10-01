@@ -304,13 +304,14 @@ async function migrate(args, io, ctx) {
   };
 
   // Plugin first: if it fails, the old gate stays in force and settings are untouched.
-  const had = await installedPlugin(PLUGIN_ID);
+  // User scope only: a project- or local-scope install leaves every other project without the hooks.
+  const had = await installedPlugin(PLUGIN_ID, undefined, "user");
   // A plugin the user turned off is theirs to turn on: enabling it here is a change rollback could not undo.
   if (had && !had.enabled) throw new CliError("plugin_disabled", `the review-loop plugin is installed but disabled; enable it with \`claude plugin enable ${PLUGIN_ID}\`, then run migrate again; nothing was changed`);
   if (!had) {
     record({ resource: "plugin", action: "install", before: { absent: true }, after: {} });
     await installPlugin();
-    const now = await installedPlugin(PLUGIN_ID);
+    const now = await installedPlugin(PLUGIN_ID, undefined, "user");
     if (!now || !now.enabled) throw new CliError("plugin_install_failed", "the review-loop plugin is not listed as enabled after install; the old hooks were left in place");
   }
 

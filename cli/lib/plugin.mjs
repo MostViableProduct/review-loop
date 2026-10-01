@@ -10,30 +10,51 @@ const MARKETPLACE_GONE = /Marketplace '[^']*' not found/i;
 /** The plugin and the CLI are compatible when their major.minor match. @param {string} a @param {string} b */
 export const sameMinor = (a, b) => a.split(".").slice(0, 2).join(".") === b.split(".").slice(0, 2).join(".");
 
+/** @typedef {{ version: string | null, installPath: string | null, enabled: boolean, scope: string | null }} PluginEntry */
+
 /**
+ * Every listed install of `id`: one plugin can be installed at user, project and local scope at once.
  * @param {string} id @param {import("./run.mjs").Runner} [run]
- * @returns {Promise<{ version: string | null, installPath: string | null, enabled: boolean, scope: string | null } | null>}
+ * @returns {Promise<PluginEntry[]>}
  */
-export async function installedPlugin(id, run = runTool) {
+export async function pluginEntries(id, run = runTool) {
   const r = await run("claude", ["plugin", "list", "--json"]);
   requireRan(r, "claude plugin list");
   const v = lastJsonLine(r.stdout);
   const wrapped = /** @type {{ plugins?: unknown } | null} */ (v)?.plugins;
   const list = Array.isArray(v) ? v : Array.isArray(wrapped) ? wrapped : null;
   if (list === null) throw new CliError("claude_cli_unparseable", "could not read `claude plugin list --json`");
+  /** @type {PluginEntry[]} */
+  const out = [];
   for (const p of list) {
     if (typeof p !== "object" || p === null) continue;
     const e = /** @type {Record<string, unknown>} */ (p);
     if (e.id === id || e.name === id) {
-      return {
+      out.push({
         version: typeof e.version === "string" ? e.version : null,
         installPath: typeof e.installPath === "string" ? e.installPath : null,
         enabled: e.enabled !== false,
         scope: typeof e.scope === "string" ? e.scope : null
-      };
+      });
     }
   }
-  return null;
+  return out;
+}
+
+/**
+ * The install of `id` at `scope` (an entry reporting no scope counts: older Claude Code lists none), or with no scope
+ * asked, the user-scope one first, else the first listed.
+ * @param {string} id @param {import("./run.mjs").Runner} [run] @param {string | null} [scope]
+ * @returns {Promise<PluginEntry | null>}
+ */
+export async function installedPlugin(id, run = runTool, scope = null) {
+  return pickEntry(await pluginEntries(id, run), scope);
+}
+
+/** @param {PluginEntry[]} entries @param {string | null} [scope] @returns {PluginEntry | null} */
+export function pickEntry(entries, scope = null) {
+  const at = entries.find((e) => e.scope === (scope ?? "user")) ?? entries.find((e) => e.scope === null);
+  return at ?? (scope === null ? entries[0] ?? null : null);
 }
 
 export async function installPlugin() {

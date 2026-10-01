@@ -429,6 +429,10 @@ test("[fix-1] plugin_installed at a non-user scope gives the exact reinstall com
   assert.deepEqual([r.status, r.fix], ["fail", "claude plugin install review-loop@review-loop --scope user"]);
   fakeClaude([CODEX_PLUGIN]);
   assert.equal((await check("plugin_installed").run(ctx())).fix, "review-loop setup");
+  // A project install listed before the user one: the user-scope entry is the one checked.
+  fakeClaude([CODEX_PLUGIN, reviewLoop({ scope: "project", enabled: false }), reviewLoop({ scope: "user" })]);
+  assert.equal((await check("plugin_installed").run(ctx())).status, "pass");
+  fakeClaude([CODEX_PLUGIN, reviewLoop()]);
 });
 
 test("[fix-1] a linked settings-backups dir warns (state_symlink_rejected) and is never read through", async () => {

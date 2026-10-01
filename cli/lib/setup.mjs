@@ -91,13 +91,14 @@ export async function run(args, io, ctx) {
   done.push("preset", "model/effort");
 
   // 4 plugin
-  const existing = await installedPlugin(PLUGIN_ID);
+  // User scope only: a project- or local-scope install leaves every other project without the hooks.
+  const existing = await installedPlugin(PLUGIN_ID, undefined, "user");
   if (!existing || !existing.enabled) {
     await confirm("install the review-loop plugin into Claude Code (user scope)", "the plugin carries the hooks that enforce review");
     await installPlugin();
   }
-  const installed = await installedPlugin(PLUGIN_ID);
-  if (!installed) throw new CliError("plugin_install_failed", "the plugin is not listed after install");
+  const installed = await installedPlugin(PLUGIN_ID, undefined, "user");
+  if (!installed || !installed.enabled) throw new CliError("plugin_install_failed", "the plugin is not listed as enabled at user scope after install");
   if (installed.version && !sameMinor(installed.version, PACKAGE_VERSION)) io.err(`Note: plugin ${installed.version} vs CLI ${PACKAGE_VERSION} — run \`review-loop update\`\n`);
   done.push("plugin");
 

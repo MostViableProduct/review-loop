@@ -7,7 +7,7 @@ import { mark } from "./io.mjs";
 import { remedyFor } from "../../plugin/engine/lib/codes.mjs";
 import { PREFLIGHT } from "./preflight.mjs";
 import { runTool } from "./run.mjs";
-import { installedPlugin, PLUGIN_ID, sameMinor } from "./plugin.mjs";
+import { installedPlugin, pickEntry, pluginEntries, PLUGIN_ID, sameMinor } from "./plugin.mjs";
 import { legacyHookCommands, leftoverTemps, missingAskRules, modifiedBackups, readSettings } from "./settings.mjs";
 import { assertConfigOwner } from "./configguard.mjs";
 import { LIVE_REMEDY, liveCheck } from "./livecheck.mjs";
@@ -156,12 +156,15 @@ export const DOCTOR_CHECKS = [
   { id: "codex_plugin", run: fromPreflight("codex_plugin", { code: "preflight_failed" }) },
   { id: "gh", run: fromPreflight("gh", GH) },
   { id: "plugin_installed", async run(ctx) {
-    let p;
-    try { p = await installedPlugin(PLUGIN_ID, ctx.tool); } catch (err) { return fromThrown(err); }
-    if (!p) return fail("plugin_not_installed", "review-loop setup", { note: "not installed" });
+    let entries;
+    try { entries = await pluginEntries(PLUGIN_ID, ctx.tool); } catch (err) { return fromThrown(err); }
+    const p = pickEntry(entries, "user");
+    if (!p) {
+      const other = entries[0];
+      if (!other) return fail("plugin_not_installed", "review-loop setup", { note: "not installed" });
+      return fail("plugin_not_installed", `claude plugin install ${PLUGIN_ID} --scope user`, { note: `installed at ${other.scope} scope only, not user` });
+    }
     if (!p.enabled) return fail("plugin_not_installed", "review-loop setup", { note: "installed but disabled" });
-    // setup skips an already-enabled plugin, so it would never move this one to user scope.
-    if ((p.scope ?? "user") !== "user") return fail("plugin_not_installed", `claude plugin install ${PLUGIN_ID} --scope user`, { note: `installed at ${p.scope} scope, not user` });
     return pass(p.version);
   } },
   { id: "version_skew", async run(ctx) {

@@ -113,6 +113,29 @@ test("T-SET-5b: a missing plugin is installed once; the fake lists it only after
   assert.deepEqual(installs(s)[0].slice(0, 4), ["plugin", "install", "review-loop@review-loop", "--scope"]);
 });
 
+test("T-SET-5c: an enabled plugin at project scope only is not enough: setup installs it at user scope", async () => {
+  const s = sandbox();
+  const plugin = { id: "review-loop@review-loop", enabled: true, version: "0.1.0", installPath: path.join(process.cwd(), "plugin") };
+  const base = [{ id: "codex@openai-codex", enabled: true, scope: "user", version: "1.0.6" }, { ...plugin, scope: "project" }];
+  s.claude.set({
+    "--version": { stdout: "2.1.284 (Claude Code)\n" },
+    "plugin list --json": [{ stdout: JSON.stringify(base) }, { stdout: JSON.stringify(base) }, { stdout: JSON.stringify([...base, { ...plugin, scope: "user" }]) }],
+    "*": { stdout: "{}\n" }
+  });
+  assert.equal(await main(["setup", "--yes", "--skip-live-check"], io([])), 0);
+  assert.equal(installs(s).length, 1, "the project-scope install did not count");
+  assert.deepEqual(installs(s)[0].slice(0, 5), ["plugin", "install", "review-loop@review-loop", "--scope", "user"]);
+});
+
+test("T-SET-5d: setup fails loudly when the user-scope install never appears", async () => {
+  const s = sandbox();
+  const base = [{ id: "codex@openai-codex", enabled: true, scope: "user", version: "1.0.6" }, { id: "review-loop@review-loop", enabled: true, scope: "project", version: "0.1.0" }];
+  s.claude.set({ "--version": { stdout: "2.1.284 (Claude Code)\n" }, "plugin list --json": { stdout: JSON.stringify(base) }, "*": { stdout: "{}\n" } });
+  const o = io([]);
+  assert.equal(await main(["setup", "--yes", "--skip-live-check"], o), 1);
+  assert.match(o.lines.join(""), /plugin_install_failed/);
+});
+
 test("T-SET-7: --skip-live-check → setup_complete_unverified, exit 0, summary says not verified", async () => {
   sandbox({ pluginInstalled: true });
   const o = io([]);
