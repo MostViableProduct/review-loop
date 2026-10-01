@@ -128,6 +128,21 @@ test("R-P7a: headRefOid is re-checked immediately before allowing", async () => 
   assert.equal((await call(`${G} pr merge 5 --repo o/r --match-head-commit ${A}`)).code, "pr_merge_context_unverifiable", "re-check unreadable");
 });
 
+test("the base tip is re-read immediately before allowing: a base moved after the merge-base check denies with retry", async () => {
+  reviewed("main", A, base);
+  const REF = `api repos/o/r/git/ref/heads/main --jq .object.sha`;
+  const gh = makeFakeBin(bin, "gh", { [VIEW]: [pr("main"), pr("main")], [REF]: [{ stdout: `${base}\n` }, { stdout: `${base}\n` }] });
+  assert.equal((await call(`${G} pr merge 5 --repo o/r --match-head-commit ${A}`)).decision, "allow", "base unchanged");
+  assert.equal(gh.log().filter((a) => a.join(" ") === REF).length, 2, "the base tip is read twice: merge-base check, then re-check");
+  gh.set({ [VIEW]: [pr("main"), pr("main")], [REF]: [{ stdout: `${base}\n` }, { stdout: `${B}\n` }] });
+  const moved = await call(`${G} pr merge 5 --repo o/r --match-head-commit ${A}`);
+  assert.equal(moved.decision, "deny");
+  assert.equal(moved.code, "pr_merge_context_unverifiable");
+  assert.match(moved.message, /base main moved during the gate's check; retry the merge/);
+  gh.set({ [VIEW]: [pr("main"), pr("main")], [REF]: [{ stdout: `${base}\n` }, { code: 1, stderr: "HTTP 502" }] });
+  assert.equal((await call(`${G} pr merge 5 --repo o/r --match-head-commit ${A}`)).code, "pr_merge_context_unverifiable", "base re-read unreadable");
+});
+
 test("T-PR-7 (c) + T-PR-9: same head SHA, different base (retarget) → deny", async () => {
   reviewed("main", A, base);
   const gh = makeFakeBin(bin, "gh", { [VIEW]: pr("main"), ...baseTip("main") });

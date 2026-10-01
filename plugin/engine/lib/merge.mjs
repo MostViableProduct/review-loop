@@ -195,6 +195,10 @@ async function bound(root, target, deadlineAt) {
   if (again.baseRefName !== pr.baseRefName || again.headRepo !== pr.headRepo || again.headRefName !== pr.headRefName) {
     return deny("pr_merge_unbound", `PR #${n} was retargeted during the gate's check; run the review-loop for it against its new base`);
   }
+  // The review is scoped to head:merge-base, so a base force-pushed after the merge-base check voids the check above.
+  // Any move denies: a retry recomputes the merge-base and passes again if the reviewed comparison is unchanged.
+  const baseAgain = await ghBranchSha(repo, pr.baseRefName, root, { notFound: UNVERIFIABLE, failed: UNVERIFIABLE }, deadlineAt);
+  if (baseAgain !== baseTip) return deny(UNVERIFIABLE, `PR #${n}'s base ${pr.baseRefName} moved during the gate's check; retry the merge`);
   const note = target.admin ? `⚠ review-loop: --admin bypasses branch protection, including a required review-loop/<base> check; PR #${n} is merged on the gate's check of ${short(bind)} only` : "";
   return { decision: "allow", code: "reviewed", message: note, gate: "merge" };
 }
