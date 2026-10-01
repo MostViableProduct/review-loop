@@ -445,9 +445,9 @@ async function rollback(io, ctx) {
   for (const s of [...m.steps].reverse()) {
     if (s.undone === true) continue;
     const before = skipped.length;
-    if (s.resource === "engine_dir") moveBack(P.engineArchived, P.engine, "legacy engine folder", skipped);
+    if (s.resource === "engine_dir") moveBack(P.engineArchived, P.engine, "review-gate-hook.mjs", "legacy engine folder", skipped);
     if (s.resource === "claude_md") undoClaudeMd(s, P.claudeMd, skipped);
-    if (s.resource === "skill") moveBack(P.skillArchived, P.skill, "legacy skill", skipped);
+    if (s.resource === "skill") moveBack(P.skillArchived, P.skill, "SKILL.md", "legacy skill", skipped);
     if (s.resource === "config") undoConfig(s, skipped);
     if (s.resource === "pin") undoPin(s, P.pin, P.legacyPin, io, skipped);
     if (s.resource === "settings") await undoSettings(s, io, ctx);
@@ -488,9 +488,19 @@ function undoPin(s, pin, legacyPin, io, skipped) {
   fs.renameSync(pin, legacyPin);
 }
 
-/** Idempotent: nothing archived is nothing to do; something already back in place is never overwritten. @param {string} from @param {string} to @param {string} what @param {string[]} skipped */
-function moveBack(from, to, what, skipped) {
-  if (!present(from)) return;
+/**
+ * Idempotent: a folder already back in place is never overwritten. Back in place means `marker` is inside it, not
+ * merely that the folder exists: undoing the pin re-creates the engine folder holding only the pin.
+ * @param {string} from @param {string} to @param {string} marker a file only the real folder holds
+ * @param {string} what @param {string[]} skipped
+ */
+function moveBack(from, to, marker, what, skipped) {
+  if (!present(from)) {
+    // Archive absent, original in place: an interrupted move, nothing to undo. Original missing too: nothing to restore
+    // from, so the step stays pending and rollback never claims it done.
+    if (!present(path.join(to, marker))) skipped.push(`${what} (its archived copy ${from} is gone; put the folder back at ${to}, from a backup, to finish)`);
+    return;
+  }
   if (present(to)) { skipped.push(`${what} (${to} exists again; the archived copy stays in ${from})`); return; }
   fs.mkdirSync(path.dirname(to), { recursive: true });
   fs.renameSync(from, to);

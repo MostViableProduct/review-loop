@@ -489,6 +489,30 @@ test("a run stopped after archiving the engine but before marking its record don
   assert.match(again.lines.join(""), /Nothing to migrate/, "a finished record is not finished twice");
 });
 
+test("rollback with an archived folder deleted never claims success; putting the folder back lets a retry finish", async () => {
+  const { c } = authorShaped();
+  assert.equal(await main(["migrate", "--yes", "--skip-doctor-gate", "--force-engine-move"], io()), 0);
+  const archived = path.join(c, `review-loop-legacy-${JSON.parse(fs.readFileSync(manifestFile(), "utf8")).date}`, "engine");
+  assert.ok(fs.existsSync(archived));
+  fs.rmSync(archived, { recursive: true });
+  const o = io();
+  assert.equal(await main(["migrate", "--rollback", "--yes"], o), 1);
+  assert.match(o.lines.join(""), /rollback_skipped_modified/);
+  assert.match(o.lines.join(""), /legacy engine folder \(its archived copy .* is gone/);
+  assert.doesNotMatch(o.lines.join(""), /Rolled back/);
+  const m = JSON.parse(fs.readFileSync(manifestFile(), "utf8"));
+  assert.notEqual(m.status, "rolled_back");
+  assert.notEqual(m.steps.find((s) => s.resource === "engine_dir").undone, true, "the engine step stays pending");
+  // Undoing the pin re-created the engine folder holding only the pin: that is not the engine coming back.
+  assert.ok(fs.existsSync(path.join(c, "review-loop", "plugin-pin.json")));
+  const retry = io();
+  assert.equal(await main(["migrate", "--rollback", "--yes"], retry), 1, "a folder holding only the pin does not finish the step");
+  assert.match(retry.lines.join(""), /legacy engine folder \(its archived copy .* is gone/);
+  fs.writeFileSync(path.join(c, "review-loop", "review-gate-hook.mjs"), "// restored from a backup");
+  assert.equal(await main(["migrate", "--rollback", "--yes"], io()), 0);
+  assert.equal(JSON.parse(fs.readFileSync(manifestFile(), "utf8")).status, "rolled_back");
+});
+
 test("T-MIG-14: a record that could overflow MAX_STEPS is refused before any change", async () => {
   const { c, claude } = authorShaped();
   const m = { v: 1, status: "in_progress", date: localDate(), steps: Array.from({ length: 60 }, () => ({ resource: "engine_dir", action: "move", before: {}, after: {} })) };
