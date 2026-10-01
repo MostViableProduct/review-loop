@@ -6,7 +6,7 @@ import { snapshotSession, pendingForSession, detectPlansDir, identityForTouchedP
 import { newRecord, writeRecord, writeMarker, identityKey, acquireLock } from "../../plugin/engine/lib/state.mjs";
 import { implFingerprint } from "../../plugin/engine/lib/git.mjs";
 import { g, makeRepo, commitFile, writeFile, tmpDir } from "./helpers.mjs";
-import { readArtifact } from "../../plugin/engine/lib/git.mjs";
+import { readArtifact, assertPlansDir } from "../../plugin/engine/lib/git.mjs";
 
 beforeEach(() => {
   process.env.REVIEW_LOOP_STATE_DIR = tmpDir("rl-state-");
@@ -275,6 +275,26 @@ test("plans dir that is itself a symlink (or not a directory) fails with plans_d
   assert.throws(() => detectPlansDir("/proj", file), { code: "plans_dir_untrusted" });
   assert.deepEqual(detectPlansDir("/proj", path.join(tmpDir(), "absent")), []);
   assert.equal(detectPlansDir("/proj", real).length, 1, "control: the real directory is read");
+});
+
+test("a symlinked ~/.claude (dotfiles) is read when every link and the plans folder are yours; another user's link is refused", () => {
+  const base = tmpDir("rl-dot-");
+  const real = path.join(base, "dotfiles", "claude");
+  fs.mkdirSync(path.join(real, "plans"), { recursive: true });
+  fs.writeFileSync(path.join(real, "plans", "a.md"), "plan a");
+  fs.mkdirSync(path.join(base, "home"));
+  fs.symlinkSync(real, path.join(base, "home", ".claude"));
+  const plans = path.join(base, "home", ".claude", "plans");
+  assert.equal(detectPlansDir("/proj", plans).length, 1, "your own link is followed");
+  // A second hop: the dotfiles folder itself reached through a link.
+  fs.symlinkSync(path.join(base, "dotfiles"), path.join(base, "dots"));
+  fs.rmSync(path.join(base, "home", ".claude"));
+  fs.symlinkSync(path.join(base, "dots", "claude"), path.join(base, "home", ".claude"));
+  assert.equal(assertPlansDir(plans), true, "every hop is yours");
+  const me = process.getuid();
+  // As another user would see it: the same links are not theirs.
+  assert.throws(() => assertPlansDir(plans, me + 1), (e) => e.code === "plans_dir_untrusted" && /symlink owned by another user/.test(e.message));
+  assert.throws(() => assertPlansDir(path.join(real, "plans"), me + 1), (e) => e.code === "plans_dir_untrusted" && /belongs to another user/.test(e.message));
 });
 
 test("plans dir over the scan cap fails with plans_scan_limit instead of a partial list", () => {

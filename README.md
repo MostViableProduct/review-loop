@@ -205,7 +205,7 @@ Run `review-loop doctor`. Each failing line names a code and the fix.
 | `output_too_large` | 4 | run `review-loop doctor`; if it persists, report a bug |  |
 | `override_unverifiable` | 1 | make the repo readable (`git status` works), then re-run the override |  |
 | `pin_exists` | 1 | a pin already exists; run the review-loop:review-loop skill to re-pin deliberately |  |
-| `plans_dir_untrusted` | 1 | replace ~/.claude/plans with a real directory (not a symlink) |  |
+| `plans_dir_untrusted` | 1 | make ~/.claude/plans a real directory you own; any symlink above it (a dotfiles ~/.claude) must be yours |  |
 | `plans_scan_limit` | 1 | prune old files under ~/.claude/plans |  |
 | `plugin_disabled` | 1 | enable it with `claude plugin enable review-loop@review-loop`, then run migrate again |  |
 | `plugin_install_failed` | 1 | run `review-loop doctor` |  |

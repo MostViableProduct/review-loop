@@ -33,15 +33,31 @@ export function readArtifact(abs, projectRoot) {
 
 /**
  * ~/.claude/plans is a trust anchor (safeReadFile checks only below it), so the anchor itself must be a real directory:
- * a link there would hand any outside Markdown to Codex as a plan.
+ * a link there would hand any outside Markdown to Codex as a plan. A folder above it may be a link (a dotfiles-managed
+ * ~/.claude), but only one of yours or the system's, through every hop, and the folder reached must be yours: a link
+ * someone else owns would point the anchor wherever they chose (author's decision, round 20).
  * @param {string} [dir]
+ * @param {number} [uid] the owner to trust besides root: this process's user
  * @returns {boolean} false when it is absent
  */
-export function assertPlansDir(dir = CLAUDE_PLANS_DIR) {
+export function assertPlansDir(dir = CLAUDE_PLANS_DIR, uid = typeof process.getuid === "function" ? process.getuid() : -1) {
   const st = fs.lstatSync(dir, { throwIfNoEntry: false });
   if (st === undefined) return false;
   if (st.isSymbolicLink() || !st.isDirectory()) throw new ReviewLoopError("plans_dir_untrusted", "~/.claude/plans is a symlink or not a directory; its plans are not read");
+  assertOwnLinks(path.dirname(path.resolve(dir)), uid, 0);
+  if (st.uid !== uid && st.uid !== 0) throw new ReviewLoopError("plans_dir_untrusted", "the plans folder belongs to another user; its plans are not read");
   return true;
+}
+
+/** Every symlink on `p`'s path, and on each link's target path, is owned by `uid` or root. @param {string} p @param {number} uid @param {number} depth */
+function assertOwnLinks(p, uid, depth) {
+  if (depth > 40) throw new ReviewLoopError("plans_dir_untrusted", "the path to the plans folder has too many symlinks; its plans are not read");
+  for (let d = path.resolve(p); path.dirname(d) !== d; d = path.dirname(d)) {
+    const a = fs.lstatSync(d, { throwIfNoEntry: false });
+    if (!a?.isSymbolicLink()) continue;
+    if (a.uid !== uid && a.uid !== 0) throw new ReviewLoopError("plans_dir_untrusted", `${d}, on the path to the plans folder, is a symlink owned by another user; its plans are not read`);
+    assertOwnLinks(path.resolve(path.dirname(d), fs.readlinkSync(d)), uid, depth + 1);
+  }
 }
 
 /**

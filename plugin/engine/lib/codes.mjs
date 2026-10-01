@@ -153,7 +153,7 @@ export const CODES = Object.freeze({
   artifact_too_large: { category: "user_action", remedy: "split the artifact; it is over the size limit" },
   untracked_too_large: { category: "user_action", remedy: "commit or remove the oversized untracked file" },
   plans_scan_limit: { category: "user_action", remedy: "prune old files under ~/.claude/plans" },
-  plans_dir_untrusted: { category: "user_action", remedy: "replace ~/.claude/plans with a real directory (not a symlink)" },
+  plans_dir_untrusted: { category: "user_action", remedy: "make ~/.claude/plans a real directory you own; any symlink above it (a dotfiles ~/.claude) must be yours" },
   shallow_file_missing: { category: "user_action", remedy: FETCH_FULL },
   shallow_file_invalid: { category: "user_action", remedy: FETCH_FULL },
   shallow_file_symlink: { category: "user_action", remedy: "replace .git/shallow with a regular file, or run `git fetch --unshallow`" },
