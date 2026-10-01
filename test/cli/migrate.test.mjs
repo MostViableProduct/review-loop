@@ -439,6 +439,19 @@ test("T-MIG-13: a second legacy install after a finished migration is refused be
   assert.ok(fs.existsSync(path.join(c, "skills", "review-loop", "SKILL.md")));
 });
 
+test("an installed but disabled plugin is refused before any change: migrate never enables what rollback could not disable", async () => {
+  const { c, claude } = authorShaped();
+  claude.set({ "plugin list --json": { stdout: JSON.stringify([{ id: "review-loop@review-loop", enabled: false, version: "0.1.0", installPath: "/x" }]) } });
+  const settingsBefore = fs.readFileSync(path.join(c, "settings.json"));
+  const o = io();
+  assert.equal(await main(["migrate", "--yes", "--skip-doctor-gate"], o), 1);
+  assert.match(o.lines.join(""), /plugin_disabled/);
+  assert.match(o.lines.join(""), /claude plugin enable review-loop@review-loop/);
+  assert.deepEqual(installCalls(claude), [], "no install or enable call");
+  assert.deepEqual(fs.readFileSync(path.join(c, "settings.json")), settingsBefore, "settings untouched");
+  assert.equal(fs.existsSync(manifestFile()), false, "no migration record written");
+});
+
 test("T-MIG-14: a record that could overflow MAX_STEPS is refused before any change", async () => {
   const { c, claude } = authorShaped();
   const m = { v: 1, status: "in_progress", date: localDate(), steps: Array.from({ length: 60 }, () => ({ resource: "engine_dir", action: "move", before: {}, after: {} })) };

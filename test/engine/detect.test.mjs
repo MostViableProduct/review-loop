@@ -264,6 +264,19 @@ test("plans dir: new top-level plan is detected; symlinks fingerprint as an erro
   assert.match(list.find((a) => a.identity.path.endsWith("b.md"))?.fingerprint ?? "", /^error:artifact_symlink_rejected:[0-9a-f]{16}$/);
 });
 
+test("plans dir that is itself a symlink (or not a directory) fails with plans_dir_untrusted; absent is an empty list", () => {
+  const real = tmpDir("rl-plans-");
+  fs.writeFileSync(path.join(real, "a.md"), "plan a");
+  const link = path.join(tmpDir(), "plans");
+  fs.symlinkSync(real, link);
+  assert.throws(() => detectPlansDir("/proj", link), { code: "plans_dir_untrusted" });
+  const file = path.join(tmpDir(), "plans");
+  fs.writeFileSync(file, "x");
+  assert.throws(() => detectPlansDir("/proj", file), { code: "plans_dir_untrusted" });
+  assert.deepEqual(detectPlansDir("/proj", path.join(tmpDir(), "absent")), []);
+  assert.equal(detectPlansDir("/proj", real).length, 1, "control: the real directory is read");
+});
+
 test("plans dir over the scan cap fails with plans_scan_limit instead of a partial list", () => {
   const dir = tmpDir("rl-plans-");
   for (let i = 0; i < 2000; i++) fs.writeFileSync(path.join(dir, `p${i}.md`), "");

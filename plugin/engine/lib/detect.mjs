@@ -3,7 +3,7 @@ import path from "node:path";
 import { ReviewLoopError, errorCode, diagnosticCode } from "./errors.mjs";
 import { sha256hex } from "./fsutil.mjs";
 import { classifyRepoPath, classifyAbsolutePath, CLAUDE_PLANS_DIR } from "./classify.mjs";
-import { repoRoot, statusEntries, implFingerprint, objectFormat, renameSource, isDeletion, readArtifact } from "./git.mjs";
+import { repoRoot, statusEntries, implFingerprint, objectFormat, renameSource, isDeletion, readArtifact, assertPlansDir } from "./git.mjs";
 import {
   identityKey,
   identityLabel,
@@ -123,7 +123,7 @@ export async function detectRepoArtifacts(root) {
  * @returns {Artifact[]}
  */
 export function detectPlansDir(projectRoot, dir = CLAUDE_PLANS_DIR) {
-  if (!fs.existsSync(dir)) return [];
+  if (!assertPlansDir(dir)) return [];
   const names = fs.readdirSync(dir).filter((n) => n.toLowerCase().endsWith(".md"));
   if (names.length > MAX_PLAN_FILES) {
     throw new ReviewLoopError("plans_scan_limit", `${dir} holds ${names.length} plans (limit ${MAX_PLAN_FILES}); archive old plans`);

@@ -683,6 +683,21 @@ test("plans dir over the scan cap: Stop blocks with plans_scan_limit; session st
   assert.ok(eventLines(events).some((l) => l.event === "hook.error" && l.data.stage === "snapshot_degraded" && l.code === "plans_scan_limit"));
 });
 
+test("a symlinked ~/.claude/plans is never read: Stop blocks with plans_dir_untrusted and lists none of its Markdown", () => {
+  const home = tmpDir("rl-home-");
+  const outside = tmpDir("rl-outside-");
+  fs.writeFileSync(path.join(outside, "private-notes.md"), "not a plan");
+  fs.mkdirSync(path.join(home, ".claude"), { recursive: true });
+  fs.symlinkSync(outside, path.join(home, ".claude", "plans"));
+  const repo = specRepo();
+  const S = { session_id: "e2e-session", cwd: repo, stop_hook_active: false };
+  hookRaw("session", JSON.stringify(S), { HOME: home });
+  const r = hookRaw("stop", JSON.stringify(S), { HOME: home });
+  assert.equal(r.out?.decision, "block", JSON.stringify(r.out));
+  assert.match(r.out.reason, /review status of .*\.claude\/plans \[op_error: plans_dir_untrusted\]/);
+  assert.doesNotMatch(r.out.reason, /private-notes/, "the linked directory's Markdown is never listed as a plan");
+});
+
 test("git status failure at session start degrades to over-review: pre-existing changes are treated as changed", () => {
   const repo = specRepo();
   writeFile(repo, "docs/specs/preexisting.md", "user's uncommitted spec");

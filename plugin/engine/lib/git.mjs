@@ -27,7 +27,21 @@ export function readArtifact(abs, projectRoot) {
   const inside = (/** @type {string} */ r) => abs.startsWith(r + path.sep);
   // Outside a project and the plans dir nothing is a trusted anchor, so every ancestor from / is lstat'ed.
   const within = projectRoot && inside(projectRoot) ? projectRoot : inside(CLAUDE_PLANS_DIR) ? CLAUDE_PLANS_DIR : path.parse(abs).root;
+  if (within === CLAUDE_PLANS_DIR) assertPlansDir();
   return safeReadFile(abs, LIMITS.artifactBytes, {}, { within });
+}
+
+/**
+ * ~/.claude/plans is a trust anchor (safeReadFile checks only below it), so the anchor itself must be a real directory:
+ * a link there would hand any outside Markdown to Codex as a plan.
+ * @param {string} [dir]
+ * @returns {boolean} false when it is absent
+ */
+export function assertPlansDir(dir = CLAUDE_PLANS_DIR) {
+  const st = fs.lstatSync(dir, { throwIfNoEntry: false });
+  if (st === undefined) return false;
+  if (st.isSymbolicLink() || !st.isDirectory()) throw new ReviewLoopError("plans_dir_untrusted", "~/.claude/plans is a symlink or not a directory; its plans are not read");
+  return true;
 }
 
 /**
