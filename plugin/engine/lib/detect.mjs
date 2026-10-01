@@ -271,14 +271,11 @@ async function scanSession(session, cwd) {
   for (const { baseRoot, list } of scopes) {
     const baseline = readBaseline(session, baseRoot);
     if (!baseline) {
-      if (!readBaseline(session, START_OK)) {
-        // SessionStart never completed: this repo's current state may already include this session's edits.
-        writeBaseline(session, baseRoot, {}, "session_start_failed");
-        candidates.push(...list);
-        continue;
-      }
-      // First sight of this repo in the session (cwd changed): snapshot now; file-tool edits are still caught by markers.
-      writeBaseline(session, baseRoot, toMap(list));
+      // No snapshot from this session's start: the repo's current state may already include this session's edits —
+      // SessionStart never completed, or the session reached the repo later (cwd changed) and edited it through the
+      // shell, which leaves no file-tool marker. Over-review rather than adopt those edits as the baseline.
+      writeBaseline(session, baseRoot, {}, readBaseline(session, START_OK) ? "first_seen_mid_session" : "session_start_failed");
+      candidates.push(...list);
       continue;
     }
     for (const a of list) if (baseline.artifacts[a.key] !== a.fingerprint) candidates.push(a);

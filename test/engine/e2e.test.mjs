@@ -571,10 +571,19 @@ test("no completed SessionStart (crashed, timed out, never ran) → Stop over-re
   assert.match(r.out.reason, /impl /);
 });
 
-test("control: after a completed SessionStart, a repo first seen at Stop (cwd changed) is snapshotted, not flagged", () => {
+test("a repo first seen at Stop (cwd changed) after a completed SessionStart over-reviews: a Bash edit there is flagged, never adopted as the baseline", () => {
   const home = specRepo();
   const other = specRepo();
-  writeFile(other, "src/a.ts", "pre-existing dirt in another repo");
+  hook("session", { session_id: "e2e-session", cwd: home });
+  writeFile(other, "src/a.ts", "edited by Bash in a repo the session reached later");
+  const r = hook("stop", { session_id: "e2e-session", cwd: other, stop_hook_active: false });
+  assert.equal(r.out?.decision, "block", JSON.stringify(r.out));
+  assert.match(r.out.reason, /impl /);
+});
+
+test("control: a repo first seen at Stop with no changed artifact is not flagged", () => {
+  const home = specRepo();
+  const other = specRepo();
   hook("session", { session_id: "e2e-session", cwd: home });
   const r = hook("stop", { session_id: "e2e-session", cwd: other, stop_hook_active: false });
   assert.equal(r.out?.decision, undefined, JSON.stringify(r.out));
