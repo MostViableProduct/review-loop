@@ -230,8 +230,23 @@ test("T-PR-7 (d–i): graphql, repeated -X, no gh, MCP field rules, Advisory", a
   assert.match(adv.message, /Advisory/);
 });
 
-test("the shipped MCP head field is the P7 fixture's", () => {
-  assert.equal(MCP_HEAD_FIELD, JSON.parse(fs.readFileSync(FIXTURE, "utf8")).headField);
+test("the shipped MCP head field is the one the real merge_pull_request schema declares (fixture taken from the server source)", () => {
+  const f = JSON.parse(fs.readFileSync(FIXTURE, "utf8"));
+  assert.match(f.source, /^github\/github-mcp-server@[0-9a-f]{40} /, "the fixture names the exact server commit it was taken from");
+  assert.equal(f.tool, "merge_pull_request");
+  assert.equal(MCP_HEAD_FIELD, f.headField);
+  assert.deepEqual(f.inputSchema.properties[MCP_HEAD_FIELD], { type: "string" }, "the head field is a declared string input");
+  assert.ok(!f.inputSchema.required.includes(MCP_HEAD_FIELD), "optional in the tool, so the gate (not the tool) must demand it");
+  for (const k of ["owner", "repo", "pullNumber"]) assert.ok(f.inputSchema.required.includes(k), `the gate reads ${k}, a required input`);
+});
+
+test("production-shape MCP merge input (the schema's own fields) is gated: bound allows, unbound denies", async () => {
+  const f = JSON.parse(fs.readFileSync(FIXTURE, "utf8"));
+  ok();
+  const input = { owner: "o", repo: "r", pullNumber: 5, merge_method: "squash", commit_title: "t" };
+  assert.deepEqual(Object.keys(input).filter((k) => !(k in f.inputSchema.properties)), [], "only fields the real tool declares");
+  assert.equal((await mcp({ ...input, [f.headField]: A })).decision, "allow");
+  assert.equal((await mcp(input)).code, "pr_merge_unbound", "the tool's head field is optional; the gate still demands it");
 });
 
 test("T-PR-10 (merge half): Advisory never denies, whatever the failure", async () => {
