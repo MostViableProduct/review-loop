@@ -107,6 +107,26 @@ test("§8.4: a custom events.path in the user's own directory keeps that directo
   assert.equal(JSON.parse(fs.readFileSync(f, "utf8").trim()).event, "cli.exit");
 });
 
+test("§8.4: an existing events log readable by others is narrowed to 0600 before the next line is written", () => {
+  const home = env();
+  const logs = path.join(home, "logs");
+  fs.mkdirSync(logs, { mode: 0o700 });
+  const f = path.join(logs, "rl.jsonl");
+  fs.writeFileSync(f, "", { mode: 0o644 });
+  fs.chmodSync(f, 0o644);
+  fs.writeFileSync(process.env.REVIEW_LOOP_CONFIG, JSON.stringify({ version: 1, preset: "default", codex: { model: null, effort: null }, rubricPath: null, events: { path: f } }));
+  assert.equal(emitEvent(CLI_EXIT_EVENT), true);
+  assert.equal(fs.statSync(f).mode & 0o777, 0o600);
+  assert.equal(JSON.parse(fs.readFileSync(f, "utf8").trim()).event, "cli.exit");
+  // The default log too: one left at 0644 by an older version is narrowed on the next write.
+  fs.writeFileSync(process.env.REVIEW_LOOP_CONFIG, JSON.stringify({ version: 1, preset: "default", codex: { model: null, effort: null }, rubricPath: null, events: { path: null } }));
+  assert.equal(emitEvent(CLI_EXIT_EVENT), true);
+  const def = eventsPath();
+  fs.chmodSync(def, 0o644);
+  assert.equal(emitEvent(CLI_EXIT_EVENT), true);
+  assert.equal(fs.statSync(def).mode & 0o777, 0o600);
+});
+
 /**
  * Run emitEvent in a fresh process, so the once-per-process warning state starts clean.
  * @param {string} home @param {number} times

@@ -177,6 +177,10 @@ export function writeEvent(obj) {
     // O_NOFOLLOW: a symlink swapped in after the lstat fails the open (ELOOP) instead of redirecting the append.
     const fd = fs.openSync(file, fs.constants.O_WRONLY | fs.constants.O_APPEND | fs.constants.O_CREAT | fs.constants.O_NOFOLLOW, 0o600);
     try {
+      // The open's 0o600 applies only to a file it creates: an existing log (configured, or older) keeps its mode.
+      const fst = fs.fstatSync(fd);
+      if (!fst.isFile()) throw new Error("not_regular");
+      if ((fst.mode & 0o077) !== 0) fs.fchmodSync(fd, 0o600);
       fs.writeSync(fd, line);
     } finally {
       fs.closeSync(fd);
