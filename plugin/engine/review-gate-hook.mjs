@@ -260,7 +260,8 @@ async function main() {
   if (MODE === "stop") {
     const { pendingForSession } = await import("./lib/detect.mjs");
     const { writePendingSummary } = await import("./lib/state.mjs");
-    const { items, killSwitchRoot, killSwitchIgnored } = await pendingForSession(session, cwd);
+    const seamBudget = process.env.REVIEW_LOOP_TEST_SEAMS === "1" ? Number(process.env.REVIEW_LOOP_TEST_STOP_BUDGET_MS) : NaN;
+    const { items, killSwitchRoot, killSwitchIgnored } = await pendingForSession(session, cwd, Number.isFinite(seamBudget) && seamBudget > 0 ? seamBudget : undefined);
     try {
       writePendingSummary(
         session,

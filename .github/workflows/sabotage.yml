@@ -9,6 +9,8 @@ on:
     branches: [main]
     paths:
       - "plugin/engine/lib/events.mjs"
+      - "plugin/engine/lib/proc.mjs"
+      - "test/engine/proc.test.mjs"
       - "cli/lib/uninstall.mjs"
       - "test/cli/uninstall.test.mjs"
       - "plugin/engine/lib/config.mjs"
@@ -63,6 +65,8 @@ on:
   pull_request:
     paths:
       - "plugin/engine/lib/events.mjs"
+      - "plugin/engine/lib/proc.mjs"
+      - "test/engine/proc.test.mjs"
       - "cli/lib/uninstall.mjs"
       - "test/cli/uninstall.test.mjs"
       - "plugin/engine/lib/config.mjs"

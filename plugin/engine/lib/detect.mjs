@@ -17,6 +17,7 @@ import {
   readLock
 } from "./state.mjs";
 import { emitEvent } from "./events.mjs";
+import { reapChildren } from "./proc.mjs";
 import { killSwitchState, killSwitchForSession, RR_CMD } from "./prgate.mjs";
 
 const MAX_PLAN_FILES = 2000;
@@ -232,19 +233,37 @@ function scanFailure(session, scope, err, statusCwd) {
  * @typedef {{ key: string, kind: string, label: string, status: string, reason: string | null, command: string, blocking: boolean }} PendingItem
  */
 
+/** Stop's scan budget, under the hook's 20 s timeout (hooks.json): node start-up, the summary write and the reply need the rest. */
+export const STOP_SCAN_BUDGET_MS = 12_000;
+
 /**
- * Everything this session changed that is not cleared at its current fingerprint.
+ * Everything this session changed that is not cleared at its current fingerprint. A scan still running at `budgetMs`
+ * is abandoned for a blocking item: the hook's timeout would otherwise end the hook with no decision at all, and a
+ * Stop with no decision lets the session end unreviewed. Its git children are killed and later spawns refused, so
+ * nothing it left keeps the hook process alive past that timeout.
  * @param {string} session
  * @param {string} cwd
- * @returns {Promise<{ items: PendingItem[], killSwitchRoot: string | null, killSwitchIgnored: { root: string, why: "tracked" | "mid_session" } | null }>}
+ * @param {number} [budgetMs]
+ * @returns {Promise<{ items: PendingItem[], killSwitchRoot: string | null, killSwitchIgnored: { root: string, why: "tracked" | "mid_session" } | null, timedOut?: true }>}
  */
-export async function pendingForSession(session, cwd) {
+export async function pendingForSession(session, cwd, budgetMs = STOP_SCAN_BUDGET_MS) {
+  /** @type {NodeJS.Timeout | undefined} */
+  let timer;
   try {
-    return await scanSession(session, cwd);
+    const scan = scanSession(session, cwd);
+    // The losing scan may still reject once its children are killed; that must not surface as an unhandled rejection.
+    scan.catch(() => {});
+    const out = await Promise.race([scan, new Promise((resolve) => { timer = setTimeout(() => resolve(null), budgetMs); })]);
+    if (out !== null) return /** @type {Awaited<typeof scan>} */ (out);
+    reapChildren();
+    const err = new ReviewLoopError("command_timeout", `the scan ran past its ${budgetMs} ms budget`);
+    return { items: [scanFailure(session, "this session's changes", err, cwd)], killSwitchRoot: null, killSwitchIgnored: null, timedOut: true };
   } catch (err) {
     // The Stop hook's crash handler only warns, so every scan failure — coded or a raw I/O error — must block here.
     // Blocking cannot trap the session: Stop blocks only while stop_hook_active is false.
     return { items: [scanFailure(session, "review-loop state", err, cwd)], killSwitchRoot: null, killSwitchIgnored: null };
+  } finally {
+    clearTimeout(timer);
   }
 }
 

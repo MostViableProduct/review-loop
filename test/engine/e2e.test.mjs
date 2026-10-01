@@ -625,6 +625,22 @@ test("a repo with no commit at session start: a plan committed during the sessio
   assert.match(r.out.reason, /plan .*first-plan\.md/);
 });
 
+test("Stop blocks within its budget when a git call hangs: the hook never ends without a decision", () => {
+  const repo = specRepo();
+  const S = { session_id: "e2e-session", cwd: repo, stop_hook_active: false };
+  hook("session", S);
+  // Only the committed-change scan (git log) hangs; every other git call is the real one.
+  const slow = tmpDir("rl-slowgit-");
+  const realGit = spawnSync("sh", ["-c", "command -v git"], { encoding: "utf8" }).stdout.trim();
+  fs.writeFileSync(path.join(slow, "git"), `#!/bin/sh\nfor a in "$@"; do [ "$a" = log ] && exec sleep 30; done\nexec '${realGit}' "$@"\n`, { mode: 0o755 });
+  const started = Date.now();
+  const r = hookRaw("stop", JSON.stringify(S), { PATH: `${slow}${path.delimiter}${env.PATH}`, REVIEW_LOOP_TEST_SEAMS: "1", REVIEW_LOOP_TEST_STOP_BUDGET_MS: "1500" });
+  const took = Date.now() - started;
+  assert.equal(r.out?.decision, "block", JSON.stringify(r.out));
+  assert.match(r.out.reason, /op_error: command_timeout/);
+  assert.ok(took < 8000, `the hook returned in ${took} ms, not after the hung git`);
+});
+
 test("control: code committed during the session is the PR gate's; a doc committed before the session is not flagged", () => {
   const repo = specRepo();
   commitFile(repo, "docs/specs/old-spec.md", "committed before the session");

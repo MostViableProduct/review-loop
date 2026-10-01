@@ -87,3 +87,22 @@ test("reap-only (the CLI's mode): a signal no other listener handles still stops
     parent.kill("SIGKILL");
   }
 });
+
+test("reapChildren kills live children and refuses later spawns, so abandoned work cannot keep the process alive", async () => {
+  const url = new URL("../../plugin/engine/lib/proc.mjs", import.meta.url).href;
+  const script = `const p = await import(${JSON.stringify(url)});
+const slow = p.run("sleep", ["30"], { timeoutMs: 60_000 });
+await new Promise((r) => setTimeout(r, 200));
+const t = Date.now();
+p.reapChildren();
+const killed = await slow;
+let refused = null;
+try { await p.run("true", []); } catch (e) { refused = e.message; }
+console.log(JSON.stringify({ killedQuickly: Date.now() - t < 5000 && killed.code !== 0, refused }));`;
+  const child = spawn(process.execPath, ["--input-type=module", "-e", script], { stdio: ["ignore", "pipe", "pipe"] });
+  let out = "";
+  child.stdout.on("data", (b) => { out += b; });
+  const code = await new Promise((r) => child.once("close", r));
+  assert.equal(code, 0);
+  assert.deepEqual(JSON.parse(out), { killedQuickly: true, refused: "spawns_closed" });
+});

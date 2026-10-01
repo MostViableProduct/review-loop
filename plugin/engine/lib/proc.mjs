@@ -21,6 +21,18 @@ export function setSignalMode(mode) {
   signalMode = mode;
 }
 
+let spawnsClosed = false;
+
+/**
+ * Kills every live child group now and refuses any later spawn: for a caller that stops waiting on work it raced
+ * against a deadline. The abandoned work's next command then fails at once instead of starting a child that would
+ * keep this process alive.
+ */
+export function reapChildren() {
+  spawnsClosed = true;
+  for (const pid of liveGroups) killPgid(pid);
+}
+
 /**
  * Registers `fn` (synchronous) to run when a signal reaps this process, for what lives outside the child groups: a
  * detached Codex broker. Returns the unregister function.
@@ -64,6 +76,7 @@ function installReaper() {
  * @param {string} cmd @param {string[]} args @param {import("node:child_process").SpawnOptions} options
  */
 function spawnGroup(cmd, args, options) {
+  if (spawnsClosed) throw new Error("spawns_closed");
   installReaper();
   const child = spawn(cmd, args, { ...options, shell: false, detached: true });
   const pid = child.pid;
