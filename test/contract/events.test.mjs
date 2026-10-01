@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { tmpDir } from "../engine/helpers.mjs";
@@ -229,6 +230,22 @@ test("the engine no longer carries the legacy appendEvent", () => {
   };
   walk(path.join(ROOT, "plugin"));
   assert.deepEqual(hits, []);
+});
+
+test("eventsPathProblem refuses a path reached through a user-owned ancestor link; root-owned system links are followed", () => {
+  const real = tmpDir();
+  fs.mkdirSync(path.join(real, "sub"));
+  const link = path.join(tmpDir(), "link");
+  fs.symlinkSync(real, link);
+  assert.equal(eventsPathProblem(path.join(link, "sub", "e.jsonl")), "symlink", "an ancestor two levels up is a link");
+  assert.equal(eventsPathProblem(path.join(real, "sub", "e.jsonl")), null, "control: the same directory reached directly");
+  // os.tmpdir() is not realpath'd: on macOS it starts with /var, a root-owned link to /private/var.
+  const sys = fs.mkdtempSync(path.join(os.tmpdir(), "rl-"));
+  assert.equal(eventsPathProblem(path.join(sys, "e.jsonl")), null, "a root-owned system link is not a user's redirect");
+  const victim = path.join(real, "sub", "victim.jsonl");
+  fs.writeFileSync(victim, "keep");
+  assert.equal(eventsPathProblem(path.join(link, "sub", "victim.jsonl")), "symlink", "an existing file behind the link is refused too");
+  assert.equal(fs.readFileSync(victim, "utf8"), "keep");
 });
 
 test("L16: eventsPathProblem refuses a parent or a file owned by someone else (not_owned)", { skip: process.getuid?.() === 0 }, () => {

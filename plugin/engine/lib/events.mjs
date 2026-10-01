@@ -55,6 +55,13 @@ export function eventsPath() {
  */
 export function eventsPathProblem(file) {
   if (!path.isAbsolute(file)) return "not_absolute";
+  // lstat of the parent alone follows a link higher up (/x/link/sub/events.jsonl), so walk every ancestor. Only a
+  // root-owned link is followed: the system's own (/tmp, /var on macOS), which no user can retarget.
+  for (let d = path.dirname(path.resolve(file)); path.dirname(d) !== d; d = path.dirname(d)) {
+    const a = fs.lstatSync(d, { throwIfNoEntry: false });
+    if (a === undefined) return "missing_parent";
+    if (a.isSymbolicLink() && a.uid !== 0) return "symlink";
+  }
   const uid = typeof process.getuid === "function" ? process.getuid() : null;
   const owned = (/** @type {fs.Stats} */ st) => uid === null || st.uid === uid;
   let parent;
