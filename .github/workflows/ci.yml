@@ -43,15 +43,16 @@ jobs:
       - run: npm test
       - name: npm test with a fresh HOME and CODEX_HOME (nothing may depend on the runner's home)
         run: HOME="$(mktemp -d)" CODEX_HOME="$(mktemp -d)" npm test
-      # The private denylist secret is absent on fork PRs: the gate then runs the generic rules and prints one notice
+      # The private denylist reaches only a push to main (merged, reviewed code). A pull_request runs the PR branch's
+      # own scripts, so even a same-repo PR never gets it: the gate then runs the generic rules and prints one notice
       # (--tracked checks nothing). The release job requires it (docs/RELEASE.md).
       - name: Content gate (packaged set)
         env:
-          CONTENT_GATE_DENYLIST: ${{ secrets.CONTENT_GATE_DENYLIST }}
+          CONTENT_GATE_DENYLIST: ${{ github.event_name == 'push' && secrets.CONTENT_GATE_DENYLIST || '' }}
         run: node scripts/content-gate.mjs
       - name: Content gate (every tracked file, private rules)
         env:
-          CONTENT_GATE_DENYLIST: ${{ secrets.CONTENT_GATE_DENYLIST }}
+          CONTENT_GATE_DENYLIST: ${{ github.event_name == 'push' && secrets.CONTENT_GATE_DENYLIST || '' }}
         run: node scripts/content-gate.mjs --tracked
       - run: npm run docs:check
   plugin-validate:

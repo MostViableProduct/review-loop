@@ -358,7 +358,7 @@ print, so keep it neutral; and a case-insensitive regular expression of up to 20
 `node scripts/content-gate.mjs --tracked` scans every tracked file, tests and docs included, with the private rules
 only.
 
-Without the list, as on pull requests from forks, the gate runs the generic rules and prints one notice. A release
+Without the list, as on every pull request (CI passes it only on a push to `main`), the gate runs the generic rules and prints one notice. A release
 fails without it (`--require-private`; see [docs/RELEASE.md](docs/RELEASE.md)).
 
 ## License

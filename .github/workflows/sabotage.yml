@@ -30,6 +30,7 @@ on:
       - "scripts/release-check.mjs"
       - "scripts/bump-version.mjs"
       - ".github/workflows/release.yml"
+      - ".github/workflows/ci.yml"
       - "homebrew-tap/Formula/review-loop.rb"
       # The gate tests: a test edited to keep its name but lose its assertion re-runs the sabotage it must catch.
       - "test/contract/events.test.mjs"
@@ -75,6 +76,7 @@ on:
       - "scripts/release-check.mjs"
       - "scripts/bump-version.mjs"
       - ".github/workflows/release.yml"
+      - ".github/workflows/ci.yml"
       - "homebrew-tap/Formula/review-loop.rb"
       - "test/contract/events.test.mjs"
       - "test/contract/content-discipline.test.mjs"

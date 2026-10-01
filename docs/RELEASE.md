@@ -21,8 +21,8 @@ Every step is a command with its expected output. Stop at the first mismatch.
   string, and is never printed. Check it locally first: `CONTENT_GATE_DENYLIST="$(cat .content-gate.private.json)"
   node scripts/content-gate.mjs --tracked --require-private` → `content-gate: ok (… tracked files, private rules)`.
   The `release` job passes `--require-private` to every gate run, so it fails at its first gate step when the secret
-  is missing, empty or invalid. CI passes the secret when it can; on fork PRs it has none and runs the generic rules
-  with a notice.
+  is missing, empty or invalid. CI passes the secret only on a push to `main` (merged code); a pull request, even from a branch of
+  this repo, never gets it and runs the generic rules with a notice.
 - A tag ruleset (Settings → Rules → Rulesets → New tag ruleset) targeting `v*`: restrict creations, updates and
   deletions to the release maintainers, so only they can start a release.
 - Tags are signed (spec §9), but CI doesn't verify the signature; it checks only that the tagged commit is on

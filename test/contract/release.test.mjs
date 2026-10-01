@@ -205,13 +205,19 @@ test("the private denylist secret reaches only steps that run the gate, never np
   assert.equal(jobs(RELEASE_YML).filter((j) => j.text.includes("secrets.CONTENT_GATE_DENYLIST")).map((j) => j.name).join(), "release");
 });
 
-test("ci.yml: the content gate runs with the secret when available and degrades without it (no --require-private)", () => {
+const CI_DENYLIST_ENV = /^ {8}env:\n(?: {10}.*\n)*? {10}CONTENT_GATE_DENYLIST: \$\{\{ github\.event_name == 'push' && secrets\.CONTENT_GATE_DENYLIST \|\| '' \}\}$/m;
+
+test("ci.yml: the private denylist reaches only a push to main, never a pull_request's code; CI degrades without it", () => {
   const ci = jobs(CI_YML).find((j) => j.name === "test");
   assert.ok(ci, "ci.yml has a test job");
   const runs = gateRuns(ci.text);
   assert.deepEqual(runs.map((r) => r.args), ["", "--tracked"], "the packaged set and every tracked file");
-  for (const r of runs) assert.match(r.step, DENYLIST_ENV, `the step running "${r.args}" passes the secret`);
-  assert.ok(!CI_YML.includes("--require-private"), "fork PRs get no secrets, so CI must not require the list");
+  for (const r of runs) assert.match(r.step, CI_DENYLIST_ENV, `the step running "${r.args}" gets the secret on push only`);
+  // A pull_request runs the PR branch's own scripts, and a same-repo PR receives secrets: it must never see the list.
+  assert.equal((CI_YML.match(/secrets\.CONTENT_GATE_DENYLIST/g) ?? []).length, (CI_YML.match(/github\.event_name == 'push' && secrets\.CONTENT_GATE_DENYLIST/g) ?? []).length, "every use is push-gated");
+  assert.match(CI_YML, /^ {2}push:\n {4}branches: \[main\]$/m, "push means a push to main: merged, reviewed code");
+  assert.ok(!/pull_request_target/.test(CI_YML), "pull_request_target would hand secrets to PR code");
+  assert.ok(!CI_YML.includes("--require-private"), "PRs get no list, so CI must not require it");
 });
 
 test("BSD `sed -i ''` appears only in jobs that run on macOS (both repos)", () => {
