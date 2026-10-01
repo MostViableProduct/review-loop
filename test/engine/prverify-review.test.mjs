@@ -328,9 +328,11 @@ test("PR gate: two remotes and no gh at all says gh is not installed, not 'run g
   commitFile(repo, "README.md", "x");
   g(repo, "remote", "add", "origin", "https://github.com/o/r.git");
   g(repo, "remote", "add", "upstream", "https://github.com/up/r.git");
-  const empty = tmpDir();
-  const gitDir = path.dirname(spawnSync("which", ["git"], { encoding: "utf8" }).stdout.trim());
-  process.env.PATH = `${empty}:${gitDir}`;
+  // A PATH holding only a git wrapper: on GitHub's macOS runners gh sits in git's own directory (/usr/local/bin).
+  const gitOnly = tmpDir();
+  const realGit = spawnSync("which", ["git"], { encoding: "utf8" }).stdout.trim();
+  fs.writeFileSync(path.join(gitOnly, "git"), `#!/bin/sh\nexec '${realGit}' "$@"\n`, { mode: 0o755 });
+  process.env.PATH = gitOnly;
   try {
     const r = await evaluatePrGate({ cwd: repo, session: "s1", command: G + " pr create --title t" });
     assert.equal(r?.decision, "deny");
