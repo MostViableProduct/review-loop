@@ -95,6 +95,31 @@ export async function headSha(root) {
   return r.code === 0 ? r.stdout.trim() : null;
 }
 
+const MAX_COMMITTED_PATHS = 5000;
+
+/**
+ * Paths touched by commits created since the session began: a shell edit committed before Stop leaves `git status`
+ * clean and no file-tool marker. `--since` keeps out older commits a branch switch brings into the range; a rebase
+ * re-dates its commits, so those are reviewed again (over-review, never a miss).
+ * @param {string} root
+ * @param {string | null} startHead HEAD at session start (null: unborn then)
+ * @param {string} since ISO time the session's baseline was taken
+ * @returns {Promise<string[]>} repo-relative paths
+ */
+export async function committedPaths(root, startHead, since) {
+  if ((await headSha(root)) === null) return [];
+  // A start commit gone since (gc after a rewrite) falls back to "every commit since the start time".
+  const startKnown = startHead !== null && (await git(root, ["cat-file", "-e", `${startHead}^{commit}`])).code === 0;
+  const range = startKnown ? `${startHead}..HEAD` : "HEAD";
+  // Commit dates are whole seconds and `since` has milliseconds: one second of slack, so a commit in the session's
+  // first second is never missed (a commit just before the start may be over-reviewed).
+  const from = new Date((Math.floor(Date.parse(since) / 1000) - 1) * 1000).toISOString();
+  const out = await gitOk(root, ["log", `--since=${from}`, "--format=", "--name-only", "--no-renames", "-z", range, "--"], { maxBuffer: 8 * MiB, code: "detection_failed" });
+  const paths = [...new Set(out.split("\0").map((p) => p.replace(/^\n+/, "")).filter(Boolean))];
+  if (paths.length > MAX_COMMITTED_PATHS) throw new ReviewLoopError("detection_failed", `commits made this session touch ${paths.length} paths (limit ${MAX_COMMITTED_PATHS})`);
+  return paths;
+}
+
 /** @param {string} root @param {number} [deadlineAt] */
 export async function objectFormat(root, deadlineAt) {
   const r = await git(root, ["rev-parse", "--show-object-format"], { timeoutMs: budgetMs(deadlineAt, 30_000) });

@@ -589,6 +589,27 @@ test("control: a repo first seen at Stop with no changed artifact is not flagged
   assert.equal(r.out?.decision, undefined, JSON.stringify(r.out));
 });
 
+test("a spec edited and committed through the shell during the session stays pending at Stop, though git status is clean", () => {
+  const repo = specRepo();
+  const S = { session_id: "e2e-session", cwd: repo, stop_hook_active: false };
+  hook("session", S);
+  commitFile(repo, "docs/specs/feature-spec.md", "written and committed by Bash");
+  assert.equal(spawnSync("git", ["status", "--porcelain"], { cwd: repo, encoding: "utf8" }).stdout, "", "git status is clean");
+  const r = hook("stop", S);
+  assert.equal(r.out?.decision, "block", JSON.stringify(r.out));
+  assert.match(r.out.reason, /spec .*feature-spec\.md/);
+});
+
+test("control: code committed during the session is the PR gate's; a doc committed before the session is not flagged", () => {
+  const repo = specRepo();
+  commitFile(repo, "docs/specs/old-spec.md", "committed before the session");
+  const S = { session_id: "e2e-session", cwd: repo, stop_hook_active: false };
+  hook("session", S);
+  commitFile(repo, "src/b.ts", "committed by Bash");
+  const r = hook("stop", S);
+  assert.equal(r.out?.decision, undefined, JSON.stringify(r.out));
+});
+
 test("SessionStart re-firing on compact/resume never re-baselines: pre-compaction edits stay pending", () => {
   const repo = specRepo();
   const S = { session_id: "e2e-session", cwd: repo, stop_hook_active: false };

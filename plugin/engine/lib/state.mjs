@@ -234,7 +234,9 @@ function baselinePath(session, root) {
 
 /** @param {unknown} v */
 function isBaseline(v) {
-  return isObject(v) && v.v === 1 && typeof v.root === "string" && isObject(v.artifacts) && (v.killSwitchAtStart === undefined || typeof v.killSwitchAtStart === "boolean");
+  return isObject(v) && v.v === 1 && typeof v.root === "string" && isObject(v.artifacts) && (v.killSwitchAtStart === undefined || typeof v.killSwitchAtStart === "boolean") &&
+    (v.head === undefined || v.head === null || (typeof v.head === "string" && /^[0-9a-f]{40}([0-9a-f]{24})?$/.test(v.head))) &&
+    (v.at === undefined || (typeof v.at === "string" && !Number.isNaN(Date.parse(v.at))));
 }
 
 /** @param {string} session @param {string} root */
@@ -245,9 +247,10 @@ export function readBaseline(session, root) {
 /**
  * @param {string} session @param {string} root @param {Record<string, string>} artifacts
  * @param {string | null} [degraded] error code when the scan failed (artifacts is then empty on purpose)
+ * @param {string | null} [head] the repo's HEAD at session start, so Stop can see commits made since
  */
-export function writeBaseline(session, root, artifacts, degraded = null, killSwitchAtStart = false) {
-  atomicWriteJson(baselinePath(session, root), { v: 1, root, artifacts, degraded, killSwitchAtStart, at: new Date().toISOString() }, stateRoot());
+export function writeBaseline(session, root, artifacts, degraded = null, killSwitchAtStart = false, head = null) {
+  atomicWriteJson(baselinePath(session, root), { v: 1, root, artifacts, degraded, killSwitchAtStart, head, at: new Date().toISOString() }, stateRoot());
 }
 
 /** Drop snapshot directories untouched for 14 days. */

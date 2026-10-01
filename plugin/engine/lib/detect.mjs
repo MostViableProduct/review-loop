@@ -3,7 +3,7 @@ import path from "node:path";
 import { ReviewLoopError, errorCode, diagnosticCode } from "./errors.mjs";
 import { sha256hex } from "./fsutil.mjs";
 import { classifyRepoPath, classifyAbsolutePath, CLAUDE_PLANS_DIR } from "./classify.mjs";
-import { repoRoot, statusEntries, implFingerprint, objectFormat, renameSource, isDeletion, readArtifact, assertPlansDir } from "./git.mjs";
+import { repoRoot, statusEntries, implFingerprint, objectFormat, renameSource, isDeletion, readArtifact, assertPlansDir, headSha, committedPaths } from "./git.mjs";
 import {
   identityKey,
   identityLabel,
@@ -137,6 +137,27 @@ export function detectPlansDir(projectRoot, dir = CLAUDE_PLANS_DIR) {
     });
 }
 
+/**
+ * Specs and plans committed since the session began (author's decision: committed code stays with the PR and merge
+ * gates). A committed doc is pending at its current content until a review passes at that fingerprint.
+ * @param {string} root @param {string | null} startHead @param {string} since
+ * @returns {Promise<Artifact[]>}
+ */
+async function committedDocs(root, startHead, since) {
+  /** @type {Artifact[]} */
+  const out = [];
+  for (const rel of await committedPaths(root, startHead, since)) {
+    const kind = classifyRepoPath(rel);
+    if (kind !== "spec" && kind !== "plan") continue;
+    const abs = path.join(root, rel);
+    // Deleted (or no longer a file) since: nothing left to review, as for a deletion in `git status`.
+    if (!fs.lstatSync(abs, { throwIfNoEntry: false })?.isFile()) continue;
+    const identity = /** @type {Identity} */ ({ kind, path: abs });
+    out.push({ identity, key: identityKey(identity), fingerprint: docFingerprint(abs, root).fingerprint, projectRoot: root });
+  }
+  return out;
+}
+
 /** @param {Artifact[]} list */
 const toMap = (list) => Object.fromEntries(list.map((a) => [a.key, a.fingerprint]));
 
@@ -157,7 +178,8 @@ export async function snapshotSession(session, cwd) {
   }
   if (root) {
     const switchOn = (await killSwitchState(root).catch(() => "off")) === "on";
-    await snapshotScope(session, root, async () => detectRepoArtifacts(root), switchOn);
+    const head = await headSha(root).catch(() => null);
+    await snapshotScope(session, root, async () => detectRepoArtifacts(root), switchOn, head);
   }
   await snapshotScope(session, CLAUDE_PLANS_DIR, async () => detectPlansDir(root ?? cwd));
   if (!readBaseline(session, START_OK)) writeBaseline(session, START_OK, {});
@@ -168,14 +190,15 @@ export async function snapshotSession(session, cwd) {
  * would absorb this session's own unreviewed edits into the baseline.
  * @param {string} session @param {string} baseRoot @param {() => Promise<Artifact[]>} scan
  * @param {boolean} [killSwitchAtStart] the only record that makes a kill switch count this session
+ * @param {string | null} [head] the repo's HEAD now, so Stop can see commits made since
  */
-async function snapshotScope(session, baseRoot, scan, killSwitchAtStart = false) {
+async function snapshotScope(session, baseRoot, scan, killSwitchAtStart = false, head = null) {
   if (readBaseline(session, baseRoot)) return;
   try {
-    writeBaseline(session, baseRoot, toMap(await scan()), null, killSwitchAtStart);
+    writeBaseline(session, baseRoot, toMap(await scan()), null, killSwitchAtStart, head);
   } catch (err) {
     // An empty, degraded snapshot makes every later artifact look changed: over-review, never silently skip.
-    writeBaseline(session, baseRoot, {}, errorCode(err), killSwitchAtStart);
+    writeBaseline(session, baseRoot, {}, errorCode(err), killSwitchAtStart, head);
     emitEvent({ source: "hook", event: "hook.error", code: diagnosticCode(err), session_id: session, data: { stage: "snapshot_degraded" } });
   }
 }
@@ -279,6 +302,14 @@ async function scanSession(session, cwd) {
       continue;
     }
     for (const a of list) if (baseline.artifacts[a.key] !== a.fingerprint) candidates.push(a);
+    if (baseRoot === CLAUDE_PLANS_DIR || typeof baseline.at !== "string") continue;
+    try {
+      for (const a of await committedDocs(baseRoot, typeof baseline.head === "string" ? baseline.head : null, baseline.at)) {
+        if (!candidates.some((c) => c.key === a.key)) candidates.push(a);
+      }
+    } catch (err) {
+      scanFailures.push(scanFailure(session, baseRoot, err, baseRoot));
+    }
   }
 
   // Markers: file-tool edits anywhere (incl. ignored dirs / non-git dirs) and PR-gate denials from this session.
