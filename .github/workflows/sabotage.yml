@@ -9,6 +9,8 @@ on:
     branches: [main]
     paths:
       - "plugin/engine/lib/events.mjs"
+      - "cli/lib/uninstall.mjs"
+      - "test/cli/uninstall.test.mjs"
       - "plugin/engine/lib/config.mjs"
       - "plugin/engine/lib/codexcfg.mjs"
       - "plugin/hooks/hooks.json"
@@ -61,6 +63,8 @@ on:
   pull_request:
     paths:
       - "plugin/engine/lib/events.mjs"
+      - "cli/lib/uninstall.mjs"
+      - "test/cli/uninstall.test.mjs"
       - "plugin/engine/lib/config.mjs"
       - "plugin/engine/lib/codexcfg.mjs"
       - "plugin/hooks/hooks.json"

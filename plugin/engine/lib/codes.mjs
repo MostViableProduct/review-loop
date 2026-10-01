@@ -81,6 +81,7 @@ export const CODES = Object.freeze({
   },
   preflight_failed: { category: "user_action", remedy: "fix the item marked FAIL, then re-run", details: ["claude", "codex_cli", "codex_auth", "codex_plugin"] },
   plugin_install_failed: { category: "user_action", remedy: "run `review-loop doctor`" },
+  plugin_other_scope: { category: "user_action", remedy: "uninstall the project- or local-scope review-loop plugin in that project, then re-run" },
   plugin_disabled: { category: "user_action", remedy: "enable it with `claude plugin enable review-loop@review-loop`, then run migrate again" },
   plugin_uninstall_failed: { category: "user_action", remedy: "run `claude plugin uninstall review-loop@review-loop` (and `claude plugin marketplace remove review-loop`) in a terminal to see why, then re-run `review-loop uninstall`" },
   doctor_failed: { category: "user_action", remedy: "fix each check marked FAIL (each prints its fix), then re-run" },

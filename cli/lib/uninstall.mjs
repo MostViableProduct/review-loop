@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { CliError } from "./errors.mjs";
 import { stateDirCode } from "./doctor.mjs";
-import { installedPlugin, PLUGIN_ID, removeMarketplace, uninstallPlugin } from "./plugin.mjs";
+import { assertNoOtherScope, installedPlugin, pluginEntries, PLUGIN_ID, removeMarketplace, uninstallPlugin } from "./plugin.mjs";
 import { ASK_RULES, hookCommands, LEGACY_HOOK_RE, readSettings, updateSettings, writerPreconditions } from "./settings.mjs";
 import { configPath } from "../../plugin/engine/lib/config.mjs";
 import { stateDirProblem } from "../../plugin/engine/lib/events.mjs";
@@ -57,10 +57,12 @@ export async function run(args, io, ctx) {
   if (!ctx.yes && !(await io.ask("Continue?", false))) throw new CliError("cancelled", "cancelled");
   // The settings write's own preconditions, checked before anything is removed: a refusal there must change nothing.
   await writerPreconditions(io, { yes: ctx.yes }, readSettings().target);
+  const entries = await pluginEntries(PLUGIN_ID);
+  await assertNoOtherScope("review-loop uninstall", entries);
 
   let done = 0;
   try {
-    const plugin = await uninstallPlugin();
+    const plugin = await uninstallPlugin(entries);
     done = 1;
     await removeMarketplace();
     done = 2;

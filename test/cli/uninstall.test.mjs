@@ -44,6 +44,23 @@ test("T-UN-1: order is plugin → marketplace → settings → config; history k
   assert.equal(fs.existsSync(path.join(s.home, "state")), true, "history kept (T-UN-3)");
 });
 
+test("T-UN-1b: a project- or local-scope install still listed → refused before anything is removed", async () => {
+  const both = JSON.stringify([
+    { id: "review-loop@review-loop", enabled: true, scope: "user", version: "0.1.0", installPath: "/x" },
+    { id: "review-loop@review-loop", enabled: true, scope: "project", version: "0.1.0", installPath: "/y" },
+    { id: "review-loop@review-loop", enabled: false, scope: "local", version: "0.1.0", installPath: "/z" }
+  ]);
+  const s = sandbox({ "plugin list --json": { stdout: both } });
+  const o = io();
+  assert.notEqual(await main(["uninstall", "--yes"], o), 0);
+  const text = o.lines.join("");
+  assert.match(text, /review-loop: plugin_other_scope/);
+  assert.match(text, /--scope project` and `claude plugin uninstall review-loop@review-loop --scope local`/);
+  assert.ok(!s.claude.log().some((a) => a[1] === "uninstall" || a[1] === "marketplace"), "no plugin or marketplace removal ran");
+  assert.equal(settingsOf(s).permissions.ask.length, 6, "approval rules kept");
+  assert.ok(fs.existsSync(process.env.REVIEW_LOOP_CONFIG), "config kept");
+});
+
 test("T-UN-1 (−): plugin uninstall fails → nothing else removed, exit 1", async () => {
   const s = sandbox({ "plugin uninstall review-loop@review-loop --scope user --json": { code: 1, stderr: "boom" } });
   const o = io();

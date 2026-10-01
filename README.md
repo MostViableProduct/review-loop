@@ -210,6 +210,7 @@ Run `review-loop doctor`. Each failing line names a code and the fix.
 | `plugin_disabled` | 1 | enable it with `claude plugin enable review-loop@review-loop`, then run migrate again |  |
 | `plugin_install_failed` | 1 | run `review-loop doctor` |  |
 | `plugin_not_installed` | 1 | run `review-loop setup` to install and enable the review-loop plugin at user scope |  |
+| `plugin_other_scope` | 1 | uninstall the project- or local-scope review-loop plugin in that project, then re-run |  |
 | `plugin_pin` | 1 | review the plugin diff in the review-loop:review-loop skill and choose repin |  |
 | `plugin_pin_mismatch` | 1 | the Codex plugin changed; run the review-loop:review-loop skill and choose repin |  |
 | `plugin_pin_missing` | 1 | run `review-loop setup` to pin the Codex plugin |  |

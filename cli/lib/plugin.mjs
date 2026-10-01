@@ -67,11 +67,25 @@ export async function installPlugin() {
 }
 
 /**
- * Uninstalls the plugin if it is listed. Already gone (listed, then `not_installed`) counts as done.
+ * A project or local install lives in that project's settings, out of reach of a user-scope removal; removing the
+ * marketplace under it would leave a half-removed plugin. Callers check this before anything moves.
+ * @param {string} what the command to re-run, for the message
+ * @param {PluginEntry[]} [entries] an already-read listing, so the caller lists once
+ */
+export async function assertNoOtherScope(what, entries) {
+  const elsewhere = [...new Set((entries ?? (await pluginEntries(PLUGIN_ID))).map((e) => e.scope).filter((s) => s !== null && s !== "user"))];
+  if (!elsewhere.length) return;
+  const cmds = elsewhere.map((s) => `\`claude plugin uninstall ${PLUGIN_ID} --scope ${s}\``).join(" and ");
+  throw new CliError("plugin_other_scope", `review-loop is also installed at ${elsewhere.join(" and ")} scope; in that project run ${cmds}, then run ${what} again; nothing was changed`);
+}
+
+/**
+ * Uninstalls the user-scope plugin if it is listed. Already gone (listed, then `not_installed`) counts as done.
+ * @param {PluginEntry[]} [entries] an already-read listing, so the caller lists once
  * @returns {Promise<Awaited<ReturnType<typeof installedPlugin>>>} what was listed before, or null
  */
-export async function uninstallPlugin() {
-  const plugin = await installedPlugin(PLUGIN_ID);
+export async function uninstallPlugin(entries) {
+  const plugin = entries ? pickEntry(entries, "user") : await installedPlugin(PLUGIN_ID, undefined, "user");
   if (plugin) {
     const r = await runTool("claude", ["plugin", "uninstall", PLUGIN_ID, "--scope", "user", "--json"]);
     const gone = /** @type {{ failureCode?: unknown } | null} */ (lastJsonLine(r.stdout))?.failureCode === "not_installed";

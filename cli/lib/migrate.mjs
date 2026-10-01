@@ -6,7 +6,7 @@ import crypto from "node:crypto";
 import { CliError } from "./errors.mjs";
 import { assertConfigOwner } from "./configguard.mjs";
 import { run as doctor } from "./doctor.mjs";
-import { installPlugin, installedPlugin, MARKETPLACE_SOURCE, PLUGIN_ID, removeMarketplace, uninstallPlugin } from "./plugin.mjs";
+import { assertNoOtherScope, installPlugin, installedPlugin, MARKETPLACE_SOURCE, PLUGIN_ID, removeMarketplace, uninstallPlugin } from "./plugin.mjs";
 import { ASK_RULES, LEGACY_HOOK_RE, legacyHookCommands, missingAskRules, readSettings, updateSettings, writerPreconditions } from "./settings.mjs";
 import { CONFIG_MAX_BYTES, configPath, isConfig, readConfig, writeConfig } from "../../plugin/engine/lib/config.mjs";
 import { atomicWriteJson, atomicWriteText, isObject, jsonText, MiB, quarantine, safeReadFile, sha256hex } from "../../plugin/engine/lib/fsutil.mjs";
@@ -430,6 +430,7 @@ async function rollback(io, ctx) {
   if (!m || m.status === "rolled_back") { io.err("Nothing to roll back.\n"); return { code: "ok" }; }
   // The settings write's preconditions, checked before anything moves: a refusal there must change nothing.
   await writerPreconditions(io, { yes: ctx.yes }, readSettings().target);
+  if (m.steps.some((s) => s.resource === "plugin" && s.undone !== true)) await assertNoOtherScope("review-loop migrate --rollback");
   const P = paths(m.date);
   /** @type {string[]} */
   const skipped = [];

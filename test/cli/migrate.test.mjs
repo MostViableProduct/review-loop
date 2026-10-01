@@ -452,6 +452,24 @@ test("an installed but disabled plugin is refused before any change: migrate nev
   assert.equal(fs.existsSync(manifestFile()), false, "no migration record written");
 });
 
+test("rollback with a project-scope install still listed is refused before anything moves; the record is kept", async () => {
+  const { c, claude } = authorShaped();
+  assert.equal(await main(["migrate", "--yes", "--skip-doctor-gate"], io()), 0);
+  claude.set({ "plugin list --json": { stdout: JSON.stringify([
+    { id: "review-loop@review-loop", enabled: true, scope: "user", version: "0.1.0", installPath: "/x" },
+    { id: "review-loop@review-loop", enabled: true, scope: "project", version: "0.1.0", installPath: "/y" }
+  ]) }, "*": { stdout: "{}\n" } });
+  const settingsBefore = fs.readFileSync(path.join(c, "settings.json"));
+  const manifestBefore = fs.readFileSync(manifestFile());
+  const callsBefore = claude.log().length;
+  const o = io();
+  assert.equal(await main(["migrate", "--rollback", "--yes"], o), 1);
+  assert.match(o.lines.join(""), /plugin_other_scope/);
+  assert.ok(!claude.log().slice(callsBefore).some((a) => a[1] === "uninstall" || a[1] === "marketplace"), "no plugin or marketplace removal ran");
+  assert.deepEqual(fs.readFileSync(path.join(c, "settings.json")), settingsBefore, "settings untouched");
+  assert.deepEqual(fs.readFileSync(manifestFile()), manifestBefore, "migration record kept for a retry");
+});
+
 test("T-MIG-14: a record that could overflow MAX_STEPS is refused before any change", async () => {
   const { c, claude } = authorShaped();
   const m = { v: 1, status: "in_progress", date: localDate(), steps: Array.from({ length: 60 }, () => ({ resource: "engine_dir", action: "move", before: {}, after: {} })) };
