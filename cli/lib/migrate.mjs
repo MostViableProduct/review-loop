@@ -278,6 +278,14 @@ async function migrate(args, io, ctx) {
   const cur = readSettings();
   const found = paths(today);
   if (legacyHookCommands(cur.obj).length === 0 && !present(found.skill) && !present(found.legacyPin) && !present(found.engine)) {
+    // A run stopped after its last move (engine archived, record not yet marked done) leaves nothing legacy behind:
+    // finish that record here, or it stays in_progress for good.
+    const open = readManifest();
+    if (open?.status === "in_progress") {
+      saveManifest({ ...open, status: "done" });
+      io.err("Finished an interrupted migration: nothing legacy was left, so its record is now complete.\nTo undo: review-loop migrate --rollback\n");
+      return { code: "ok" };
+    }
     io.err("Nothing to migrate.\n");
     return { code: "ok" };
   }

@@ -470,6 +470,25 @@ test("rollback with a project-scope install still listed is refused before anyth
   assert.deepEqual(fs.readFileSync(manifestFile()), manifestBefore, "migration record kept for a retry");
 });
 
+test("a run stopped after archiving the engine but before marking its record done is finished by the next migrate", async () => {
+  const { c } = authorShaped();
+  assert.equal(await main(["migrate", "--yes", "--skip-doctor-gate", "--force-engine-move"], io()), 0);
+  assert.equal(fs.existsSync(path.join(c, "review-loop")), false, "engine archived");
+  // The crash window: every move done, the record still in_progress.
+  const done = JSON.parse(fs.readFileSync(manifestFile(), "utf8"));
+  fs.writeFileSync(manifestFile(), JSON.stringify({ ...done, status: "in_progress" }));
+  const o = io();
+  assert.equal(await main(["migrate", "--yes", "--skip-doctor-gate"], o), 0);
+  assert.match(o.lines.join(""), /Finished an interrupted migration/);
+  assert.doesNotMatch(o.lines.join(""), /Nothing to migrate/);
+  const after = JSON.parse(fs.readFileSync(manifestFile(), "utf8"));
+  assert.equal(after.status, "done");
+  assert.deepEqual(after.steps, done.steps, "the undo data is kept as recorded");
+  const again = io();
+  assert.equal(await main(["migrate", "--yes", "--skip-doctor-gate"], again), 0);
+  assert.match(again.lines.join(""), /Nothing to migrate/, "a finished record is not finished twice");
+});
+
 test("T-MIG-14: a record that could overflow MAX_STEPS is refused before any change", async () => {
   const { c, claude } = authorShaped();
   const m = { v: 1, status: "in_progress", date: localDate(), steps: Array.from({ length: 60 }, () => ({ resource: "engine_dir", action: "move", before: {}, after: {} })) };
