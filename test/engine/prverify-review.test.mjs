@@ -104,6 +104,28 @@ test("a failing GitHub request is worded differently from a missing gh", async (
   assert.doesNotMatch(r.output.stopReason, /not installed/);
 });
 
+test("the deadline also bounds the repo-root and kill-switch git calls (a hung git cannot outlive the hook)", async () => {
+  reviewed(B);
+  const repo = makeRepo();
+  commitFile(repo, "README.md", "x");
+  writeFile(repo, ".claude/review-loop.off", "");
+  writeBaseline("s1", repo, {}, null, true);
+  const slowBin = tmpDir();
+  makeFakeBin(slowBin, "git", { "rev-parse --show-toplevel": { stdout: `${repo}\n` }, "*": { code: 0, delayMs: 3000 } });
+  makeFakeBin(bin, "gh", { "*": view(B) });
+  process.env.PATH = `${slowBin}:${process.env.PATH}`;
+  try {
+    const t0 = Date.now();
+    const r = await evaluatePrVerify({ ...createCall("default", repo), deadlineMs: 400 });
+    assert.ok(Date.now() - t0 < 2500, `verification stayed inside its budget (took ${Date.now() - t0} ms)`);
+    assert.notEqual(r.code, "kill_switch", "a switch git could not confirm in time is not honored");
+    assert.equal(r.code, "pr_verify_unavailable", "the spent budget is reported, so the PR is contained");
+    assert.match(r.output?.stopReason ?? "", /convert it to draft now|may be open/);
+  } finally {
+    usePath();
+  }
+});
+
 test("kill switch: a create with review disabled is skipped: one skipped decision, no gh call, no output", async () => {
   reviewed(B);
   const repo = makeRepo();

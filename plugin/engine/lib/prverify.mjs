@@ -103,10 +103,11 @@ export async function evaluatePrVerify(p) {
   if (!c) return { output: null, outcome: "allowed", code: "not_pr_creation", detail: null };
   const deadlineAt = Date.now() + (p.deadlineMs ?? DEFAULT_DEADLINE_MS);
   const soft = gateOutcome(p.preset, "prverify", true) === "warn";
-  const root = await repoRoot(p.cwd).catch(() => null);
+  const root = await repoRoot(p.cwd, deadlineAt).catch(() => null);
   if (root) {
     // The PR gate already logged the override at PreToolUse; this hook adds only its own gate.decision.
-    if ((await killSwitchForSession(p.session, root)) === "on") return { output: null, outcome: "skipped", code: "kill_switch", detail: null };
+    // A switch git cannot confirm inside the budget is not honored: verification goes on and reports the spent budget.
+    if ((await killSwitchForSession(p.session, root, deadlineAt).catch(() => null)) === "on") return { output: null, outcome: "skipped", code: "kill_switch", detail: null };
   }
 
   /** @param {string} why @param {number | null} number */
