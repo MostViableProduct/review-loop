@@ -1,0 +1,5 @@
+{
+  "name": "review-loop",
+  "owner": { "name": "MostViableProduct" },
+  "plugins": [ { "name": "review-loop", "source": "./plugin", "version": "0.1.0", "description": "Enforced Codex adversarial review for Claude Code" } ]
+}

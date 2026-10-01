@@ -1,0 +1,74 @@
+import { lastJsonLine, noteFor, requireRan, runTool } from "./run.mjs";
+import { CliError } from "./errors.mjs";
+
+// D1 (the GitHub owner) is undecided; Task 28 replaces the placeholder.
+export const MARKETPLACE_SOURCE = "MostViableProduct/review-loop";
+export const MARKETPLACE_NAME = "review-loop";
+export const PLUGIN_ID = "review-loop@review-loop";
+const MARKETPLACE_GONE = /Marketplace '[^']*' not found/i;
+
+/** The plugin and the CLI are compatible when their major.minor match. @param {string} a @param {string} b */
+export const sameMinor = (a, b) => a.split(".").slice(0, 2).join(".") === b.split(".").slice(0, 2).join(".");
+
+/**
+ * @param {string} id @param {import("./run.mjs").Runner} [run]
+ * @returns {Promise<{ version: string | null, installPath: string | null, enabled: boolean, scope: string | null } | null>}
+ */
+export async function installedPlugin(id, run = runTool) {
+  const r = await run("claude", ["plugin", "list", "--json"]);
+  requireRan(r, "claude plugin list");
+  const v = lastJsonLine(r.stdout);
+  const wrapped = /** @type {{ plugins?: unknown } | null} */ (v)?.plugins;
+  const list = Array.isArray(v) ? v : Array.isArray(wrapped) ? wrapped : null;
+  if (list === null) throw new CliError("claude_cli_unparseable", "could not read `claude plugin list --json`");
+  for (const p of list) {
+    if (typeof p !== "object" || p === null) continue;
+    const e = /** @type {Record<string, unknown>} */ (p);
+    if (e.id === id || e.name === id) {
+      return {
+        version: typeof e.version === "string" ? e.version : null,
+        installPath: typeof e.installPath === "string" ? e.installPath : null,
+        enabled: e.enabled !== false,
+        scope: typeof e.scope === "string" ? e.scope : null
+      };
+    }
+  }
+  return null;
+}
+
+export async function installPlugin() {
+  const add = await runTool("claude", ["plugin", "marketplace", "add", MARKETPLACE_SOURCE]);
+  if (add.code !== 0 && !/already/i.test(add.stderr + add.stdout)) throw new CliError("plugin_install_failed", "could not add the review-loop marketplace");
+  // --scope is accepted by Claude Code 2.1.285 but missing from `claude plugin install --help`.
+  const inst = await runTool("claude", ["plugin", "install", PLUGIN_ID, "--scope", "user", "--json"], { timeoutMs: 5 * 60_000 });
+  requireRan(inst, "claude plugin install");
+  if (inst.code !== 0) throw new CliError("plugin_install_failed", "claude plugin install failed");
+}
+
+/**
+ * Uninstalls the plugin if it is listed. Already gone (listed, then `not_installed`) counts as done.
+ * @returns {Promise<Awaited<ReturnType<typeof installedPlugin>>>} what was listed before, or null
+ */
+export async function uninstallPlugin() {
+  const plugin = await installedPlugin(PLUGIN_ID);
+  if (plugin) {
+    const r = await runTool("claude", ["plugin", "uninstall", PLUGIN_ID, "--scope", "user", "--json"]);
+    const gone = /** @type {{ failureCode?: unknown } | null} */ (lastJsonLine(r.stdout))?.failureCode === "not_installed";
+    if ((r.failure !== null || r.code !== 0) && !(r.failure === null && gone)) throw new CliError("plugin_uninstall_failed", `claude plugin uninstall ${noteFor(r, "failed")}`);
+  }
+  return plugin;
+}
+
+/** Removes the marketplace; one that is already gone counts as done. */
+export async function removeMarketplace() {
+  const m = await runTool("claude", ["plugin", "marketplace", "remove", MARKETPLACE_NAME]);
+  if ((m.failure !== null || m.code !== 0) && !(m.failure === null && MARKETPLACE_GONE.test(m.stderr + m.stdout))) {
+    throw new CliError("plugin_uninstall_failed", `claude plugin marketplace remove ${noteFor(m, "failed")}`);
+  }
+}
+
+/** @returns {Promise<string | null>} */
+export async function enginePath() {
+  const p = await installedPlugin(PLUGIN_ID);
+  return p?.installPath ? `${p.installPath}/engine` : null;
+}

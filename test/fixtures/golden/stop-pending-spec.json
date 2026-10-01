@@ -1,0 +1,1 @@
+"{\"decision\":\"block\",\"reason\":\"review-loop: 1 artifact(s) changed this session and are not reviewed. Invoke the review-loop skill and run:\\n- spec <REPO>/docs/specs/x-design.md [pending]\\n  node \\\"<ENGINE>/review-round.mjs\\\" run --kind spec --path \\\"<REPO>/docs/specs/x-design.md\\\" --project-root \\\"<REPO>\\\"\"}\n"

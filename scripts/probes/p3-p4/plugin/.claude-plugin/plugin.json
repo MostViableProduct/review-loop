@@ -1,0 +1,2 @@
+{ "name": "rl-probe2", "version": "0.0.1", "description": "probe P3/P4",
+  "dependencies": [ { "name": "codex", "marketplace": "openai-codex" } ] }

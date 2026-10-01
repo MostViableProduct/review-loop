@@ -1,0 +1,64 @@
+#!/bin/sh
+# Claude Code hook entry for the review-loop plugin. Finds node; without it, fails loud (spec §6.3).
+mode="$1"
+root=$(cd "$(dirname "$0")/.." && pwd)
+VERSION="0.1.0"
+
+find_node() {
+  if [ -n "${REVIEW_LOOP_NODE_CANDIDATES:-}" ]; then
+    IFS=:; for c in $REVIEW_LOOP_NODE_CANDIDATES; do [ -x "$c" ] && { echo "$c"; return 0; }; done; unset IFS; return 1
+  fi
+  command -v node 2>/dev/null && return 0
+  for c in /opt/homebrew/bin/node /usr/local/bin/node; do [ -x "$c" ] && { echo "$c"; return 0; }; done
+  return 1
+}
+
+if node_bin=$(find_node); then
+  exec "$node_bin" "$root/engine/review-gate-hook.mjs" "$mode"
+fi
+
+input=$(cat)
+reason="review-loop: Node.js not found — run: brew install node"
+
+pr_like() {
+  printf '%s' "$input" | grep -Eiq 'pr[^a-z0-9]+(create|merge)|/pulls|/merge|create_pull_request|merge_pull_request|createpullrequest|mergepullrequest|graphql'
+}
+
+log_event() { # $1 event, $2 data-json
+  state="${REVIEW_LOOP_STATE_DIR:-$HOME/.claude/state/review-loop}"
+  file="$state/events.jsonl"
+  sid=$(printf '%s' "$input" | sed -n 's/.*"session_id":"\([A-Za-z0-9-]\{1,64\}\)".*/\1/p' | head -n 1)
+  [ -n "$sid" ] && sid="\"$sid\"" || sid=null
+  why=""
+  if [ ! -d "$state" ] || [ -L "$state" ] || [ ! -O "$state" ]; then why=state_dir_insecure
+  elif [ -L "$file" ] || { [ -e "$file" ] && [ ! -f "$file" ]; }; then why=write_failed  # >> would follow a link
+  elif [ -f "$file" ] && [ "$(stat -f %z "$file" 2>/dev/null || echo 0)" -gt 5242880 ]; then why=size_cap
+  fi
+  if [ -z "$why" ]; then
+    ts=$(date -u +%Y-%m-%dT%H:%M:%S.000Z)
+    rid=$(uuidgen | tr 'A-Z' 'a-z')
+    ( umask 077; printf '{"schema":"review-loop.event/1","ts":"%s","run_id":"%s","source":"hook","event":"%s","code":"node_missing","detail":null,"exit_code":null,"version":"%s","session_id":%s,"artifact_key":null,"data":%s}\n' \
+      "$ts" "$rid" "$1" "$VERSION" "$sid" "$2" >> "$file" ) 2>/dev/null || why=write_failed
+  fi
+  [ -n "$why" ] && printf 'review-loop: event log not writable (%s)\n' "$why" >&2
+  return 0
+}
+
+case "$mode" in
+  stop)
+    case "$input" in *'"stop_hook_active":true'*) log_event gate.decision '{"gate":"stop","outcome":"allowed","preset":"default","pending_count":null}'; exit 0;; esac
+    log_event gate.decision '{"gate":"stop","outcome":"blocked","preset":"default","pending_count":null}'
+    printf '{"decision":"block","reason":"%s"}\n' "$reason";;
+  pr)
+    pr_like || exit 0
+    log_event gate.decision '{"gate":"pr","outcome":"denied","preset":"default","pending_count":null}'
+    printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"%s"}}\n' "$reason";;
+  prverify)
+    pr_like || exit 0
+    log_event gate.decision '{"gate":"prverify","outcome":"denied","preset":"default","pending_count":null}'
+    printf '{"continue":false,"stopReason":"review-loop: Node.js not found, so this PR could not be verified against the reviewed commit. Check it, then run: brew install node"}\n';;
+  session|track|prompt)
+    log_event hook.error "{\"stage\":\"$mode\",\"mode\":\"$mode\"}"
+    printf '%s\n' "$reason" >&2;;
+esac
+exit 0

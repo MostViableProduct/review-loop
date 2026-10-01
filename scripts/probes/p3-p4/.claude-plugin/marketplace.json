@@ -1,0 +1,1 @@
+{ "name": "rl-probe2", "owner": { "name": "probe" }, "plugins": [ { "name": "rl-probe2", "source": "./plugin", "version": "0.0.1" }, { "name": "rl-probe3", "source": "./plugin-p3", "version": "0.0.1" } ] }

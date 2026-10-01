@@ -1,0 +1,24 @@
+{
+  "review": "Adversarial Review",
+  "target": {
+    "mode": "working-tree",
+    "label": "working tree diff",
+    "explicit": true
+  },
+  "threadId": "00000000-0000-7000-8000-000000000000",
+  "context": {
+    "repoRoot": "/tmp/repo",
+    "branch": "main",
+    "summary": "Reviewing 0 staged, 1 unstaged, and 0 untracked file(s)."
+  },
+  "codex": {
+    "status": 1,
+    "stderr": "",
+    "stdout": "",
+    "reasoning": []
+  },
+  "result": null,
+  "rawOutput": "",
+  "parseError": "unexpected status 401 Unauthorized: Missing bearer or basic authentication in header, url: https://api.openai.com/v1/responses, cf-ray: <ray>, request id: <id>",
+  "reasoningSummary": []
+}

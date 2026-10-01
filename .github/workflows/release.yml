@@ -1,0 +1,116 @@
+name: release
+on:
+  push:
+    tags: ["v*.*.*"]
+permissions:
+  contents: read
+jobs:
+  release:
+    runs-on: macos-14
+    timeout-minutes: 90
+    permissions:
+      contents: write
+    env:
+      # As in ci.yml: the suite's time-budget tests are tuned for a developer machine; shared runners are slower.
+      TEST_CONCURRENCY: 2
+    outputs:
+      version: ${{ steps.tarball.outputs.version }}
+      sha256: ${{ steps.tarball.outputs.sha256 }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          fetch-depth: 0
+          # The write token never lands in .git/config: only the two steps that write (release, plugin tag) get it.
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4.4.0
+        with:
+          node-version: "22"
+      - name: Tag, CLI, plugin and marketplace versions are equal
+        # release-check also refuses a tag that isn't X.Y.Z, so the version below is safe in paths and sed.
+        run: node scripts/release-check.mjs "${GITHUB_REF_NAME#v}"
+      - name: The tagged commit is on main (spec §9, releases come only from main)
+        run: git merge-base --is-ancestor HEAD origin/main
+      # The private denylist (docs/RELEASE.md) reaches only the gate steps, and --require-private fails the job when
+      # the secret is empty or missing: a release never ships on the generic rules alone.
+      - name: Content gate (packaged set, generic and private rules)
+        env:
+          CONTENT_GATE_DENYLIST: ${{ secrets.CONTENT_GATE_DENYLIST }}
+        run: node scripts/content-gate.mjs --require-private
+      - name: Content gate (every tracked file, private rules)
+        env:
+          CONTENT_GATE_DENYLIST: ${{ secrets.CONTENT_GATE_DENYLIST }}
+        run: node scripts/content-gate.mjs --tracked --require-private
+      - run: npm test
+      - run: npm run sabotage
+      - name: Build the tarball from the allowlisted set, then re-gate it
+        id: tarball
+        shell: bash
+        env:
+          CONTENT_GATE_DENYLIST: ${{ secrets.CONTENT_GATE_DENYLIST }}
+        run: |
+          set -euo pipefail
+          V="${GITHUB_REF_NAME#v}"
+          # Its own statement, never inline in git archive's arguments: a failing or empty list there would archive
+          # the whole of HEAD. Under set -e a failed substitution in an assignment stops the step.
+          FILES="$(node scripts/content-gate.mjs --list)"
+          if [ -z "$FILES" ]; then echo "release: content-gate --list printed no files; refusing to build" >&2; exit 1; fi
+          # One path per line: split on newlines only, with globbing off.
+          IFS=$'\n'; set -f
+          git archive --format=tar.gz --prefix="review-loop-$V/" -o "review-loop-$V.tar.gz" HEAD $FILES
+          set +f; unset IFS
+          mkdir extracted && tar -xzf "review-loop-$V.tar.gz" -C extracted
+          diff <(printf '%s\n' "$FILES" | LC_ALL=C sort) <(cd "extracted/review-loop-$V" && find . -type f | sed 's#^\./##' | LC_ALL=C sort)
+          node scripts/content-gate.mjs --dir "extracted/review-loop-$V" --require-private
+          SHA="$(shasum -a 256 "review-loop-$V.tar.gz" | cut -d' ' -f1)"
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "sha256=$SHA" >> "$GITHUB_OUTPUT"
+      - name: GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          V: ${{ steps.tarball.outputs.version }}
+        run: gh release create "$GITHUB_REF_NAME" "review-loop-$V.tar.gz" --verify-tag --title "review-loop $V" --generate-notes
+      - name: Install the pinned Claude Code CLI (no token here; npm install scripts could read one)
+        run: |
+          npm install -g @anthropic-ai/claude-code@2.1.284
+          git config user.name "review-loop release"
+          git config user.email "release@example.com"
+      - name: Plugin tag (validates plugin.json against the marketplace entry)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # The push inside `claude plugin tag --push` authenticates through git config read from the environment:
+          # never in a URL, argv or .git/config.
+          AUTH="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')"
+          echo "::add-mask::$AUTH"
+          export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0="http.https://github.com/.extraheader" GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $AUTH"
+          claude plugin tag plugin --push
+  tap-bump:
+    # The only job that can read TAP_PR_TOKEN (spec §9): it lives in the `release` environment, which requires a
+    # reviewer's approval before this job starts. The repo's own GITHUB_TOKEN gets no scopes here.
+    needs: release
+    runs-on: macos-14
+    timeout-minutes: 15
+    environment: release
+    permissions: {}
+    steps:
+      - name: Open the tap PR
+        env:
+          GH_TOKEN: ${{ secrets.TAP_PR_TOKEN }}
+          V: ${{ needs.release.outputs.version }}
+          SHA: ${{ needs.release.outputs.sha256 }}
+        run: |
+          # Clone and push authenticate through git config read from the environment: never in a URL, argv or
+          # .git/config. `gh` reads GH_TOKEN itself.
+          AUTH="$(printf 'x-access-token:%s' "$GH_TOKEN" | base64 | tr -d '\n')"
+          echo "::add-mask::$AUTH"
+          export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0="http.https://github.com/.extraheader" GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $AUTH"
+          git clone "https://github.com/MostViableProduct/homebrew-tap.git" tap
+          cd tap
+          git checkout -b "review-loop-$V"
+          F=Formula/review-loop.rb
+          # BSD sed (`-i ''`): this job runs on macOS; test/contract/release.test.mjs fails if it ever doesn't.
+          sed -i '' -E "s#^  url \".*\"#  url \"https://github.com/MostViableProduct/review-loop/releases/download/v$V/review-loop-$V.tar.gz\"#" "$F"
+          sed -i '' -E "s#^  sha256 \".*\"#  sha256 \"$SHA\"#" "$F"
+          git -c user.name="review-loop release" -c user.email="release@example.com" commit -am "review-loop $V"
+          git push origin "review-loop-$V"
+          gh pr create --repo MostViableProduct/homebrew-tap --head "review-loop-$V" --title "review-loop $V" --body "Automated bump to v$V (sha256 $SHA)."
