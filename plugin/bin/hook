@@ -30,9 +30,13 @@ log_event() { # $1 event, $2 data-json
   sid=$(printf '%s' "$input" | sed -n 's/.*"session_id":"\([A-Za-z0-9-]\{1,64\}\)".*/\1/p' | head -n 1)
   [ -n "$sid" ] && sid="\"$sid\"" || sid=null
   why=""
-  if [ ! -d "$state" ] || [ -L "$state" ] || [ ! -O "$state" ]; then why=state_dir_insecure
+  # As the node writer (events.mjs): a state dir others can read is refused, never chmodded; an existing log is
+  # narrowed to 0600 before the append, since umask only applies to a file this write creates.
+  dmode=$(stat -f %Lp "$state" 2>/dev/null || echo 777)
+  if [ ! -d "$state" ] || [ -L "$state" ] || [ ! -O "$state" ] || [ $((0$dmode & 077)) -ne 0 ]; then why=state_dir_insecure
   elif [ -L "$file" ] || { [ -e "$file" ] && [ ! -f "$file" ]; }; then why=write_failed  # >> would follow a link
   elif [ -f "$file" ] && [ "$(stat -f %z "$file" 2>/dev/null || echo 0)" -gt 5242880 ]; then why=size_cap
+  elif [ -f "$file" ] && [ $((0$(stat -f %Lp "$file" 2>/dev/null || echo 777) & 077)) -ne 0 ] && ! chmod -h 600 "$file" 2>/dev/null; then why=write_failed
   fi
   if [ -z "$why" ]; then
     ts=$(date -u +%Y-%m-%dT%H:%M:%S.000Z)

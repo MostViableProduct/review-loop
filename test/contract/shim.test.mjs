@@ -32,6 +32,24 @@ test("T-DOC-9: without node — stop blocks, pr denies, prverify stops, others l
   assert.deepEqual(ev.filter((l) => l.event === "hook.error").map((l) => l.data.stage), ["session", "track", "prompt"]);
 });
 
+test("T-DOC-9: without node the event log keeps the node writer's privacy: a loose state dir is refused, a loose log narrowed to 0600", () => {
+  const loose = path.join(tmpDir(), "state");
+  fs.mkdirSync(loose);
+  fs.chmodSync(loose, 0o755);
+  const r = run("stop", { session_id: "s-1", stop_hook_active: false }, loose);
+  assert.match(r.stdout, /"decision":"block"/, "the decision still goes out");
+  assert.match(r.stderr, /event log not writable \(state_dir_insecure\)/);
+  assert.equal(fs.existsSync(path.join(loose, "events.jsonl")), false, "nothing written into a readable dir");
+  assert.equal(fs.statSync(loose).mode & 0o777, 0o755, "the dir is verified, never chmodded");
+  const d = state();
+  const log = path.join(d, "events.jsonl");
+  fs.writeFileSync(log, "");
+  fs.chmodSync(log, 0o644);
+  run("stop", { session_id: "s-1", stop_hook_active: false }, d);
+  assert.equal(fs.statSync(log).mode & 0o777, 0o600);
+  assert.equal(events(d).length, 1);
+});
+
 test("T-DOC-9: without node the PR gates fail closed on every command, shell-escaped ones included; bad state dir → decision still emitted + one warning; hostile session id → null", () => {
   const d = state();
   const escaped = { session_id: "s-1", tool_name: "Bash", tool_input: { command: `${G} pr $'\\143reate' --title x` } };
