@@ -32,6 +32,18 @@ test("T-DOC-9: without node — stop blocks, pr denies, prverify stops, others l
   assert.deepEqual(ev.filter((l) => l.event === "hook.error").map((l) => l.data.stage), ["session", "track", "prompt"]);
 });
 
+test("T-DOC-9: without node an events log over 5 MiB is rotated to .1, as the node writer does, and logging continues", () => {
+  const d = state();
+  const log = path.join(d, "events.jsonl");
+  fs.writeFileSync(log, "x".repeat(5 * 1024 * 1024 + 1), { mode: 0o600 });
+  const r = run("stop", { session_id: "s-1", stop_hook_active: false }, d);
+  assert.match(r.stdout, /"decision":"block"/);
+  assert.equal(r.stderr, "", "no not-writable warning");
+  assert.equal(fs.statSync(`${log}.1`).size, 5 * 1024 * 1024 + 1, "the full log is kept as .1");
+  assert.equal(events(d).length, 1, "the new event starts a fresh log");
+  assert.equal(events(d)[0].data.outcome, "blocked");
+});
+
 test("T-DOC-9: without node a Stop is let through only for a top-level boolean stop_hook_active true", () => {
   const d = state();
   const raw = (body) => spawnSync("/bin/sh", [SHIM, "stop"], { env: { PATH: "/usr/bin:/bin", HOME: tmpDir(), REVIEW_LOOP_NODE_CANDIDATES: "/nonexistent/node", REVIEW_LOOP_STATE_DIR: d }, input: body, encoding: "utf8" });
@@ -80,7 +92,7 @@ test("T-DOC-9: without node the PR gates fail closed on every command, shell-esc
   fs.symlinkSync(real, link);
   const r = run("stop", { session_id: "s-1", stop_hook_active: false }, link);
   assert.match(r.stdout, /"decision":"block"/);
-  assert.match(r.stderr, /^review-loop: event log not writable \((state_dir_insecure|size_cap|write_failed)\)$/m);
+  assert.match(r.stderr, /^review-loop: event log not writable \((state_dir_insecure|write_failed)\)$/m);
   assert.doesNotMatch(r.stderr, /\//);
   const d2 = state();
   run("stop", { session_id: "../../etc/passwd", stop_hook_active: false }, d2);

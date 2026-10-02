@@ -43,7 +43,7 @@ log_event() { # $1 event, $2 data-json
   dmode=$(stat -f %Lp "$state" 2>/dev/null || echo 777)
   if [ ! -d "$state" ] || [ -L "$state" ] || [ ! -O "$state" ] || [ $((0$dmode & 077)) -ne 0 ]; then why=state_dir_insecure
   elif [ -L "$file" ] || { [ -e "$file" ] && [ ! -f "$file" ]; }; then why=write_failed  # >> would follow a link
-  elif [ -f "$file" ] && [ "$(stat -f %z "$file" 2>/dev/null || echo 0)" -gt 5242880 ]; then why=size_cap
+  elif [ -f "$file" ] && [ "$(stat -f %z "$file" 2>/dev/null || echo 0)" -gt 5242880 ] && ! mv -f "$file" "$file.1" 2>/dev/null; then why=write_failed  # rotate at 5 MiB, as events.mjs does
   elif [ -f "$file" ] && [ $((0$(stat -f %Lp "$file" 2>/dev/null || echo 777) & 077)) -ne 0 ] && ! chmod -h 600 "$file" 2>/dev/null; then why=write_failed
   fi
   if [ -z "$why" ]; then
