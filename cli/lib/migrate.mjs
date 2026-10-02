@@ -277,15 +277,11 @@ async function migrate(args, io, ctx) {
   const today = localDate();
   const cur = readSettings();
   const found = paths(today);
-  if (legacyHookCommands(cur.obj).length === 0 && !present(found.skill) && !present(found.legacyPin) && !present(found.engine)) {
-    // A run stopped after its last move (engine archived, record not yet marked done) leaves nothing legacy behind:
-    // finish that record here, or it stays in_progress for good.
-    const open = readManifest();
-    if (open?.status === "in_progress") {
-      saveManifest({ ...open, status: "done" });
-      io.err("Finished an interrupted migration: nothing legacy was left, so its record is now complete.\nTo undo: review-loop migrate --rollback\n");
-      return { code: "ok" };
-    }
+  // A run stopped part-way can leave nothing legacy behind yet still owe later steps (the rubric, the CLAUDE.md
+  // pointer). Its record is finished by the same flow below, whose every step checks before acting, never by
+  // marking it done here.
+  const resuming = readManifest()?.status === "in_progress";
+  if (!resuming && legacyHookCommands(cur.obj).length === 0 && !present(found.skill) && !present(found.legacyPin) && !present(found.engine)) {
     io.err("Nothing to migrate.\n");
     return { code: "ok" };
   }
@@ -414,8 +410,9 @@ async function migrate(args, io, ctx) {
     }
   }
 
-  // The legacy engine is the fallback while anything is wrong, so it moves only once doctor passes.
-  const gate = args.includes("--force-engine-move") ? "ok" : args.includes("--skip-doctor-gate") ? "skipped" : (await doctor([], io, { json: false })).code;
+  // The legacy engine is the fallback while anything is wrong, so it moves only once doctor passes. With no engine left
+  // to move (a resumed run that already archived it) there is nothing for the gate to hold back.
+  const gate = !present(P.engine) ? "skipped" : args.includes("--force-engine-move") ? "ok" : args.includes("--skip-doctor-gate") ? "skipped" : (await doctor([], io, { json: false })).code;
   if (gate !== "ok" && gate !== "skipped") {
     // The record stays in_progress: the engine step is pending, and the next `migrate` continues this record.
     saveManifest(m);
@@ -428,7 +425,7 @@ async function migrate(args, io, ctx) {
   }
   m.status = "done";
   saveManifest(m);
-  io.err("\nMigrated. Restart Claude Code sessions to load the plugin.\nTo undo: review-loop migrate --rollback\nVerify with a live round: review-loop doctor --live\n");
+  io.err(`\n${resuming ? "Finished an interrupted migration; its record is now complete." : "Migrated."} Restart Claude Code sessions to load the plugin.\nTo undo: review-loop migrate --rollback\nVerify with a live round: review-loop doctor --live\n`);
   return { code: "ok" };
 }
 

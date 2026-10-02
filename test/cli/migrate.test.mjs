@@ -509,6 +509,32 @@ test("a run stopped after archiving the engine but before marking its record don
   assert.match(again.lines.join(""), /Nothing to migrate/, "a finished record is not finished twice");
 });
 
+test("a run interrupted after the settings update, with no engine, skill or pin, still applies the rubric and CLAUDE.md steps on resume", async () => {
+  const { c } = authorShaped();
+  for (const p of [path.join(c, "review-loop"), path.join(c, "skills", "review-loop")]) fs.rmSync(p, { recursive: true });
+  const rubric = path.join(c, "rules", "multi-dimension-review.md");
+  assert.equal(await main(["migrate", "--yes", "--skip-doctor-gate"], io()), 0);
+  const full = JSON.parse(fs.readFileSync(manifestFile(), "utf8"));
+  assert.deepEqual(full.steps.map((s) => s.resource), ["plugin", "settings", "config", "claude_md"]);
+  // The crash window: the settings write committed, nothing after it ran, the record still in_progress.
+  fs.writeFileSync(manifestFile(), JSON.stringify({ ...full, status: "in_progress", steps: full.steps.slice(0, 2) }));
+  fs.rmSync(process.env.REVIEW_LOOP_CONFIG);
+  fs.writeFileSync(path.join(c, "CLAUDE.md"), CLAUDE_MD);
+  const o = io();
+  assert.equal(await main(["migrate", "--yes"], o), 0, "no engine left to move, so no doctor gate");
+  assert.match(o.lines.join(""), /Finished an interrupted migration/);
+  assert.equal(JSON.parse(fs.readFileSync(process.env.REVIEW_LOOP_CONFIG, "utf8")).rubricPath, rubric, "the rubric step ran");
+  assert.notEqual(fs.readFileSync(path.join(c, "CLAUDE.md"), "utf8"), CLAUDE_MD, "the CLAUDE.md step ran");
+  const after = JSON.parse(fs.readFileSync(manifestFile(), "utf8"));
+  assert.equal(after.status, "done");
+  assert.deepEqual(after.steps.map((s) => s.resource), ["plugin", "settings", "config", "claude_md"], "earlier steps kept as recorded, later ones recorded once");
+  assert.deepEqual(after.steps.slice(0, 2), full.steps.slice(0, 2));
+  // The resumed steps are real undo data: rollback restores what they changed.
+  assert.equal(await main(["migrate", "--rollback", "--yes"], io()), 0);
+  assert.equal(fs.existsSync(process.env.REVIEW_LOOP_CONFIG), false, "the config the resume created is removed");
+  assert.equal(fs.readFileSync(path.join(c, "CLAUDE.md"), "utf8"), CLAUDE_MD);
+});
+
 test("rollback with an archived folder deleted never claims success; putting the folder back lets a retry finish", async () => {
   const { c } = authorShaped();
   assert.equal(await main(["migrate", "--yes", "--skip-doctor-gate", "--force-engine-move"], io()), 0);
