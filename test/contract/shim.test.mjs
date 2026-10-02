@@ -32,11 +32,17 @@ test("T-DOC-9: without node — stop blocks, pr denies, prverify stops, others l
   assert.deepEqual(ev.filter((l) => l.event === "hook.error").map((l) => l.data.stage), ["session", "track", "prompt"]);
 });
 
-test("T-DOC-9 (−): non-PR Bash passes silently; bad state dir → decision still emitted + one warning; hostile session id → null", () => {
+test("T-DOC-9: without node the PR gates fail closed on every command, shell-escaped ones included; bad state dir → decision still emitted + one warning; hostile session id → null", () => {
   const d = state();
+  const escaped = { session_id: "s-1", tool_name: "Bash", tool_input: { command: `${G} pr $'\\143reate' --title x` } };
   const ls = { session_id: "s-1", tool_name: "Bash", tool_input: { command: "ls" } };
-  for (const m of ["pr", "prverify"]) { const r = run(m, ls, d); assert.equal(r.stdout, ""); }
-  assert.equal(events(d).length, 0);
+  for (const input of [escaped, ls]) {
+    const pr = JSON.parse(run("pr", input, d).stdout);
+    assert.equal(pr.hookSpecificOutput.permissionDecision, "deny");
+    assert.match(pr.hookSpecificOutput.permissionDecisionReason, /every Bash command is blocked\. In your own terminal, run: brew install node/);
+    assert.equal(JSON.parse(run("prverify", input, d).stdout).continue, false);
+  }
+  assert.deepEqual(events(d).map((l) => `${l.data.gate}:${l.data.outcome}`), ["pr:denied", "prverify:denied", "pr:denied", "prverify:denied"]);
   const real = state();
   const link = path.join(tmpDir(), "state-link");
   fs.symlinkSync(real, link);

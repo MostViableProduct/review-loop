@@ -19,10 +19,10 @@ fi
 
 input=$(cat)
 reason="review-loop: Node.js not found — run: brew install node"
-
-pr_like() {
-  printf '%s' "$input" | grep -Eiq 'pr[^a-z0-9]+(create|merge)|/pulls|/merge|create_pull_request|merge_pull_request|createpullrequest|mergepullrequest|graphql'
-}
+# Without node there is no parser, and a pattern match is bypassable by shell syntax (gh pr $'\143reate'): the PR gates
+# fail closed on every command they see (author's decision, round 23). Node is a hard dependency, so this is a broken
+# install; the install runs from the user's own terminal.
+blocked="review-loop: Node.js not found, so no command can be checked for a PR operation; every Bash command is blocked. In your own terminal, run: brew install node"
 
 log_event() { # $1 event, $2 data-json
   state="${REVIEW_LOOP_STATE_DIR:-$HOME/.claude/state/review-loop}"
@@ -50,11 +50,9 @@ case "$mode" in
     log_event gate.decision '{"gate":"stop","outcome":"blocked","preset":"default","pending_count":null}'
     printf '{"decision":"block","reason":"%s"}\n' "$reason";;
   pr)
-    pr_like || exit 0
     log_event gate.decision '{"gate":"pr","outcome":"denied","preset":"default","pending_count":null}'
-    printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"%s"}}\n' "$reason";;
+    printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"%s"}}\n' "$blocked";;
   prverify)
-    pr_like || exit 0
     log_event gate.decision '{"gate":"prverify","outcome":"denied","preset":"default","pending_count":null}'
     printf '{"continue":false,"stopReason":"review-loop: Node.js not found, so this PR could not be verified against the reviewed commit. Check it, then run: brew install node"}\n';;
   session|track|prompt)

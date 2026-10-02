@@ -9,6 +9,8 @@ on:
     branches: [main]
     paths:
       - "plugin/engine/lib/events.mjs"
+      - "plugin/bin/hook"
+      - "test/contract/shim.test.mjs"
       - "scripts/tap-formula.mjs"
       - "test/contract/tap-formula.test.mjs"
       - "homebrew-tap/.github/workflows/tests.yml"
@@ -68,6 +70,8 @@ on:
   pull_request:
     paths:
       - "plugin/engine/lib/events.mjs"
+      - "plugin/bin/hook"
+      - "test/contract/shim.test.mjs"
       - "scripts/tap-formula.mjs"
       - "test/contract/tap-formula.test.mjs"
       - "homebrew-tap/.github/workflows/tests.yml"
