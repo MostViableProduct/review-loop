@@ -32,6 +32,22 @@ stop_active() {
     [ "$(printf '%s' "$input" | /usr/bin/plutil -extract stop_hook_active raw -o - - 2>/dev/null)" = true ]
 }
 
+# Advisory never blocks, Node or not (README presets; author's decision, round 27). The preset comes from the same file
+# config.mjs reads, under its rules: a symlink, a file over 64 KiB, or a non-string preset is not trusted, and anything
+# but "advisory" (unreadable config included) keeps the blocking default, as the node hook's quietPreset does.
+config_file() {
+  if [ -n "${REVIEW_LOOP_CONFIG:-}" ]; then printf '%s' "$REVIEW_LOOP_CONFIG"; return; fi
+  case "${XDG_CONFIG_HOME:-}" in /*) printf '%s' "$XDG_CONFIG_HOME/review-loop/config.json";; *) printf '%s' "$HOME/.config/review-loop/config.json";; esac
+}
+advisory() {
+  cfg=$(config_file)
+  [ -f "$cfg" ] && [ ! -L "$cfg" ] && [ "$(stat -f %z "$cfg" 2>/dev/null || echo 65537)" -le 65536 ] &&
+    [ "$(/usr/bin/plutil -type preset "$cfg" 2>/dev/null)" = string ] &&
+    [ "$(/usr/bin/plutil -extract preset raw -o - "$cfg" 2>/dev/null)" = advisory ]
+}
+if advisory; then preset=advisory; else preset=default; fi
+warn="⚠ review-loop (Advisory): Node.js not found, so review is not enforced — run: brew install node — allowed under Advisory"
+
 log_event() { # $1 event, $2 data-json
   state="${REVIEW_LOOP_STATE_DIR:-$HOME/.claude/state/review-loop}"
   file="$state/events.jsonl"
@@ -58,15 +74,25 @@ log_event() { # $1 event, $2 data-json
 
 case "$mode" in
   stop)
-    if stop_active; then log_event gate.decision '{"gate":"stop","outcome":"allowed","preset":"default","pending_count":null}'; exit 0; fi
-    log_event gate.decision '{"gate":"stop","outcome":"blocked","preset":"default","pending_count":null}'
-    printf '{"decision":"block","reason":"%s"}\n' "$reason";;
-  pr)
-    log_event gate.decision '{"gate":"pr","outcome":"denied","preset":"default","pending_count":null}'
-    printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"%s"}}\n' "$blocked";;
-  prverify)
-    log_event gate.decision '{"gate":"prverify","outcome":"denied","preset":"default","pending_count":null}'
-    printf '{"continue":false,"stopReason":"review-loop: Node.js not found, so this PR could not be verified against the reviewed commit. Check it, then run: brew install node"}\n';;
+    if stop_active; then log_event gate.decision "{\"gate\":\"stop\",\"outcome\":\"allowed\",\"preset\":\"$preset\",\"pending_count\":null}"; exit 0; fi
+    if [ "$preset" = advisory ]; then
+      log_event gate.decision '{"gate":"stop","outcome":"warned","preset":"advisory","pending_count":null}'
+      printf '{"systemMessage":"%s"}\n' "$warn"
+    else
+      log_event gate.decision '{"gate":"stop","outcome":"blocked","preset":"default","pending_count":null}'
+      printf '{"decision":"block","reason":"%s"}\n' "$reason"
+    fi;;
+  pr|prverify)
+    if [ "$preset" = advisory ]; then
+      log_event gate.decision "{\"gate\":\"$mode\",\"outcome\":\"warned\",\"preset\":\"advisory\",\"pending_count\":null}"
+      printf '{"systemMessage":"%s"}\n' "$warn"
+    elif [ "$mode" = pr ]; then
+      log_event gate.decision '{"gate":"pr","outcome":"denied","preset":"default","pending_count":null}'
+      printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"%s"}}\n' "$blocked"
+    else
+      log_event gate.decision '{"gate":"prverify","outcome":"denied","preset":"default","pending_count":null}'
+      printf '{"continue":false,"stopReason":"review-loop: Node.js not found, so this PR could not be verified against the reviewed commit. Check it, then run: brew install node"}\n'
+    fi;;
   session|track|prompt)
     log_event hook.error "{\"stage\":\"$mode\",\"mode\":\"$mode\"}"
     printf '%s\n' "$reason" >&2;;

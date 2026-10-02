@@ -32,6 +32,33 @@ test("T-DOC-9: without node — stop blocks, pr denies, prverify stops, others l
   assert.deepEqual(ev.filter((l) => l.event === "hook.error").map((l) => l.data.stage), ["session", "track", "prompt"]);
 });
 
+test("T-DOC-9: without node the Advisory preset still never blocks; any other or untrusted preset blocks", () => {
+  const cfgDir = tmpDir();
+  const cfg = path.join(cfgDir, "config.json");
+  const write = (preset) => fs.writeFileSync(cfg, JSON.stringify({ version: 1, preset, codex: { model: null, effort: null }, rubricPath: null, events: { path: null } }));
+  const go = (mode, input, d, config = cfg) => spawnSync("/bin/sh", [SHIM, mode], { env: { PATH: "/usr/bin:/bin", HOME: tmpDir(), REVIEW_LOOP_NODE_CANDIDATES: "/nonexistent/node", REVIEW_LOOP_STATE_DIR: d, REVIEW_LOOP_CONFIG: config }, input: JSON.stringify(input), encoding: "utf8" });
+  const stop = { session_id: "s-1", stop_hook_active: false };
+  write("advisory");
+  const d = state();
+  for (const [mode, input] of [["stop", stop], ["pr", prCreate], ["prverify", prCreate]]) {
+    const out = JSON.parse(go(mode, input, d).stdout);
+    assert.deepEqual(Object.keys(out), ["systemMessage"], `${mode}: a warning only, no decision`);
+    assert.match(out.systemMessage, /^⚠ review-loop \(Advisory\): Node\.js not found.*allowed under Advisory$/);
+  }
+  assert.deepEqual(events(d).map((l) => `${l.data.gate}:${l.data.outcome}:${l.data.preset}`), ["stop:warned:advisory", "pr:warned:advisory", "prverify:warned:advisory"]);
+  for (const l of events(d)) assert.deepEqual(validateLine(l), [], JSON.stringify(l));
+  // Not advisory, or not trustworthy: the blocking default.
+  write("balanced");
+  assert.match(go("stop", stop, state()).stdout, /"decision":"block"/);
+  fs.writeFileSync(cfg, JSON.stringify({ preset: ["advisory"] }));
+  assert.match(go("stop", stop, state()).stdout, /"decision":"block"/, "a non-string preset");
+  write("advisory");
+  const link = path.join(tmpDir(), "config.json");
+  fs.symlinkSync(cfg, link);
+  assert.match(go("stop", stop, state(), link).stdout, /"decision":"block"/, "a symlinked config is never followed");
+  assert.match(go("pr", prCreate, state(), link).stdout, /"permissionDecision":"deny"/);
+});
+
 test("T-DOC-9: without node an events log over 5 MiB is rotated to .1, as the node writer does, and logging continues", () => {
   const d = state();
   const log = path.join(d, "events.jsonl");
