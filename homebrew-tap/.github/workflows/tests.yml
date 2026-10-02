@@ -1,6 +1,7 @@
 name: tests
 # Pull requests only: every formula change arrives as a release PR (review-loop's release.yml), whose url and sha256
-# already resolve. The bootstrap push of main (placeholder sha256, no release yet) therefore triggers no run.
+# already resolve. Before the first release the tap holds no formula at all: one that could not install is never
+# published.
 on:
   pull_request:
   workflow_dispatch:
@@ -44,11 +45,11 @@ jobs:
           declare -f snap > "$RUNNER_TEMP/snap.sh"
       - name: Install the released version (none before the very first release)
         run: |
-          if grep -Eq 'sha256 "0{64}"' base/Formula/review-loop.rb; then echo "FIRST=1" >> "$GITHUB_ENV"; echo "first release: nothing to upgrade from"
+          if [ ! -f base/Formula/review-loop.rb ]; then echo "FIRST=1" >> "$GITHUB_ENV"; echo "first release: nothing to upgrade from"
           else brew install MostViableProduct/tap/review-loop; fi
       - name: Upgrade to this PR's formula (install on the first release)
         run: |
-          cp head/Formula/review-loop.rb "$TAP/Formula/review-loop.rb"
+          mkdir -p "$TAP/Formula"; cp head/Formula/review-loop.rb "$TAP/Formula/review-loop.rb"
           brew audit --strict --online MostViableProduct/tap/review-loop
           if [ "${FIRST:-}" = 1 ]; then brew install --build-from-source MostViableProduct/tap/review-loop
           else brew upgrade --build-from-source MostViableProduct/tap/review-loop; fi

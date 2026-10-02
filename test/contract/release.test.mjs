@@ -231,7 +231,20 @@ test("BSD `sed -i ''` appears only in jobs that run on macOS (both repos)", () =
     }
   }
   assert.ok(checked >= 5, `found ${checked} jobs`);
-  assert.ok(/\bsed -i ''/.test(RELEASE_YML), "the check has a real subject: release.yml's tap bump");
+});
+
+test("the tap gets a formula only from tap-formula, naming the release archive; before the first release it has none", () => {
+  const release = jobs(RELEASE_YML).find((j) => j.name === "release")?.text ?? "";
+  const tap = jobs(RELEASE_YML).find((j) => j.name === "tap-bump")?.text ?? "";
+  assert.match(release, /node scripts\/tap-formula\.mjs "\$V" "\$SHA" > "\$RUNNER_TEMP\/review-loop\.rb"/);
+  assert.match(release, /formula: \$\{\{ steps\.tarball\.outputs\.formula \}\}/);
+  assert.match(tap, /FORMULA: \$\{\{ needs\.release\.outputs\.formula \}\}/);
+  assert.match(tap, /printf '%s' "\$FORMULA" \| base64 -d > "\$F"/);
+  assert.match(tap, /grep -qx " {2}sha256 \\"\$SHA\\"" "\$F" \|\|/, "the written formula is checked against the archive's sha256");
+  assert.ok(!/\bsed -i/.test(tap), "the formula is never edited in place in the tap");
+  const tests = fs.readFileSync("homebrew-tap/.github/workflows/tests.yml", "utf8");
+  assert.match(tests, /if \[ ! -f base\/Formula\/review-loop\.rb \]; then echo "FIRST=1"/, "first release = no formula in the tap yet");
+  assert.ok(!/0\{64\}/.test(tests), "a placeholder checksum is never a state the tap can be in");
 });
 
 test("TAP_PR_TOKEN is read only by the tap-bump job, which runs in the `release` environment with no repo scopes", () => {

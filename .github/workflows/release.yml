@@ -16,6 +16,7 @@ jobs:
     outputs:
       version: ${{ steps.tarball.outputs.version }}
       sha256: ${{ steps.tarball.outputs.sha256 }}
+      formula: ${{ steps.tarball.outputs.formula }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
         with:
@@ -64,6 +65,10 @@ jobs:
           SHA="$(shasum -a 256 "review-loop-$V.tar.gz" | cut -d' ' -f1)"
           echo "version=$V" >> "$GITHUB_OUTPUT"
           echo "sha256=$SHA" >> "$GITHUB_OUTPUT"
+          # The tap's formula, naming this archive: tap-formula refuses a placeholder or malformed sha256, which no
+          # Homebrew install could ever pass. Handed to tap-bump, which has no checkout of this repo.
+          node scripts/tap-formula.mjs "$V" "$SHA" > "$RUNNER_TEMP/review-loop.rb"
+          echo "formula=$(base64 < "$RUNNER_TEMP/review-loop.rb" | tr -d '\n')" >> "$GITHUB_OUTPUT"
       - name: GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -98,6 +103,7 @@ jobs:
           GH_TOKEN: ${{ secrets.TAP_PR_TOKEN }}
           V: ${{ needs.release.outputs.version }}
           SHA: ${{ needs.release.outputs.sha256 }}
+          FORMULA: ${{ needs.release.outputs.formula }}
         run: |
           # Clone and push authenticate through git config read from the environment: never in a URL, argv or
           # .git/config. `gh` reads GH_TOKEN itself.
@@ -107,10 +113,12 @@ jobs:
           git clone "https://github.com/MostViableProduct/homebrew-tap.git" tap
           cd tap
           git checkout -b "review-loop-$V"
+          # Written whole from the release job's tap-formula output: the tap holds no formula before the first release.
           F=Formula/review-loop.rb
-          # BSD sed (`-i ''`): this job runs on macOS; test/contract/release.test.mjs fails if it ever doesn't.
-          sed -i '' -E "s#^  url \".*\"#  url \"https://github.com/MostViableProduct/review-loop/releases/download/v$V/review-loop-$V.tar.gz\"#" "$F"
-          sed -i '' -E "s#^  sha256 \".*\"#  sha256 \"$SHA\"#" "$F"
-          git -c user.name="review-loop release" -c user.email="release@example.com" commit -am "review-loop $V"
+          mkdir -p Formula
+          printf '%s' "$FORMULA" | base64 -d > "$F"
+          grep -qx "  sha256 \"$SHA\"" "$F" || { echo "::error::the formula does not carry this release's sha256" >&2; exit 1; }
+          git add "$F"
+          git -c user.name="review-loop release" -c user.email="release@example.com" commit -m "review-loop $V"
           git push origin "review-loop-$V"
           gh pr create --repo MostViableProduct/homebrew-tap --head "review-loop-$V" --title "review-loop $V" --body "Automated bump to v$V (sha256 $SHA)."
