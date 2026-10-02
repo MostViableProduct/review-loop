@@ -63,11 +63,16 @@ Every step is a command with its expected output. Stop at the first mismatch.
 - **Before the `GitHub release` step:** nothing was published. Fix the cause on `main`, delete the tag
   (`git push origin :refs/tags/vX.Y.Z && git tag -d vX.Y.Z`), bump to the next patch version and start again
   from step 1.
-- **At or after `GitHub release`, in the `release` job:** delete the release and its tag
+- **At or after `GitHub release`, in the `release` job:** fix a transient cause (a network error, a failed
+  install) and re-run the failed jobs from the Actions page. The re-run finds the published release and requires
+  its archive to be the one it rebuilt, byte for byte. It uploads the archive if the release has none, and skips
+  the plugin tag when that tag is already on this commit. It stops with an error instead of replacing a different
+  archive or moving the tag. If the cause needs a code change, delete the release and its tag
   (`gh release delete vX.Y.Z --cleanup-tag --yes`), delete the plugin tag if it was pushed
   (`git push origin :refs/tags/review-loop--vX.Y.Z`), then continue as above.
 - **`Plugin tag` needs sign-in on the runner:** delete that step from `release.yml` in a PR, and from then on
   run `claude plugin tag plugin --push` locally, right after step 7's workflow run passes its version check.
 - **In the `tap-bump` job:** the release is already published. Re-run only that job from the Actions page; it
-  reuses the `release` job's version and sha256. If its branch `review-loop-X.Y.Z` was already pushed, delete
-  the branch on the tap first.
+  reuses the `release` job's version and sha256. A branch `review-loop-X.Y.Z` that is already on the tap is
+  reused when it carries this exact formula, and an existing PR for it is not opened twice. A branch with a
+  different formula stops the job: delete that branch on the tap, then re-run.

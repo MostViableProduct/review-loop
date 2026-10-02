@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { execFileSync, spawnSync } from "node:child_process";
@@ -390,4 +391,166 @@ test("MIN_CLAUDE is the version setup's user-scope install was verified on, and 
     assert.ok(pins.length > 0, `${file} installs a pinned Claude Code`);
     assert.deepEqual([...new Set(pins)], [MIN_CLAUDE], `${file} pins the preflight minimum`);
   }
+});
+
+/** The `run: |` script of a named step, unindented, exactly as the runner gets it. @param {string} job @param {string} name */
+function runScript(job, name) {
+  const step = steps(jobs(RELEASE_YML).find((j) => j.name === job)?.text ?? "").find((s) => s.startsWith(`      - name: ${name}`));
+  const m = /^ {8}run: \|\n((?: {10}.*(?:\n|$))+)/m.exec(step ?? "");
+  assert.ok(m, `${job} / ${name}: a run block`);
+  return m[1].split("\n").map((l) => l.slice(10)).join("\n");
+}
+
+/**
+ * A GitHub stand-in for the release steps: one release with its assets, and the tap's PRs, kept in a state dir so
+ * reruns see what earlier runs published. `fail` lists "<subcommand> <verb>" calls that fail once.
+ */
+function fakeGitHub(bin) {
+  const state = tmpDir("rl-gh-");
+  fs.writeFileSync(path.join(state, "state.json"), JSON.stringify({ release: false, prs: [], fail: [] }));
+  fs.writeFileSync(path.join(bin, "gh"), `#!${process.execPath}
+const fs = require("node:fs"), path = require("node:path");
+const S = ${JSON.stringify(state)}, file = path.join(S, "state.json");
+const st = JSON.parse(fs.readFileSync(file, "utf8"));
+const a = process.argv.slice(2), op = a.slice(0, 2).join(" ");
+fs.appendFileSync(path.join(S, "log"), op + "\\n");
+const flag = (n) => { const i = a.indexOf(n); return i < 0 ? null : a[i + 1]; };
+const asset = (n) => path.join(S, "asset-" + n);
+const save = () => fs.writeFileSync(file, JSON.stringify(st));
+const fail = (m) => { process.stderr.write(m + "\\n"); process.exitCode = 1; };
+if (st.fail.includes(op)) { st.fail = st.fail.filter((f) => f !== op); save(); fail("injected failure: " + op); }
+else if (op === "release view") st.release ? process.stdout.write("{}\\n") : fail("release not found");
+else if (op === "release create") { if (st.release) fail("a release with the same tag name already exists"); else { st.release = true; fs.copyFileSync(a[3], asset(path.basename(a[3]))); save(); } }
+else if (op === "release download") { const p = flag("--pattern"); fs.existsSync(asset(p)) ? fs.copyFileSync(asset(p), path.join(flag("--dir"), p)) : fail("no assets match the file pattern"); }
+else if (op === "release upload") { const n = path.basename(a[3]); fs.existsSync(asset(n)) ? fail("asset under the same name already exists") : fs.copyFileSync(a[3], asset(n)); }
+else if (op === "pr list") process.stdout.write(st.prs.filter((p) => p.head === flag("--head")).map((p) => p.n + "\\n").join(""));
+else if (op === "pr create") { st.prs.push({ n: st.prs.length + 1, head: flag("--head") }); save(); }
+else fail("fake gh: unexpected " + a.join(" "));
+`, { mode: 0o755 });
+  const st = () => JSON.parse(fs.readFileSync(path.join(state, "state.json"), "utf8"));
+  return {
+    calls: () => (fs.existsSync(path.join(state, "log")) ? fs.readFileSync(path.join(state, "log"), "utf8").trim().split("\n") : []),
+    failOnce: (op) => fs.writeFileSync(path.join(state, "state.json"), JSON.stringify({ ...st(), fail: [...st().fail, op] })),
+    prs: () => st().prs,
+    releaseWithoutAsset: () => fs.writeFileSync(path.join(state, "state.json"), JSON.stringify({ ...st(), release: true })),
+  };
+}
+
+/** Real git against local bare repos standing in for both GitHub repos; a fresh checkout per run, as on a runner. */
+function releaseRig() {
+  const base = tmpDir("rl-rel-");
+  const bin = path.join(base, "bin");
+  fs.mkdirSync(bin);
+  const gh = fakeGitHub(bin);
+  // `claude plugin tag plugin --push`, as documented: an annotated {name}--v{version} tag, refused when it exists.
+  fs.writeFileSync(path.join(bin, "claude"), `#!/bin/sh
+echo "$*" >> "${base}/claude.log"
+[ -f "${base}/claude.fail" ] && { echo "injected claude failure" >&2; exit 1; }
+git rev-parse -q --verify "refs/tags/review-loop--v$V" >/dev/null && { echo "tag exists" >&2; exit 1; }
+git tag -a "review-loop--v$V" -m "review-loop $V" && git push -q origin "refs/tags/review-loop--v$V"
+`, { mode: 0o755 });
+  const gitconfig = path.join(base, "gitconfig");
+  const env = { PATH: `${bin}:/usr/bin:/bin`, HOME: base, GIT_CONFIG_GLOBAL: gitconfig, GIT_CONFIG_NOSYSTEM: "1", GITHUB_REF_NAME: "v1.2.3", V: "1.2.3" };
+  const git = (/** @type {string} */ cwd, /** @type {string[]} */ ...a) => execFileSync("git", a, { cwd, env, encoding: "utf8" }).trim();
+  const origin = path.join(base, "origin.git");
+  const tap = path.join(base, "tap.git");
+  fs.writeFileSync(gitconfig, `[user]\n\tname = t\n\temail = t@example.com\n[init]\n\tdefaultBranch = main\n[url "${tap}"]\n\tinsteadOf = https://github.com/MostViableProduct/homebrew-tap.git\n`);
+  for (const [bare, file] of [[origin, "plugin.txt"], [tap, "README.md"]]) {
+    git(base, "init", "-q", "--bare", bare);
+    const seed = tmpDir("rl-seed-");
+    git(seed, "init", "-q");
+    fs.writeFileSync(path.join(seed, file), "x\n");
+    git(seed, "add", ".");
+    git(seed, "commit", "-q", "-m", "seed");
+    git(seed, "push", "-q", bare, "HEAD:refs/heads/main");
+  }
+  /** One runner attempt of a step: a fresh workspace, so nothing carries over but what the remotes hold. */
+  const run = (/** @type {string} */ job, /** @type {string} */ name, /** @type {Record<string, string>} */ extra = {}) => {
+    const ws = tmpDir("rl-ws-");
+    if (job === "release") {
+      git(ws, "clone", "-q", origin, ".");
+      fs.writeFileSync(path.join(ws, "review-loop-1.2.3.tar.gz"), extra.TARBALL ?? "archive bytes");
+    }
+    const sha = crypto.createHash("sha256").update(extra.TARBALL ?? "archive bytes").digest("hex");
+    const formula = Buffer.from(`class ReviewLoop < Formula\n${extra.FORMULA_EXTRA ?? ""}  sha256 "${sha}"\nend\n`).toString("base64");
+    return spawnSync("/bin/bash", ["-c", runScript(job, name)], { cwd: ws, env: { ...env, RUNNER_TEMP: tmpDir("rl-tmp-"), SHA: sha, FORMULA: formula, GH_TOKEN: "t" }, encoding: "utf8" });
+  };
+  const tagAt = () => git(origin, "for-each-ref", "--format=%(*objectname)", "refs/tags/review-loop--v1.2.3");
+  const claudeCalls = () => (fs.existsSync(path.join(base, "claude.log")) ? fs.readFileSync(path.join(base, "claude.log"), "utf8").trim().split("\n").length : 0);
+  return { base, gh, run, git, origin, tap, tagAt, claudeCalls };
+}
+
+const RELEASE = "GitHub release";
+const PLUGIN_TAG = "Plugin tag (validates plugin.json against the marketplace entry)";
+
+test("release.yml: a rerun after a failure past publication finishes every step once and never republishes", () => {
+  const r = releaseRig();
+  const head = r.git(r.origin, "rev-parse", "main");
+  // Attempt 1: the release is published, then the plugin tag fails.
+  fs.writeFileSync(path.join(r.base, "claude.fail"), "");
+  assert.equal(r.run("release", RELEASE).status, 0);
+  assert.notEqual(r.run("release", PLUGIN_TAG).status, 0);
+  assert.equal(r.tagAt(), "", "no plugin tag yet");
+  // Attempt 2 (re-run): the release is found and its archive checked, not created again; the tag is pushed.
+  fs.rmSync(path.join(r.base, "claude.fail"));
+  const again = r.run("release", RELEASE);
+  assert.equal(again.status, 0, again.stderr);
+  assert.match(again.stdout, /already published with this archive/);
+  assert.equal(r.run("release", PLUGIN_TAG).status, 0);
+  assert.equal(r.tagAt(), head, "the plugin tag names the release commit");
+  // Attempt 3: everything is already done; claude is not asked to tag again.
+  const calls = r.claudeCalls();
+  const third = r.run("release", PLUGIN_TAG);
+  assert.equal(third.status, 0, third.stderr);
+  assert.match(third.stdout, /already pushed at this commit/);
+  assert.equal(r.claudeCalls(), calls);
+  assert.deepEqual(r.gh.calls().filter((c) => c === "release create"), ["release create"], "published exactly once");
+  // The tap PR: the branch is pushed, then opening the PR fails; the re-run reuses the branch and opens one PR.
+  r.gh.failOnce("pr create");
+  assert.notEqual(r.run("tap-bump", "Open the tap PR").status, 0);
+  assert.notEqual(r.git(r.tap, "ls-remote", "--heads", r.tap, "review-loop-1.2.3"), "", "branch pushed before the failure");
+  const tapAgain = r.run("tap-bump", "Open the tap PR");
+  assert.equal(tapAgain.status, 0, tapAgain.stderr);
+  assert.match(tapAgain.stdout, /already pushed with this formula/);
+  const tapThird = r.run("tap-bump", "Open the tap PR");
+  assert.equal(tapThird.status, 0, tapThird.stderr);
+  assert.match(tapThird.stdout, /already exists; nothing to open/);
+  assert.equal(r.gh.prs().length, 1, "one tap PR");
+});
+
+test("release.yml (−): a rerun never ships a different archive, moves the plugin tag, or reuses a different tap formula", () => {
+  const r = releaseRig();
+  assert.equal(r.run("release", RELEASE).status, 0);
+  const other = r.run("release", RELEASE, { TARBALL: "different bytes" });
+  assert.notEqual(other.status, 0);
+  assert.match(other.stderr, /already carries a different review-loop-1\.2\.3\.tar\.gz/);
+  assert.equal(r.run("release", PLUGIN_TAG).status, 0);
+  const tagged = r.tagAt();
+  // main moves on; a re-run from the new commit must not move the tag.
+  const seed = tmpDir("rl-seed-");
+  r.git(seed, "clone", "-q", r.origin, ".");
+  fs.writeFileSync(path.join(seed, "more.txt"), "y\n");
+  r.git(seed, "add", ".");
+  r.git(seed, "commit", "-q", "-m", "more");
+  r.git(seed, "push", "-q", "origin", "HEAD:main");
+  const moved = r.run("release", PLUGIN_TAG);
+  assert.notEqual(moved.status, 0);
+  assert.match(moved.stderr, /already exists at [0-9a-f]{40}, not at this release's commit; it is never moved/);
+  assert.equal(r.tagAt(), tagged);
+  // The tap branch exists with another formula: refused, never overwritten.
+  r.gh.failOnce("pr create");
+  r.run("tap-bump", "Open the tap PR");
+  const diff = r.run("tap-bump", "Open the tap PR", { FORMULA_EXTRA: "  # another build\n" });
+  assert.notEqual(diff.status, 0);
+  assert.match(diff.stderr, /tap branch review-loop-1\.2\.3 already exists with a different formula/);
+  assert.equal(r.gh.prs().length, 0);
+});
+
+test("release.yml: a release left without its archive (create failed midway) gets the archive uploaded on the re-run", () => {
+  const r = releaseRig();
+  r.gh.releaseWithoutAsset();
+  const res = r.run("release", RELEASE);
+  assert.equal(res.status, 0, res.stderr);
+  assert.deepEqual(r.gh.calls(), ["release view", "release download", "release upload"]);
+  assert.equal(r.run("release", RELEASE).status, 0, "and the next re-run finds it in place");
 });
