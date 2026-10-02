@@ -78,6 +78,20 @@ test("T-DOC-9: without node the Advisory preset still never blocks; any other or
   fs.symlinkSync(cfg, link);
   assert.match(go("stop", stop, state(), link).stdout, /"decision":"block"/, "a symlinked config is never followed");
   assert.match(go("pr", prCreate, state(), link).stdout, /"permissionDecision":"deny"/);
+  // A regular Advisory file reached through a linked folder, at the folder or higher up: without node's owner walk, the
+  // blocking default (author's decision, round 31).
+  const outer = tmpDir();
+  fs.symlinkSync(cfgDir, path.join(outer, "review-loop"));
+  const viaFolder = path.join(outer, "review-loop", "config.json");
+  fs.mkdirSync(path.join(outer, "real", "review-loop"), { recursive: true });
+  fs.copyFileSync(cfg, path.join(outer, "real", "review-loop", "config.json"));
+  fs.symlinkSync(path.join(outer, "real"), path.join(outer, "dots"));
+  const viaAncestor = path.join(outer, "dots", "review-loop", "config.json");
+  for (const [config, why] of [[viaFolder, "a linked config folder"], [viaAncestor, "a link above the config folder"], ["config.json", "a relative config path"]]) {
+    assert.match(go("stop", stop, state(), config).stdout, /"decision":"block"/, why);
+    assert.match(go("pr", prCreate, state(), config).stdout, /"permissionDecision":"deny"/, why);
+  }
+  assert.deepEqual(Object.keys(JSON.parse(go("stop", stop, state(), path.join(outer, "real", "review-loop", "config.json")).stdout)), ["systemMessage"], "the same file on a link-free path still warns");
 });
 
 test("T-DOC-9: without node an events log over 5 MiB is rotated to .1, as the node writer does, and logging continues", () => {

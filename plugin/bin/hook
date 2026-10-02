@@ -57,9 +57,21 @@ cfg_null_or() { # $1 rule, $2 key path; JSON null is plutil's "(any)", a missing
     model) case "$v" in *"$nl"*) return 1;; esac; printf '%s\n' "$v" | LC_ALL=C grep -Eqx '[A-Za-z0-9._:/-]{1,64}';;
   esac
 }
+# config.mjs's folder check (assertConfigDir) follows links you or root own through every hop; without node there is
+# no such walk, so this fallback trusts the folder only when nothing on its path is a link and the folder is yours. A
+# dotfiles ~/.config therefore keeps the blocking default here (author's decision, round 31).
+config_dir_trusted() {
+  d=$(dirname "$1")
+  case "$d" in /*) ;; *) return 1;; esac
+  [ -d "$d" ] && [ ! -L "$d" ] && [ -O "$d" ] || return 1
+  while [ "$d" != / ]; do
+    [ -L "$d" ] && return 1
+    d=$(dirname "$d")
+  done
+}
 advisory() {
   cfg=$(config_file)
-  [ -f "$cfg" ] && [ ! -L "$cfg" ] && [ "$(stat -f %z "$cfg" 2>/dev/null || echo 65537)" -le 65536 ] || return 1
+  config_dir_trusted "$cfg" && [ -f "$cfg" ] && [ ! -L "$cfg" ] && [ "$(stat -f %z "$cfg" 2>/dev/null || echo 65537)" -le 65536 ] || return 1
   [ "$(cfg_type version)" = integer ] && cfg_value version && [ "$v" = 1 ] &&
     [ "$(cfg_type preset)" = string ] && cfg_value preset && [ "$v" = advisory ] &&
     [ "$(cfg_type codex)" = dictionary ] && [ "$(cfg_type events)" = dictionary ] &&
