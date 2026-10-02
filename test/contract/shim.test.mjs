@@ -32,6 +32,20 @@ test("T-DOC-9: without node — stop blocks, pr denies, prverify stops, others l
   assert.deepEqual(ev.filter((l) => l.event === "hook.error").map((l) => l.data.stage), ["session", "track", "prompt"]);
 });
 
+test("T-DOC-9: without node a Stop is let through only for a top-level boolean stop_hook_active true", () => {
+  const d = state();
+  const raw = (body) => spawnSync("/bin/sh", [SHIM, "stop"], { env: { PATH: "/usr/bin:/bin", HOME: tmpDir(), REVIEW_LOOP_NODE_CANDIDATES: "/nonexistent/node", REVIEW_LOOP_STATE_DIR: d }, input: body, encoding: "utf8" });
+  assert.equal(raw('{"session_id":"s-1","stop_hook_active":true}').stdout, "");
+  assert.equal(raw('{"session_id":"s-1", "stop_hook_active": true}').stdout, "", "spacing does not matter");
+  for (const body of [
+    '{"session_id":"s-1","stop_hook_active":false,"last_assistant_message":"\\"stop_hook_active\\":true"}',
+    '{"session_id":"s-1","nested":{"stop_hook_active":true}}',
+    '{"session_id":"s-1","stop_hook_active":"true"}',
+    '{"session_id":"s-1","stop_hook_active":1}',
+    'x "stop_hook_active":true',
+  ]) assert.match(raw(body).stdout, /"decision":"block"/, body);
+});
+
 test("T-DOC-9: without node the event log keeps the node writer's privacy: a loose state dir is refused, a loose log narrowed to 0600", () => {
   const loose = path.join(tmpDir(), "state");
   fs.mkdirSync(loose);

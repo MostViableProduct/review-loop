@@ -24,6 +24,14 @@ reason="review-loop: Node.js not found — run: brew install node"
 # install; the install runs from the user's own terminal.
 blocked="review-loop: Node.js not found, so no command can be checked for a PR operation; every Bash command is blocked. In your own terminal, run: brew install node"
 
+# Only a top-level boolean true allows a repeat Stop: a substring match would also accept the flag nested in another
+# object, and miss it written with spaces. plutil (macOS, the formula's only platform) parses JSON and reports the
+# type; malformed input, a string "true", a missing plutil: all block.
+stop_active() {
+  [ "$(printf '%s' "$input" | /usr/bin/plutil -type stop_hook_active - 2>/dev/null)" = bool ] &&
+    [ "$(printf '%s' "$input" | /usr/bin/plutil -extract stop_hook_active raw -o - - 2>/dev/null)" = true ]
+}
+
 log_event() { # $1 event, $2 data-json
   state="${REVIEW_LOOP_STATE_DIR:-$HOME/.claude/state/review-loop}"
   file="$state/events.jsonl"
@@ -50,7 +58,7 @@ log_event() { # $1 event, $2 data-json
 
 case "$mode" in
   stop)
-    case "$input" in *'"stop_hook_active":true'*) log_event gate.decision '{"gate":"stop","outcome":"allowed","preset":"default","pending_count":null}'; exit 0;; esac
+    if stop_active; then log_event gate.decision '{"gate":"stop","outcome":"allowed","preset":"default","pending_count":null}'; exit 0; fi
     log_event gate.decision '{"gate":"stop","outcome":"blocked","preset":"default","pending_count":null}'
     printf '{"decision":"block","reason":"%s"}\n' "$reason";;
   pr)
