@@ -18,6 +18,7 @@ import {
 } from "./git.mjs";
 import { identityKey, isClearedAt, writeMarker, readBaseline } from "./state.mjs";
 import { emitEvent } from "./events.mjs";
+import { reapChildren } from "./proc.mjs";
 
 // fileURLToPath, not URL.pathname: the pathname is percent-encoded (a space reads as %20).
 const REVIEW_ROUND = fileURLToPath(new URL("../review-round.mjs", import.meta.url));
@@ -130,11 +131,39 @@ export async function resolvePrTarget(root, args) {
   };
 }
 
+/** The whole evaluation's budget, as merge.mjs and prverify.mjs use, under the PreToolUse hook's 40 s timeout. */
+const DEADLINE_MS = 30_000;
+
 /**
- * @param {{ cwd: string, session: string | null, command?: string, mcpInput?: Record<string, unknown> }} p
+ * A PreToolUse hook killed at its timeout does not block the call, so a slow repository or GitHub must end in a
+ * decision, not a kill: an evaluation still running at `deadlineMs` is abandoned for a deny, its git and gh children
+ * killed and later spawns refused, so nothing it left keeps the hook alive past that timeout. Advisory turns the deny
+ * into a warning in the hook, as for every PR-gate deny.
+ * @param {{ cwd: string, session: string | null, command?: string, mcpInput?: Record<string, unknown>, deadlineMs?: number }} p
  * @returns {Promise<GateResult | null>} null = not a PR creation; let it through untouched
  */
 export async function evaluatePrGate(p) {
+  const budget = p.deadlineMs ?? DEADLINE_MS;
+  /** @type {NodeJS.Timeout | undefined} */
+  let timer;
+  const work = evaluateUnbounded(p);
+  // The abandoned evaluation may still reject once its children are killed; never an unhandled rejection.
+  work.catch(() => {});
+  try {
+    const out = await Promise.race([work, new Promise((resolve) => { timer = setTimeout(() => resolve("timeout"), budget); })]);
+    if (out !== "timeout") return /** @type {GateResult | null} */ (out);
+    reapChildren();
+    return deny("command_timeout", `the PR gate ran past its ${Math.round(budget / 1000)} s budget before it could verify this PR; retry the PR`);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * @param {{ cwd: string, session: string | null, command?: string, mcpInput?: Record<string, unknown> }} p
+ * @returns {Promise<GateResult | null>}
+ */
+async function evaluateUnbounded(p) {
   /** @type {PrArgs | null} */
   let args;
   try {

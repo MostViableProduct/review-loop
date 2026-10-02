@@ -625,6 +625,21 @@ test("a repo with no commit at session start: a plan committed during the sessio
   assert.match(r.out.reason, /plan .*first-plan\.md/);
 });
 
+test("the PR gate denies within its budget when a git call hangs: PR creation never proceeds undecided", () => {
+  const repo = specRepo();
+  const slow = tmpDir("rl-slowgit-pr-");
+  const realGit = spawnSync("sh", ["-c", "command -v git"], { encoding: "utf8" }).stdout.trim();
+  // Repository discovery hangs; nothing past it is reached.
+  fs.writeFileSync(path.join(slow, "git"), `#!/bin/sh\nfor a in "$@"; do [ "$a" = --show-toplevel ] && exec sleep 30; done\nexec '${realGit}' "$@"\n`, { mode: 0o755 });
+  const input = { session_id: "e2e-session", cwd: repo, tool_name: "Bash", tool_input: { command: ["g" + "h", "pr", "create", "--title", "t", "--body", "b"].join(" ") } };
+  const started = Date.now();
+  const r = hookRaw("pr", JSON.stringify(input), { PATH: `${slow}${path.delimiter}${env.PATH}`, REVIEW_LOOP_TEST_SEAMS: "1", REVIEW_LOOP_TEST_PR_BUDGET_MS: "1500" });
+  const took = Date.now() - started;
+  assert.equal(r.out?.hookSpecificOutput?.permissionDecision, "deny", JSON.stringify(r.out));
+  assert.match(r.out.hookSpecificOutput.permissionDecisionReason, /\[command_timeout\]: the PR gate ran past its 2 s budget/);
+  assert.ok(took < 8000, `the hook returned in ${took} ms, not after the hung git`);
+});
+
 test("Stop blocks within its budget when a git call hangs: the hook never ends without a decision", () => {
   const repo = specRepo();
   const S = { session_id: "e2e-session", cwd: repo, stop_hook_active: false };

@@ -9,6 +9,7 @@ on:
     branches: [main]
     paths:
       - "plugin/engine/lib/events.mjs"
+      - "plugin/engine/lib/prgate.mjs"
       - "plugin/bin/hook"
       - "test/contract/shim.test.mjs"
       - "scripts/tap-formula.mjs"
@@ -70,6 +71,7 @@ on:
   pull_request:
     paths:
       - "plugin/engine/lib/events.mjs"
+      - "plugin/engine/lib/prgate.mjs"
       - "plugin/bin/hook"
       - "test/contract/shim.test.mjs"
       - "scripts/tap-formula.mjs"

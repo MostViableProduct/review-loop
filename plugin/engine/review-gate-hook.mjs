@@ -178,7 +178,9 @@ async function main() {
       activeGate = "pr";
     }
     const { evaluatePrGate } = await import("./lib/prgate.mjs");
-    const r = toolName === "Bash" ? await evaluatePrGate({ cwd, session, command: /** @type {string} */ (command) }) : await evaluatePrGate({ cwd, session, mcpInput: toolInput });
+    const prBudget = process.env.REVIEW_LOOP_TEST_SEAMS === "1" ? Number(process.env.REVIEW_LOOP_TEST_PR_BUDGET_MS) : NaN;
+    const deadlineMs = Number.isFinite(prBudget) && prBudget > 0 ? prBudget : undefined;
+    const r = toolName === "Bash" ? await evaluatePrGate({ cwd, session, command: /** @type {string} */ (command), deadlineMs }) : await evaluatePrGate({ cwd, session, mcpInput: toolInput, deadlineMs });
     if (!r) return;
     /** @type {"denied" | "warned" | "allowed" | "skipped"} */
     let outcome = r.code === "kill_switch" ? "skipped" : "allowed";
