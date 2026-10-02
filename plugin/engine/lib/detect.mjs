@@ -139,8 +139,9 @@ export function detectPlansDir(projectRoot, dir = CLAUDE_PLANS_DIR) {
 }
 
 /**
- * Specs and plans committed since the session began (author's decision: committed code stays with the PR and merge
- * gates). A committed doc is pending at its current content until a review passes at that fingerprint.
+ * Specs and plans committed since the session began on the current history (author's decision: committed code, and a
+ * commit moved off this history, stay with the PR and merge gates). A committed doc is pending at its current content
+ * until a review passes at that fingerprint.
  * @param {string} root @param {string | null} startHead
  * @returns {Promise<Artifact[]>}
  */

@@ -114,10 +114,13 @@ export async function headSha(root) {
 const MAX_COMMITTED_PATHS = 5000;
 
 /**
- * Paths touched by commits made since the session began: a shell edit committed before Stop leaves `git status`
- * clean and no file-tool marker. The range is commits, never dates: a committer date is whatever the committer sets
- * (GIT_COMMITTER_DATE), so a date filter would let a backdated commit through. A branch switch brings the other
- * branch's commits into the range, so their specs and plans are reviewed too (over-review, never a miss).
+ * Paths touched by commits made since the session began, on the current history (start..HEAD): a shell edit committed
+ * before Stop leaves `git status` clean and no file-tool marker. The range is commits, never dates: a committer date
+ * is whatever the committer sets (GIT_COMMITTER_DATE), so a date filter would let a backdated commit through. A branch
+ * switch brings the other branch's commits into the range, so their specs and plans are reviewed too (over-review).
+ * A commit moved off the current history (a switch away, a reset) is outside Stop's view by design (author's decision,
+ * round 22): its file is not in the working tree to review, and the PR gate reviews every commit in a PR's diff
+ * (head against the merge-base) before it can merge.
  * @param {string} root
  * @param {string | null} startHead HEAD at session start (null: no commit yet, so every commit is this session's)
  * @returns {Promise<string[]>} repo-relative paths
