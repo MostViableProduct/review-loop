@@ -194,7 +194,8 @@ T-CFG-8 enforces.
   64 KiB cap, symlink rejected, and a structural validator `isConfig`.
 - **Invalid, unreadable or symlinked config:** behave as **Default**. This is loud:
   - one stderr line naming the file and the code;
-  - the event `config.invalid` with code `config_invalid|config_symlink_rejected`;
+  - the event `config.invalid` with code `config_invalid|config_symlink_rejected|config_dir_untrusted`
+    (the last: the config's folder is a link, or a link above it or the folder belongs to another user);
   - `doctor` shows ✗.
   - The file is quarantined to `.corrupt` only by `review-loop config repair` or `setup`, never by a
     hook, so hooks never mutate user config.

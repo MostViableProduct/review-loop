@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { CliError } from "./errors.mjs";
+import { assertConfigDirTrusted } from "./configguard.mjs";
 import { stateDirCode } from "./doctor.mjs";
 import { assertNoOtherScope, installedPlugin, pluginEntries, PLUGIN_ID, removeMarketplace, uninstallPlugin } from "./plugin.mjs";
 import { ASK_RULES, hookCommands, LEGACY_HOOK_RE, readSettings, updateSettings, writerPreconditions } from "./settings.mjs";
@@ -57,6 +58,7 @@ export async function run(args, io, ctx) {
   if (!ctx.yes && !(await io.ask("Continue?", false))) throw new CliError("cancelled", "cancelled");
   // The settings write's own preconditions, checked before anything is removed: a refusal there must change nothing.
   await writerPreconditions(io, { yes: ctx.yes }, readSettings().target);
+  assertConfigDirTrusted("review-loop uninstall");
   const entries = await pluginEntries(PLUGIN_ID);
   await assertNoOtherScope("review-loop uninstall", entries);
 

@@ -58,6 +58,7 @@ export const CODES = Object.freeze({
   settings_detached_write: { category: "user_action", remedy: "compare the reported backup with settings.json and copy over any change you need" },
   config_invalid: { category: "user_action", remedy: "run `review-loop config repair`" },
   config_missing: { category: "user_action", remedy: "run `review-loop setup` to create the config" },
+  config_dir_untrusted: { category: "user_action", remedy: "make the folder holding the review-loop config (~/.config/review-loop) a real directory you own; any symlink above it (a dotfiles ~/.config) must be yours" },
   config_symlink_rejected: { category: "user_action", remedy: "replace the symlink with a regular file, or remove it (defaults apply) and run `review-loop config repair` or `review-loop setup`" },
   events_path_rejected: { category: "user_action", remedy: "choose an events path that is a regular file you own (or does not exist yet) in a real directory you own; symlinks, directories and missing parents are refused" },
   config_insecure: { category: "user_action", remedy: "the review-loop config file is owned by another user or is not a regular file: remove it or take ownership, then re-run `review-loop setup`" },

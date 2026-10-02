@@ -3,7 +3,7 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { run, streamHash, streamLines } from "./proc.mjs";
 import { ReviewLoopError } from "./errors.mjs";
-import { safeReadFile, sha256hex, MiB } from "./fsutil.mjs";
+import { safeReadFile, sha256hex, MiB, assertOwnLinks } from "./fsutil.mjs";
 import { classifyRepoPath, implExcludePathspecs, CLAUDE_PLANS_DIR } from "./classify.mjs";
 
 export const LIMITS = Object.freeze({
@@ -31,6 +31,8 @@ export function readArtifact(abs, projectRoot) {
   return safeReadFile(abs, LIMITS.artifactBytes, {}, { within });
 }
 
+const PLANS_LINKS = { code: "plans_dir_untrusted", what: "the plans folder", consequence: "its plans are not read" };
+
 /**
  * ~/.claude/plans is a trust anchor (safeReadFile checks only below it), so the anchor itself must be a real directory:
  * a link there would hand any outside Markdown to Codex as a plan. A folder above it may be a link (a dotfiles-managed
@@ -44,20 +46,9 @@ export function assertPlansDir(dir = CLAUDE_PLANS_DIR, uid = typeof process.getu
   const st = fs.lstatSync(dir, { throwIfNoEntry: false });
   if (st === undefined) return false;
   if (st.isSymbolicLink() || !st.isDirectory()) throw new ReviewLoopError("plans_dir_untrusted", "~/.claude/plans is a symlink or not a directory; its plans are not read");
-  assertOwnLinks(path.dirname(path.resolve(dir)), uid, 0);
+  assertOwnLinks(path.dirname(path.resolve(dir)), uid, PLANS_LINKS);
   if (st.uid !== uid && st.uid !== 0) throw new ReviewLoopError("plans_dir_untrusted", "the plans folder belongs to another user; its plans are not read");
   return true;
-}
-
-/** Every symlink on `p`'s path, and on each link's target path, is owned by `uid` or root. @param {string} p @param {number} uid @param {number} depth */
-function assertOwnLinks(p, uid, depth) {
-  if (depth > 40) throw new ReviewLoopError("plans_dir_untrusted", "the path to the plans folder has too many symlinks; its plans are not read");
-  for (let d = path.resolve(p); path.dirname(d) !== d; d = path.dirname(d)) {
-    const a = fs.lstatSync(d, { throwIfNoEntry: false });
-    if (!a?.isSymbolicLink()) continue;
-    if (a.uid !== uid && a.uid !== 0) throw new ReviewLoopError("plans_dir_untrusted", `${d}, on the path to the plans folder, is a symlink owned by another user; its plans are not read`);
-    assertOwnLinks(path.resolve(path.dirname(d), fs.readlinkSync(d)), uid, depth + 1);
-  }
 }
 
 /**

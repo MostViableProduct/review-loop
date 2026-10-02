@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { tmpDir } from "./helpers.mjs";
-import { configPath, readConfig, writeConfig, defaultConfig, isConfig, EFFORTS } from "../../plugin/engine/lib/config.mjs";
+import { configPath, readConfig, writeConfig, defaultConfig, isConfig, EFFORTS, assertConfigDir } from "../../plugin/engine/lib/config.mjs";
 
 /** @template T @param {Record<string, string | undefined>} vars @param {() => T} fn @returns {T} */
 function withEnv(vars, fn) {
@@ -34,6 +34,43 @@ test("configPath: REVIEW_LOOP_CONFIG > absolute XDG_CONFIG_HOME > ~/.config (T-C
     assert.equal(configPath(), path.join(home, ".config", "review-loop", "config.json"), "a relative XDG is ignored");
   });
   withEnv({ REVIEW_LOOP_CONFIG: "/tmp/x.json" }, () => assert.equal(configPath(), "/tmp/x.json"));
+});
+
+test("a linked config folder is never read or written through: readConfig is invalid, writeConfig refuses, the target is untouched", () => {
+  const home = tmpDir();
+  const elsewhere = path.join(home, "elsewhere");
+  fs.mkdirSync(elsewhere);
+  const text = JSON.stringify({ ...defaultConfig(), preset: "advisory" });
+  fs.writeFileSync(path.join(elsewhere, "config.json"), text);
+  fs.mkdirSync(path.join(home, ".config"));
+  fs.symlinkSync(elsewhere, path.join(home, ".config", "review-loop"));
+  withEnv({ HOME: home, REVIEW_LOOP_CONFIG: undefined, XDG_CONFIG_HOME: undefined }, () => {
+    const r = readConfig();
+    assert.equal(r.status === "invalid" && r.code, "config_dir_untrusted");
+    assert.deepEqual(r.config, defaultConfig(), "the linked file's Advisory never applies");
+    assert.throws(() => writeConfig(defaultConfig()), { code: "config_dir_untrusted" });
+  });
+  assert.equal(fs.readFileSync(path.join(elsewhere, "config.json"), "utf8"), text);
+  assert.deepEqual(fs.readdirSync(elsewhere), ["config.json"], "no temp file was left in the target");
+});
+
+test("a dotfiles ~/.config link of yours is followed; one another user owns, or a folder they own, is refused", () => {
+  const home = tmpDir();
+  const real = path.join(home, "dotfiles", "config");
+  fs.mkdirSync(path.join(real, "review-loop"), { recursive: true });
+  fs.writeFileSync(path.join(real, "review-loop", "config.json"), JSON.stringify({ ...defaultConfig(), preset: "balanced" }));
+  fs.symlinkSync(real, path.join(home, ".config"));
+  withEnv({ HOME: home, REVIEW_LOOP_CONFIG: undefined, XDG_CONFIG_HOME: undefined }, () => {
+    assert.equal(readConfig().config.preset, "balanced", "your own link is followed");
+    writeConfig({ ...defaultConfig(), preset: "advisory" });
+    assert.equal(readConfig().config.preset, "advisory");
+  });
+  const me = process.getuid();
+  // As another user would see it: the same link is not theirs.
+  assert.throws(() => assertConfigDir(path.join(home, ".config", "review-loop"), me + 1), (e) => e.code === "config_dir_untrusted" && /symlink owned by another user/.test(e.message));
+  assert.throws(() => assertConfigDir(path.join(real, "review-loop"), me + 1), (e) => e.code === "config_dir_untrusted" && /belongs to another user/.test(e.message));
+  assert.doesNotThrow(() => assertConfigDir(path.join(home, "nowhere", "review-loop"), me), "an absent folder on a clean path is fine");
+  assert.throws(() => assertConfigDir(path.join(home, ".config", "not-yet"), me + 1), { code: "config_dir_untrusted" }, "an absent folder still has its path checked: a write would create it there");
 });
 
 test("readConfig: absent → default, no file created", () => {

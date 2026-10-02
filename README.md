@@ -157,6 +157,7 @@ Run `review-loop doctor`. Each failing line names a code and the fix.
 | `command_timeout` | 1 | a command timed out; re-run the review round |  |
 | `companion_contract_mismatch` | 1 | update the Codex plugin, then run `review-loop setup` |  |
 | `companion_usage_mismatch` | 1 | update the Codex plugin, then run `review-loop setup` |  |
+| `config_dir_untrusted` | 1 | make the folder holding the review-loop config (~/.config/review-loop) a real directory you own; any symlink above it (a dotfiles ~/.config) must be yours |  |
 | `config_insecure` | 1 | the review-loop config file is owned by another user or is not a regular file: remove it or take ownership, then re-run `review-loop setup` |  |
 | `config_invalid` | 1 | run `review-loop config repair` |  |
 | `config_missing` | 1 | run `review-loop setup` to create the config |  |

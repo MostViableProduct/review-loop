@@ -61,6 +61,20 @@ test("T-UN-1b: a project- or local-scope install still listed → refused before
   assert.ok(fs.existsSync(process.env.REVIEW_LOOP_CONFIG), "config kept");
 });
 
+test("T-UN-1c: a linked config folder → refused before anything is removed; the file it reaches is kept", async () => {
+  const s = sandbox();
+  const dir = path.dirname(process.env.REVIEW_LOOP_CONFIG);
+  const elsewhere = path.join(s.home, "elsewhere");
+  fs.renameSync(dir, elsewhere);
+  fs.symlinkSync(elsewhere, dir);
+  const o = io();
+  assert.notEqual(await main(["uninstall", "--yes"], o), 0);
+  assert.match(o.lines.join(""), /review-loop: config_dir_untrusted/);
+  assert.ok(!s.claude.log().some((a) => a[1] === "uninstall" || a[1] === "marketplace"), "no plugin or marketplace removal ran");
+  assert.equal(settingsOf(s).permissions.ask.length, 6, "approval rules kept");
+  assert.ok(fs.existsSync(path.join(elsewhere, "config.json")), "the linked folder's config kept");
+});
+
 test("T-UN-1 (−): plugin uninstall fails → nothing else removed, exit 1", async () => {
   const s = sandbox({ "plugin uninstall review-loop@review-loop --scope user --json": { code: 1, stderr: "boom" } });
   const o = io();

@@ -30,6 +30,25 @@ export function assertNoLinkedParent(filePath, root, code) {
 }
 
 /**
+ * Every symlink on `p`'s path, and on each link's target path through every hop, is owned by `uid` or root: a link
+ * someone else owns could point a trusted folder anywhere they chose (author's decision, round 20). The caller's own
+ * links are followed, so a dotfiles-managed ~/.claude or ~/.config keeps working.
+ * @param {string} p
+ * @param {number} uid
+ * @param {{ code: string, what: string, consequence: string }} why
+ * @param {number} [depth]
+ */
+export function assertOwnLinks(p, uid, why, depth = 0) {
+  if (depth > 40) throw new ReviewLoopError(why.code, `the path to ${why.what} has too many symlinks; ${why.consequence}`);
+  for (let d = path.resolve(p); path.dirname(d) !== d; d = path.dirname(d)) {
+    const a = fs.lstatSync(d, { throwIfNoEntry: false });
+    if (!a?.isSymbolicLink()) continue;
+    if (a.uid !== uid && a.uid !== 0) throw new ReviewLoopError(why.code, `${d}, on the path to ${why.what}, is a symlink owned by another user; ${why.consequence}`);
+    assertOwnLinks(path.resolve(path.dirname(d), fs.readlinkSync(d)), uid, why, depth + 1);
+  }
+}
+
+/**
  * lstat → reject symlink → bound size → open with O_NOFOLLOW → read. Never follows a link,
  * never buffers more than maxBytes.
  * `within`: every directory between this trusted root and the file is lstat'ed too — O_NOFOLLOW only guards the

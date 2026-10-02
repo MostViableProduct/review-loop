@@ -275,6 +275,27 @@ test("invalid config → Default behavior, one stderr line, a config.invalid eve
   assert.match(events, /"event":"config.invalid"/);
 });
 
+test("an Advisory config reached through a linked config folder never applies: Stop still blocks and names config_dir_untrusted", () => {
+  const s = sandbox("default");
+  const elsewhere = path.join(path.dirname(s.env.REVIEW_LOOP_CONFIG), "elsewhere");
+  fs.mkdirSync(elsewhere);
+  const advisory = JSON.stringify({ version: 1, preset: "advisory", codex: { model: null, effort: null }, rubricPath: null, events: { path: null } });
+  fs.writeFileSync(path.join(elsewhere, "config.json"), advisory);
+  const linked = path.join(path.dirname(s.env.REVIEW_LOOP_CONFIG), "linked");
+  fs.symlinkSync(elsewhere, linked);
+  const extra = { REVIEW_LOOP_CONFIG: path.join(linked, "config.json") };
+  s.run("session", {}, s.repo, extra);
+  s.run("track", { tool_input: { file_path: writeFile(s.repo, "docs/specs/x-design.md", "# x\n") } }, s.repo, extra);
+  const r = s.run("stop", { stop_hook_active: false }, s.repo, extra);
+  assert.match(r.stdout, /"decision":"block"/, "Default, not the linked Advisory");
+  const line = r.stderr.split("\n").find((l) => l.includes("config invalid")) ?? "";
+  assert.match(line, /config_dir_untrusted/);
+  assert.doesNotMatch(line, /config repair/, "repair refuses a linked folder, so it is not the advice");
+  assert.equal(fs.readFileSync(path.join(elsewhere, "config.json"), "utf8"), advisory);
+  const events = fs.readFileSync(path.join(s.env.REVIEW_LOOP_STATE_DIR, "events.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
+  assert.ok(events.some((e) => e.event === "config.invalid" && e.code === "config_dir_untrusted"), "a config.invalid event carries the code");
+});
+
 test("Stop under a kill switch logs exactly one skipped decision with code kill_switch", () => {
   const s = killSwitchSandbox();
   s.hook("track", { tool_input: { file_path: writeFile(s.repo, "docs/specs/x-design.md", "# x\n") } });

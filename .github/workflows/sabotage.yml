@@ -9,6 +9,11 @@ on:
     branches: [main]
     paths:
       - "plugin/engine/lib/events.mjs"
+      - "plugin/engine/review-gate-hook.mjs"
+      - "test/engine/presets.test.mjs"
+      - "cli/lib/configguard.mjs"
+      - "test/engine/config.test.mjs"
+      - "test/cli/config.test.mjs"
       - "plugin/engine/lib/prgate.mjs"
       - "plugin/bin/hook"
       - "test/contract/shim.test.mjs"
@@ -71,6 +76,11 @@ on:
   pull_request:
     paths:
       - "plugin/engine/lib/events.mjs"
+      - "plugin/engine/review-gate-hook.mjs"
+      - "test/engine/presets.test.mjs"
+      - "cli/lib/configguard.mjs"
+      - "test/engine/config.test.mjs"
+      - "test/cli/config.test.mjs"
       - "plugin/engine/lib/prgate.mjs"
       - "plugin/bin/hook"
       - "test/contract/shim.test.mjs"

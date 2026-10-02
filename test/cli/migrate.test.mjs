@@ -470,6 +470,26 @@ test("rollback with a project-scope install still listed is refused before anyth
   assert.deepEqual(fs.readFileSync(manifestFile()), manifestBefore, "migration record kept for a retry");
 });
 
+test("rollback with the config folder swapped for a link is refused before anything moves; the file it reaches is untouched", async () => {
+  const { c, claude } = authorShaped();
+  assert.equal(await main(["migrate", "--yes", "--skip-doctor-gate"], io()), 0);
+  const dir = path.dirname(process.env.REVIEW_LOOP_CONFIG);
+  const elsewhere = path.join(path.dirname(dir), "elsewhere");
+  fs.renameSync(dir, elsewhere);
+  fs.symlinkSync(elsewhere, dir);
+  const configBefore = fs.readFileSync(path.join(elsewhere, path.basename(process.env.REVIEW_LOOP_CONFIG)));
+  const settingsBefore = fs.readFileSync(path.join(c, "settings.json"));
+  const manifestBefore = fs.readFileSync(manifestFile());
+  const callsBefore = claude.log().length;
+  const o = io();
+  assert.equal(await main(["migrate", "--rollback", "--yes"], o), 1);
+  assert.match(o.lines.join(""), /config_dir_untrusted/);
+  assert.ok(!claude.log().slice(callsBefore).some((a) => a[1] === "uninstall" || a[1] === "marketplace"), "no plugin or marketplace removal ran");
+  assert.deepEqual(fs.readFileSync(path.join(elsewhere, path.basename(process.env.REVIEW_LOOP_CONFIG))), configBefore, "the linked config is untouched");
+  assert.deepEqual(fs.readFileSync(path.join(c, "settings.json")), settingsBefore, "settings untouched");
+  assert.deepEqual(fs.readFileSync(manifestFile()), manifestBefore, "migration record kept for a retry");
+});
+
 test("a run stopped after archiving the engine but before marking its record done is finished by the next migrate", async () => {
   const { c } = authorShaped();
   assert.equal(await main(["migrate", "--yes", "--skip-doctor-gate", "--force-engine-move"], io()), 0);

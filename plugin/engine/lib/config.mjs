@@ -1,8 +1,9 @@
+import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { ReviewLoopError } from "./errors.mjs";
 import { PRESET_NAMES } from "./presets.mjs";
-import { atomicWriteJson, isObject, safeReadFile } from "./fsutil.mjs";
+import { assertOwnLinks, atomicWriteJson, isObject, safeReadFile } from "./fsutil.mjs";
 
 export { PRESET_NAMES };
 export const MODEL_RE = /^[A-Za-z0-9._:/-]{1,64}$/;
@@ -27,6 +28,24 @@ export function configPath() {
   return path.join(base, "review-loop", "config.json");
 }
 
+const CONFIG_LINKS = { code: "config_dir_untrusted", what: "the review-loop config folder", consequence: "the config is never read or written through it" };
+
+/**
+ * The config's folder is checked for the same reason as the plans folder (author's decision, round 20): safeReadFile's
+ * O_NOFOLLOW and atomicWriteJson's `within` guard only below the folder, so a linked folder would carry every read
+ * and replace wherever the link points. The folder itself is never a link; a link above it (a dotfiles ~/.config)
+ * must be yours or root's through every hop; the folder must be yours or root's. An absent folder still has its
+ * path checked: a write creates it through that path.
+ * @param {string} [dir]
+ * @param {number} [uid] the owner to trust besides root: this process's user
+ */
+export function assertConfigDir(dir = path.dirname(configPath()), uid = typeof process.getuid === "function" ? process.getuid() : -1) {
+  const st = fs.lstatSync(dir, { throwIfNoEntry: false });
+  if (st !== undefined && (st.isSymbolicLink() || !st.isDirectory())) throw new ReviewLoopError("config_dir_untrusted", `${dir} is a symlink or not a directory; ${CONFIG_LINKS.consequence}`);
+  assertOwnLinks(path.dirname(path.resolve(dir)), uid, CONFIG_LINKS);
+  if (st !== undefined && st.uid !== uid && st.uid !== 0) throw new ReviewLoopError("config_dir_untrusted", `${dir} belongs to another user; ${CONFIG_LINKS.consequence}`);
+}
+
 /** @param {unknown} v @param {(x: unknown) => boolean} ok */
 const nullOr = (v, ok) => v === null || ok(v);
 /** @param {unknown} p */
@@ -46,16 +65,17 @@ export function isConfig(v) {
 
 /**
  * Read on every hook invocation, so it never mutates the file: quarantine belongs to `config repair` and setup.
- * @returns {{ status: "ok" | "absent", config: Config } | { status: "invalid", config: Config, code: "config_invalid" | "config_symlink_rejected" }}
+ * @returns {{ status: "ok" | "absent", config: Config } | { status: "invalid", config: Config, code: "config_invalid" | "config_symlink_rejected" | "config_dir_untrusted" }}
  */
 export function readConfig() {
   let raw;
   try {
+    assertConfigDir();
     raw = safeReadFile(configPath(), CONFIG_MAX_BYTES, { missing: "config_missing", symlink: "config_symlink_rejected", tooLarge: "config_invalid", notFile: "config_invalid" });
   } catch (err) {
     const code = err instanceof ReviewLoopError ? err.code : "config_invalid";
     if (code === "config_missing") return { status: "absent", config: defaultConfig() };
-    return { status: "invalid", config: defaultConfig(), code: code === "config_symlink_rejected" ? code : "config_invalid" };
+    return { status: "invalid", config: defaultConfig(), code: code === "config_symlink_rejected" || code === "config_dir_untrusted" ? code : "config_invalid" };
   }
   let parsed;
   try {
@@ -70,6 +90,7 @@ export function readConfig() {
 export function writeConfig(config) {
   if (!isConfig(config)) throw new ReviewLoopError("config_invalid", "refusing to write an invalid config");
   const file = configPath();
+  assertConfigDir(path.dirname(file));
   // `within` is the review-loop dir itself: ensurePrivateDir chmods every dir from `within` down, and ~/.config is not ours.
   atomicWriteJson(file, config, path.dirname(file));
 }

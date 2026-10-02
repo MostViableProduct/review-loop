@@ -145,6 +145,21 @@ test("a symlinked config is refused by set and repair, and its target is untouch
   assert.equal(fs.readFileSync(target, "utf8"), "{bad");
 });
 
+test("a linked config folder is refused by set and repair: nothing is quarantined or replaced through it", async () => {
+  const h = sandbox();
+  const elsewhere = path.join(h, "elsewhere");
+  fs.mkdirSync(elsewhere);
+  fs.writeFileSync(path.join(elsewhere, "config.json"), "{bad");
+  fs.symlinkSync(elsewhere, path.dirname(cfgFile()));
+  for (const args of [["config", "repair"], ["config", "set", "preset", "balanced"]]) {
+    const o = io();
+    assert.equal(await main(args, o), 1);
+    assert.match(o.lines.join(""), /config_dir_untrusted/);
+  }
+  assert.deepEqual(fs.readdirSync(elsewhere), ["config.json"], "no quarantine copy or temp file in the target");
+  assert.equal(fs.readFileSync(path.join(elsewhere, "config.json"), "utf8"), "{bad");
+});
+
 test("a config owned by another user is refused by set and repair", async () => {
   sandbox();
   seed("{bad");

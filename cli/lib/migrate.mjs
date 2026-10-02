@@ -4,7 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import { CliError } from "./errors.mjs";
-import { assertConfigOwner } from "./configguard.mjs";
+import { assertConfigDirTrusted, assertConfigOwner } from "./configguard.mjs";
 import { run as doctor } from "./doctor.mjs";
 import { assertNoOtherScope, installPlugin, installedPlugin, MARKETPLACE_SOURCE, PLUGIN_ID, removeMarketplace, uninstallPlugin } from "./plugin.mjs";
 import { ASK_RULES, LEGACY_HOOK_RE, legacyHookCommands, missingAskRules, readSettings, updateSettings, writerPreconditions } from "./settings.mjs";
@@ -439,6 +439,7 @@ async function rollback(io, ctx) {
   // The settings write's preconditions, checked before anything moves: a refusal there must change nothing.
   await writerPreconditions(io, { yes: ctx.yes }, readSettings().target);
   if (m.steps.some((s) => s.resource === "plugin" && s.undone !== true)) await assertNoOtherScope("review-loop migrate --rollback");
+  if (m.steps.some((s) => s.resource === "config" && s.undone !== true)) assertConfigDirTrusted("review-loop migrate --rollback");
   const P = paths(m.date);
   /** @type {string[]} */
   const skipped = [];

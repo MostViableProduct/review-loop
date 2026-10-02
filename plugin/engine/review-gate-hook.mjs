@@ -40,7 +40,10 @@ async function loadPreset(session) {
   const { readConfig, configPath } = await import("./lib/config.mjs");
   const cfg = readConfig();
   if (cfg.status === "invalid") {
-    process.stderr.write(`review-loop: config invalid (${cfg.code}) at ${configPath()}; using Default preset — run \`review-loop config repair\`\n`);
+    // Repair refuses a linked file or folder, so only a damaged file is pointed at it.
+    const { remedyFor } = await import("./lib/codes.mjs");
+    const fix = cfg.code === "config_invalid" ? "run `review-loop config repair`" : remedyFor(cfg.code);
+    process.stderr.write(`review-loop: config invalid (${cfg.code}) at ${configPath()}; using Default preset — ${fix}\n`);
     const { emitEvent } = await import("./lib/events.mjs");
     emitEvent({ source: "hook", event: "config.invalid", code: cfg.code, session_id: session, data: {} });
   }
