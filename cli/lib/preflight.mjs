@@ -2,7 +2,9 @@ import { CliError } from "./errors.mjs";
 import { mark } from "./io.mjs";
 import { lastJsonLine, noteFor, requireRan, runTool } from "./run.mjs";
 
-export const MIN_CLAUDE = "2.1.284";
+// The oldest version setup's `claude plugin install … --scope user` was run on (CLAUDE.md Probes); CI pins the same
+// version. Raise all three together: test/contract/release.test.mjs fails when they drift.
+export const MIN_CLAUDE = "2.1.285";
 
 /** @param {string} a @param {string} b */
 const gte = (a, b) => {

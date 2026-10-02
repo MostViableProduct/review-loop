@@ -63,6 +63,6 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4.4.0
         with:
           node-version: "22.x"
-      - run: npm install -g @anthropic-ai/claude-code@2.1.284
+      - run: npm install -g @anthropic-ai/claude-code@2.1.285
       - run: claude plugin validate --strict plugin
       - run: claude plugin validate --strict .

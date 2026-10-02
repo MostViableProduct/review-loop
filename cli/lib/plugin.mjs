@@ -60,7 +60,7 @@ export function pickEntry(entries, scope = null) {
 export async function installPlugin() {
   const add = await runTool("claude", ["plugin", "marketplace", "add", MARKETPLACE_SOURCE]);
   if (add.code !== 0 && !/already/i.test(add.stderr + add.stdout)) throw new CliError("plugin_install_failed", "could not add the review-loop marketplace");
-  // --scope is accepted by Claude Code 2.1.285 but missing from `claude plugin install --help`.
+  // --scope is accepted from MIN_CLAUDE (2.1.285) on but missing from `claude plugin install --help`.
   const inst = await runTool("claude", ["plugin", "install", PLUGIN_ID, "--scope", "user", "--json"], { timeoutMs: 5 * 60_000 });
   requireRan(inst, "claude plugin install");
   if (inst.code !== 0) throw new CliError("plugin_install_failed", "claude plugin install failed");

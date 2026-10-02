@@ -76,7 +76,7 @@ jobs:
         run: gh release create "$GITHUB_REF_NAME" "review-loop-$V.tar.gz" --verify-tag --title "review-loop $V" --generate-notes
       - name: Install the pinned Claude Code CLI (no token here; npm install scripts could read one)
         run: |
-          npm install -g @anthropic-ai/claude-code@2.1.284
+          npm install -g @anthropic-ai/claude-code@2.1.285
           git config user.name "review-loop release"
           git config user.email "release@example.com"
       - name: Plugin tag (validates plugin.json against the marketplace entry)

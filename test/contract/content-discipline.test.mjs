@@ -7,6 +7,7 @@ import { tmpDir } from "../engine/helpers.mjs";
 import { makeFakeBin } from "../fakes/fakebin.mjs";
 import { validateLine } from "../../plugin/engine/lib/events.mjs";
 import { COMMANDS_ENUM, GATES } from "../../plugin/engine/lib/codes.mjs";
+import { MIN_CLAUDE } from "../../cli/lib/preflight.mjs";
 
 const S = "SENTINEL-CONTENT-7f3a";
 const SENTINELS = [S, "/Users/", "@example.com", "ENVSECRET"];
@@ -34,7 +35,7 @@ test("T-OBS-5 / T-OBS-1: no sentinel reaches events.jsonl across every CLI comma
   fs.writeFileSync(path.join(home, "codex", "config.toml"), `model = "gpt-${S}"\n# /Users/x a@example.com ENVSECRET\n`);
   fs.writeFileSync(path.join(home, ".claude", "settings.json"), JSON.stringify({ note: `${S} /Users/x ENVSECRET a@example.com`, hooks: { Stop: [{ hooks: [{ type: "command", command: `/Users/${S}/x` }] }] } }));
   const list = JSON.stringify([{ id: "codex@openai-codex", enabled: true, scope: "user", version: "1.0.6" }, { id: "review-loop@review-loop", enabled: true, scope: "user", version: "0.1.0", installPath: path.resolve("plugin") }]);
-  makeFakeBin(bin, "claude", { "--version": { stdout: "2.1.284 (Claude Code)\n" }, "plugin list --json": { stdout: list }, "*": { stdout: "{}\n", stderr: `${S} /Users/x\n` } });
+  makeFakeBin(bin, "claude", { "--version": { stdout: `${MIN_CLAUDE} (Claude Code)\n` }, "plugin list --json": { stdout: list }, "*": { stdout: "{}\n", stderr: `${S} /Users/x\n` } });
   makeFakeBin(bin, "codex", { "--version": { stdout: "codex-cli 0.157.1\n" }, "login status": { stdout: "Logged in as sentinel@example.com\n" }, "*": { code: 1, stderr: `${S}\n` } });
   makeFakeBin(bin, G, { "*": { code: 1, stderr: `${S} /Users/x ENVSECRET\n` } });
   makeFakeBin(bin, "ps", { "*": { stdout: "    1     0 /sbin/launchd\n  200     1 -zsh\n" } });

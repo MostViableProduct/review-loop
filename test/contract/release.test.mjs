@@ -4,6 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { execFileSync, spawnSync } from "node:child_process";
 import { tmpDir } from "../engine/helpers.mjs";
+import { MIN_CLAUDE } from "../../cli/lib/preflight.mjs";
 
 const FILES = ["package.json", "plugin/.claude-plugin/plugin.json", ".claude-plugin/marketplace.json", "plugin/bin/hook"];
 /** A temp COPY of the four version files and both scripts: the real repo files are never stamped. */
@@ -377,5 +378,16 @@ test("release.yml: no token in a URL, argv or .git/config; the write token reach
     if (!/git (clone|push)|--push/.test(s)) continue;
     assert.match(s, /GIT_CONFIG_KEY_0="http\.https:\/\/github\.com\/\.extraheader" GIT_CONFIG_VALUE_0="AUTHORIZATION: basic \$AUTH"/, "a step that clones or pushes authenticates through env config");
     assert.match(s, /echo "::add-mask::\$AUTH"/, "the derived header value is masked in logs");
+  }
+});
+
+test("MIN_CLAUDE is the version setup's user-scope install was verified on, and every CI pin installs exactly it", () => {
+  const record = "`claude plugin install … --scope user` was accepted on Claude Code ";
+  const claudeMd = fs.readFileSync("CLAUDE.md", "utf8");
+  assert.ok(claudeMd.includes(`${record}${MIN_CLAUDE} `), `CLAUDE.md records the --scope user install on ${MIN_CLAUDE}; preflight must not accept an older, unverified version`);
+  for (const [file, text] of [["ci.yml", CI_YML], ["release.yml", RELEASE_YML]]) {
+    const pins = [...text.matchAll(/@anthropic-ai\/claude-code@(\S+)/g)].map((m) => m[1]);
+    assert.ok(pins.length > 0, `${file} installs a pinned Claude Code`);
+    assert.deepEqual([...new Set(pins)], [MIN_CLAUDE], `${file} pins the preflight minimum`);
   }
 });

@@ -13,6 +13,7 @@ Object.assign(process.env, { GIT_AUTHOR_NAME: GIT_ENV.GIT_AUTHOR_NAME, GIT_AUTHO
 const FIXTURE_BASE = path.join(process.cwd(), "test", "fixtures", "fake-codex-plugin");
 const { main } = await import("../../cli/review-loop.mjs");
 const { seams } = await import("../../cli/lib/setup.mjs");
+const { MIN_CLAUDE } = await import("../../cli/lib/preflight.mjs");
 const { LIVE_REMEDY } = await import("../../cli/lib/livecheck.mjs");
 
 /** A Codex plugin copy whose companion is a stub: it logs its argv and prints STUB_OUT. */
@@ -47,7 +48,7 @@ function sandbox({ pluginInstalled = false, stubCodex = false } = {}) {
   const list = [{ id: "codex@openai-codex", enabled: true, scope: "user", version: "1.0.6" }];
   if (pluginInstalled) list.push({ id: "review-loop@review-loop", enabled: true, scope: "user", version: "0.1.0", installPath: path.join(process.cwd(), "plugin") });
   const claude = makeFakeBin(bin, "claude", {
-    "--version": { stdout: "2.1.284 (Claude Code)\n" }, "plugin list --json": { stdout: JSON.stringify(list) },
+    "--version": { stdout: `${MIN_CLAUDE} (Claude Code)\n` }, "plugin list --json": { stdout: JSON.stringify(list) },
     "*": { stdout: "{}\n" }
   });
   makeFakeBin(bin, "codex", { "--version": { stdout: "codex-cli 0.157.1\n" }, "login status": { stdout: "Logged in\n" } });
@@ -104,7 +105,7 @@ test("T-SET-5b: a missing plugin is installed once; the fake lists it only after
   const listed = { id: "review-loop@review-loop", enabled: true, scope: "user", version: "0.1.0", installPath: path.join(process.cwd(), "plugin") };
   const base = [{ id: "codex@openai-codex", enabled: true, scope: "user", version: "1.0.6" }];
   s.claude.set({
-    "--version": { stdout: "2.1.284 (Claude Code)\n" },
+    "--version": { stdout: `${MIN_CLAUDE} (Claude Code)\n` },
     "plugin list --json": [{ stdout: JSON.stringify(base) }, { stdout: JSON.stringify(base) }, { stdout: JSON.stringify([...base, listed]) }],
     "*": { stdout: "{}\n" }
   });
@@ -118,7 +119,7 @@ test("T-SET-5c: an enabled plugin at project scope only is not enough: setup ins
   const plugin = { id: "review-loop@review-loop", enabled: true, version: "0.1.0", installPath: path.join(process.cwd(), "plugin") };
   const base = [{ id: "codex@openai-codex", enabled: true, scope: "user", version: "1.0.6" }, { ...plugin, scope: "project" }];
   s.claude.set({
-    "--version": { stdout: "2.1.284 (Claude Code)\n" },
+    "--version": { stdout: `${MIN_CLAUDE} (Claude Code)\n` },
     "plugin list --json": [{ stdout: JSON.stringify(base) }, { stdout: JSON.stringify(base) }, { stdout: JSON.stringify([...base, { ...plugin, scope: "user" }]) }],
     "*": { stdout: "{}\n" }
   });
@@ -130,7 +131,7 @@ test("T-SET-5c: an enabled plugin at project scope only is not enough: setup ins
 test("T-SET-5d: setup fails loudly when the user-scope install never appears", async () => {
   const s = sandbox();
   const base = [{ id: "codex@openai-codex", enabled: true, scope: "user", version: "1.0.6" }, { id: "review-loop@review-loop", enabled: true, scope: "project", version: "0.1.0" }];
-  s.claude.set({ "--version": { stdout: "2.1.284 (Claude Code)\n" }, "plugin list --json": { stdout: JSON.stringify(base) }, "*": { stdout: "{}\n" } });
+  s.claude.set({ "--version": { stdout: `${MIN_CLAUDE} (Claude Code)\n` }, "plugin list --json": { stdout: JSON.stringify(base) }, "*": { stdout: "{}\n" } });
   const o = io([]);
   assert.equal(await main(["setup", "--yes", "--skip-live-check"], o), 1);
   assert.match(o.lines.join(""), /plugin_install_failed/);
