@@ -1,0 +1,1 @@
+"{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"review-loop [review_pending]: review-loop: PR me/proj:feature → me/proj:main@<BASE> pending — invoke the review-loop skill (node \\\"<ENGINE>/review-round.mjs\\\" run --key <KEY>), then retry the PR\"}}\n"

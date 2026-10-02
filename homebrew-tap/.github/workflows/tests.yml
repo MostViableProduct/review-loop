@@ -1,0 +1,62 @@
+name: tests
+# Pull requests only: every formula change arrives as a release PR (review-loop's release.yml), whose url and sha256
+# already resolve. Before the first release the tap holds no formula at all: one that could not install is never
+# published.
+on:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+defaults:
+  run:
+    # `declare -f` below needs bash; bash is also the macOS runner default, stated so it can't drift.
+    shell: bash
+jobs:
+  formula:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, macos-15-intel]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    env:
+      # An auto-update inside install/upgrade could reset the tap to its remote and silently test the base formula.
+      HOMEBREW_NO_AUTO_UPDATE: 1
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          path: head
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          ref: ${{ github.base_ref }}
+          path: base
+      - name: Tap = the base branch (the currently released formula)
+        run: |
+          TAP="$(brew --repository)/Library/Taps/MostViableProduct/homebrew-tap"
+          echo "TAP=$TAP" >> "$GITHUB_ENV"
+          mkdir -p "$(dirname "$TAP")"; rm -rf "$TAP"; cp -R base "$TAP"
+      - run: brew style head/Formula/review-loop.rb
+      - name: Snapshot ~/.claude and ~/.codex — metadata AND content hashes (T-REL-4)
+        run: |
+          mkdir -p ~/.claude ~/.codex
+          printf x > ~/.claude/.marker; printf x > ~/.codex/.marker
+          snap() { { find ~/.claude ~/.codex -exec stat -f '%N %m %z %p' {} +; find ~/.claude ~/.codex -type f -exec shasum -a 256 {} +; } | sort; }
+          snap > "$RUNNER_TEMP/before.txt"
+          declare -f snap > "$RUNNER_TEMP/snap.sh"
+      - name: Install the released version (none before the very first release)
+        run: |
+          if [ ! -f base/Formula/review-loop.rb ]; then echo "FIRST=1" >> "$GITHUB_ENV"; echo "first release: nothing to upgrade from"
+          else brew install MostViableProduct/tap/review-loop; fi
+      - name: Upgrade to this PR's formula (install on the first release)
+        run: |
+          mkdir -p "$TAP/Formula"; cp head/Formula/review-loop.rb "$TAP/Formula/review-loop.rb"
+          brew audit --strict --online MostViableProduct/tap/review-loop
+          if [ "${FIRST:-}" = 1 ]; then brew install --build-from-source MostViableProduct/tap/review-loop
+          else brew upgrade --build-from-source MostViableProduct/tap/review-loop; fi
+      - run: brew test MostViableProduct/tap/review-loop
+      - run: brew uninstall review-loop
+      - name: brew-no-home-writes across install, upgrade, test and uninstall (T-REL-4, AC-2)
+        run: |
+          . "$RUNNER_TEMP/snap.sh"
+          snap > "$RUNNER_TEMP/after.txt"
+          diff "$RUNNER_TEMP/before.txt" "$RUNNER_TEMP/after.txt"

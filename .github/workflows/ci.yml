@@ -1,0 +1,68 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        # arm64, plus Intel. If GitHub retires macos-15-intel, use macos-26-intel; with no Intel label at all, run
+        # Node under Rosetta (`arch -x86_64`) on macos-14 (spec §10.3, stated in the README).
+        os: [macos-14, macos-15-intel]
+        # Homebrew's current (what users get) and the latest 22 (compat.minNode, package.json engines >=22)...
+        node: [brew, "22.x"]
+        # ...plus one leg at the exact floor that engines >=22 and the CLI's MIN_NODE = 22 accept.
+        include:
+          - os: macos-14
+            node: "22.0.0"
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    env:
+      # The suite's time-budget tests are tuned for a developer machine; shared runners are slower.
+      TEST_CONCURRENCY: 2
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+      - name: Node from Homebrew (what users get)
+        if: matrix.node == 'brew'
+        run: |
+          brew install node
+          echo "$(brew --prefix)/bin" >> "$GITHUB_PATH"
+      - name: Node from setup-node
+        if: matrix.node != 'brew'
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4.4.0
+        with:
+          node-version: ${{ matrix.node }}
+      - run: node --version && git --version
+      - run: npm test
+      - name: npm test with a fresh HOME and CODEX_HOME (nothing may depend on the runner's home)
+        run: HOME="$(mktemp -d)" CODEX_HOME="$(mktemp -d)" npm test
+      # The private denylist reaches only a push to main (merged, reviewed code). A pull_request runs the PR branch's
+      # own scripts, so even a same-repo PR never gets it: the gate then runs the generic rules and prints one notice
+      # (--tracked checks nothing). The release job requires it (docs/RELEASE.md).
+      - name: Content gate (packaged set)
+        env:
+          CONTENT_GATE_DENYLIST: ${{ github.event_name == 'push' && secrets.CONTENT_GATE_DENYLIST || '' }}
+        run: node scripts/content-gate.mjs
+      - name: Content gate (every tracked file, private rules)
+        env:
+          CONTENT_GATE_DENYLIST: ${{ github.event_name == 'push' && secrets.CONTENT_GATE_DENYLIST || '' }}
+        run: node scripts/content-gate.mjs --tracked
+      - run: npm run docs:check
+  plugin-validate:
+    runs-on: macos-14
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4.4.0
+        with:
+          node-version: "22.x"
+      - run: npm install -g @anthropic-ai/claude-code@2.1.285
+      - run: claude plugin validate --strict plugin
+      - run: claude plugin validate --strict .

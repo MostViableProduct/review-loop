@@ -1,0 +1,132 @@
+#!/bin/sh
+# Claude Code hook entry for the review-loop plugin. Finds node; without it, fails loud (spec §6.3).
+mode="$1"
+root=$(cd "$(dirname "$0")/.." && pwd)
+VERSION="0.1.0"
+
+find_node() {
+  if [ -n "${REVIEW_LOOP_NODE_CANDIDATES:-}" ]; then
+    IFS=:; for c in $REVIEW_LOOP_NODE_CANDIDATES; do [ -x "$c" ] && { echo "$c"; return 0; }; done; unset IFS; return 1
+  fi
+  command -v node 2>/dev/null && return 0
+  for c in /opt/homebrew/bin/node /usr/local/bin/node; do [ -x "$c" ] && { echo "$c"; return 0; }; done
+  return 1
+}
+
+if node_bin=$(find_node); then
+  exec "$node_bin" "$root/engine/review-gate-hook.mjs" "$mode"
+fi
+
+input=$(cat)
+reason="review-loop: Node.js not found — run: brew install node"
+# Without node there is no parser, and a pattern match is bypassable by shell syntax (gh pr $'\143reate'): the PR gates
+# fail closed on every command they see (author's decision, round 23). Node is a hard dependency, so this is a broken
+# install; the install runs from the user's own terminal.
+blocked="review-loop: Node.js not found, so no command can be checked for a PR operation; every Bash command is blocked. In your own terminal, run: brew install node"
+
+# Only a top-level boolean true allows a repeat Stop: a substring match would also accept the flag nested in another
+# object, and miss it written with spaces. plutil (macOS, the formula's only platform) parses JSON and reports the
+# type; malformed input, a string "true", a missing plutil: all block.
+stop_active() {
+  [ "$(printf '%s' "$input" | /usr/bin/plutil -type stop_hook_active - 2>/dev/null)" = bool ] &&
+    [ "$(printf '%s' "$input" | /usr/bin/plutil -extract stop_hook_active raw -o - - 2>/dev/null)" = true ]
+}
+
+# Advisory never blocks, Node or not (README presets; author's decision, round 27). The preset comes from the same file
+# config.mjs reads, under its rules: a symlink or a file over 64 KiB is not trusted, and Advisory counts only when the
+# whole config passes isConfig (version 1, codex and events objects, each optional field null or valid). Anything else,
+# unreadable or missing config included, keeps the blocking default, as the node hook's quietPreset does. A float 1.0
+# version, which JSON.parse accepts, blocks here: the fallback errs toward blocking.
+nl='
+'
+config_file() {
+  if [ -n "${REVIEW_LOOP_CONFIG:-}" ]; then printf '%s' "$REVIEW_LOOP_CONFIG"; return; fi
+  case "${XDG_CONFIG_HOME:-}" in /*) printf '%s' "$XDG_CONFIG_HOME/review-loop/config.json";; *) printf '%s' "$HOME/.config/review-loop/config.json";; esac
+}
+cfg_type() { /usr/bin/plutil -type "$1" "$cfg" 2>/dev/null; }
+# plutil prints a raw value plus one newline; the sentinel keeps any trailing newline the value itself has.
+cfg_value() { v=$(/usr/bin/plutil -extract "$1" raw -o - "$cfg" 2>/dev/null; printf x); v=${v%x}; v=${v%"$nl"}; }
+cfg_null_or() { # $1 rule, $2 key path; JSON null is plutil's "(any)", a missing key an error
+  t=$(cfg_type "$2")
+  [ "$t" = "(any)" ] && return 0
+  [ "$t" = string ] || return 1
+  cfg_value "$2"
+  case "$1" in
+    abs) case "$v" in /*) return 0;; esac; return 1;;
+    effort) case "$v" in none|minimal|low|medium|high|xhigh) return 0;; esac; return 1;;
+    model) case "$v" in *"$nl"*) return 1;; esac; printf '%s\n' "$v" | LC_ALL=C grep -Eqx '[A-Za-z0-9._:/-]{1,64}';;
+  esac
+}
+# config.mjs's folder check (assertConfigDir) follows links you or root own through every hop; without node there is
+# no such walk, so this fallback trusts the folder only when nothing on its path is a link and the folder is yours. A
+# dotfiles ~/.config therefore keeps the blocking default here (author's decision, round 31).
+config_dir_trusted() {
+  d=$(dirname "$1")
+  case "$d" in /*) ;; *) return 1;; esac
+  [ -d "$d" ] && [ ! -L "$d" ] && [ -O "$d" ] || return 1
+  while [ "$d" != / ]; do
+    [ -L "$d" ] && return 1
+    d=$(dirname "$d")
+  done
+}
+advisory() {
+  cfg=$(config_file)
+  config_dir_trusted "$cfg" && [ -f "$cfg" ] && [ ! -L "$cfg" ] && [ "$(stat -f %z "$cfg" 2>/dev/null || echo 65537)" -le 65536 ] || return 1
+  [ "$(cfg_type version)" = integer ] && cfg_value version && [ "$v" = 1 ] &&
+    [ "$(cfg_type preset)" = string ] && cfg_value preset && [ "$v" = advisory ] &&
+    [ "$(cfg_type codex)" = dictionary ] && [ "$(cfg_type events)" = dictionary ] &&
+    cfg_null_or model codex.model && cfg_null_or effort codex.effort && cfg_null_or abs rubricPath && cfg_null_or abs events.path
+}
+if advisory; then preset=advisory; else preset=default; fi
+warn="⚠ review-loop (Advisory): Node.js not found, so review is not enforced — run: brew install node — allowed under Advisory"
+
+log_event() { # $1 event, $2 data-json
+  state="${REVIEW_LOOP_STATE_DIR:-$HOME/.claude/state/review-loop}"
+  file="$state/events.jsonl"
+  sid=$(printf '%s' "$input" | sed -n 's/.*"session_id":"\([A-Za-z0-9-]\{1,64\}\)".*/\1/p' | head -n 1)
+  [ -n "$sid" ] && sid="\"$sid\"" || sid=null
+  why=""
+  # As the node writer (events.mjs): a state dir others can read is refused, never chmodded; an existing log is
+  # narrowed to 0600 before the append, since umask only applies to a file this write creates.
+  dmode=$(stat -f %Lp "$state" 2>/dev/null || echo 777)
+  if [ ! -d "$state" ] || [ -L "$state" ] || [ ! -O "$state" ] || [ $((0$dmode & 077)) -ne 0 ]; then why=state_dir_insecure
+  elif [ -L "$file" ] || { [ -e "$file" ] && [ ! -f "$file" ]; }; then why=write_failed  # >> would follow a link
+  elif [ -f "$file" ] && [ "$(stat -f %z "$file" 2>/dev/null || echo 0)" -gt 5242880 ] && ! mv -f "$file" "$file.1" 2>/dev/null; then why=write_failed  # rotate at 5 MiB, as events.mjs does
+  elif [ -f "$file" ] && [ $((0$(stat -f %Lp "$file" 2>/dev/null || echo 777) & 077)) -ne 0 ] && ! chmod -h 600 "$file" 2>/dev/null; then why=write_failed
+  fi
+  if [ -z "$why" ]; then
+    ts=$(date -u +%Y-%m-%dT%H:%M:%S.000Z)
+    rid=$(uuidgen | tr 'A-Z' 'a-z')
+    ( umask 077; printf '{"schema":"review-loop.event/1","ts":"%s","run_id":"%s","source":"hook","event":"%s","code":"node_missing","detail":null,"exit_code":null,"version":"%s","session_id":%s,"artifact_key":null,"data":%s}\n' \
+      "$ts" "$rid" "$1" "$VERSION" "$sid" "$2" >> "$file" ) 2>/dev/null || why=write_failed
+  fi
+  [ -n "$why" ] && printf 'review-loop: event log not writable (%s)\n' "$why" >&2
+  return 0
+}
+
+case "$mode" in
+  stop)
+    if stop_active; then log_event gate.decision "{\"gate\":\"stop\",\"outcome\":\"allowed\",\"preset\":\"$preset\",\"pending_count\":null}"; exit 0; fi
+    if [ "$preset" = advisory ]; then
+      log_event gate.decision '{"gate":"stop","outcome":"warned","preset":"advisory","pending_count":null}'
+      printf '{"systemMessage":"%s"}\n' "$warn"
+    else
+      log_event gate.decision '{"gate":"stop","outcome":"blocked","preset":"default","pending_count":null}'
+      printf '{"decision":"block","reason":"%s"}\n' "$reason"
+    fi;;
+  pr|prverify)
+    if [ "$preset" = advisory ]; then
+      log_event gate.decision "{\"gate\":\"$mode\",\"outcome\":\"warned\",\"preset\":\"advisory\",\"pending_count\":null}"
+      printf '{"systemMessage":"%s"}\n' "$warn"
+    elif [ "$mode" = pr ]; then
+      log_event gate.decision '{"gate":"pr","outcome":"denied","preset":"default","pending_count":null}'
+      printf '{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"%s"}}\n' "$blocked"
+    else
+      log_event gate.decision '{"gate":"prverify","outcome":"denied","preset":"default","pending_count":null}'
+      printf '{"continue":false,"stopReason":"review-loop: Node.js not found, so this PR could not be verified against the reviewed commit. Check it, then run: brew install node"}\n'
+    fi;;
+  session|track|prompt)
+    log_event hook.error "{\"stage\":\"$mode\",\"mode\":\"$mode\"}"
+    printf '%s\n' "$reason" >&2;;
+esac
+exit 0

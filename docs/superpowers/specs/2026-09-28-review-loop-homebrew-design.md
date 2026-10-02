@@ -194,7 +194,8 @@ T-CFG-8 enforces.
   64 KiB cap, symlink rejected, and a structural validator `isConfig`.
 - **Invalid, unreadable or symlinked config:** behave as **Default**. This is loud:
   - one stderr line naming the file and the code;
-  - the event `config.invalid` with code `config_invalid|config_symlink_rejected`;
+  - the event `config.invalid` with code `config_invalid|config_symlink_rejected|config_dir_untrusted`
+    (the last: the config's folder is a link, or a link above it or the folder belongs to another user);
   - `doctor` shows ✗.
   - The file is quarantined to `.corrupt` only by `review-loop config repair` or `setup`, never by a
     hook, so hooks never mutate user config.
@@ -401,18 +402,20 @@ order: `command -v node`, `/opt/homebrew/bin/node`, `/usr/local/bin/node`. When 
 When **no node** is found, it fails **loud**, because config can't be read and it assumes Default:
 
 - `stop`: prints `{"decision":"block","reason":"review-loop: Node.js not found — run: brew install node"}`
-  unless stdin contains `"stop_hook_active":true`, in which case it allows. This mirrors the engine's
+  unless stdin's top-level `stop_hook_active` is the boolean `true` (checked with `plutil`), in which case it allows. This mirrors the engine's
   anti-trap rule (`review-gate-hook.mjs:144`).
-- **PR-like test for `pr` and `prverify`.** Without node, the shim can't run the engine's `cmdparse`
-  classifier. So it applies a deliberately **broader** test: `grep -Eiq
-  'pr[^a-z0-9]+(create|merge)|/pulls|/merge|create_pull_request|merge_pull_request|createpullrequest|mergepullrequest|graphql'` on stdin. This matches
-  everything the engine would classify as PR creation or a merge (§7.1 (3)), and some things it wouldn't. A false match only
-  causes a loud denial while node is missing.
-  - The MCP matcher entries always count as PR-like.
-  - A non-PR-like Bash command exits 0 with no output and no event. So a missing node doesn't block
-    ordinary shell use, and it isn't a gate evaluation (§8.2).
-- `pr` (PR-like): prints a PreToolUse `permissionDecision:"deny"` with the same reason.
-- `prverify` (PR-like): prints the §7.1 **PostToolUse stop shape** `{"continue":false,"stopReason":"review-loop:
+- **`pr` and `prverify` fail closed on every command** (author's decision, round 23). Without node, the
+  shim can't run the engine's `cmdparse` classifier, and a pattern match is bypassable by shell syntax
+  (`gh pr $'\143reate'`). So every Bash command and every MCP matcher entry is treated as PR-like while
+  node is missing. The message says every Bash command is blocked and names `brew install node`.
+- **Advisory still never blocks** (author's decisions, rounds 27 and 31). The shim reads the same config
+  file as `config.mjs`, via `plutil`. Advisory counts only when the file passes the full `isConfig` shape,
+  is a regular non-link file of at most 64 KiB, and sits on a path with **no symlink on it**, in a folder
+  the user owns. Without node there is no owner walk through link targets (`assertOwnLinks`), so a
+  dotfiles `~/.config` keeps the blocking default here. Under Advisory, `stop`, `pr` and `prverify`
+  print only a `systemMessage` warning and log `warned`.
+- `pr`: prints a PreToolUse `permissionDecision:"deny"` with the same reason.
+- `prverify`: prints the §7.1 **PostToolUse stop shape** `{"continue":false,"stopReason":"review-loop:
   Node.js not found, so this PR could not be verified against the reviewed commit. Check it, then run:
   brew install node"}`. This fails closed, like §7.1 step 5. It uses `continue:false`, not
   `decision:block`, because PostToolUse cannot undo creation.
@@ -426,7 +429,7 @@ one fixed-shape schema-v1 line built with `printf`:
 - `ts` from `date -u`;
 - `run_id` from `uuidgen`, lowercased;
 - `source:"hook"`, `code:"node_missing"`, `detail:null`, `exit_code:null`;
-- `event`: for `stop`, `pr` and `prverify`, `gate.decision` with `data:{"gate","outcome","preset":"default","pending_count":null}`.
+- `event`: for `stop`, `pr` and `prverify`, `gate.decision` with `data:{"gate","outcome","preset","pending_count":null}`; `preset` is the one in force (`advisory` or `default`).
   For `session`, `track` and `prompt`, `hook.error` with `data:{"stage":"<mode>"}`, since these modes make
   no blocking decision without node. (`prompt` without node injects nothing, which isn't a gate outcome.)
 - `version`: stamped into the shim at build time and checked by T-SHAPE-4;
@@ -435,7 +438,7 @@ one fixed-shape schema-v1 line built with `printf`:
 
 It writes only to the **default** events path, because without node it cannot read the config's
 `events.path`. It writes only if the state dir is a real directory owned by the user
-(`[ -d ] && [ ! -L ] && [ -O ]`) and the file is under 5 MiB. It runs under `umask 077`. It never writes
+(`[ -d ] && [ ! -L ] && [ -O ]`) with no group or other permission bits. A log over 5 MiB is rotated to `.1` first, and an existing log is narrowed to `0600`. It runs under `umask 077`. It never writes
 content.
 
 **If the event write fails:**

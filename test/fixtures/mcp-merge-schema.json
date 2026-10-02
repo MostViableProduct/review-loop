@@ -1,0 +1,19 @@
+{
+  "source": "github/github-mcp-server@5a1a3866d4a681d771162d35680d6c7219eac3b0 pkg/github/pullrequests.go MergePullRequest",
+  "tool": "merge_pull_request",
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "owner": { "type": "string" },
+      "repo": { "type": "string" },
+      "pullNumber": { "type": "number" },
+      "commit_title": { "type": "string" },
+      "commit_message": { "type": "string" },
+      "merge_method": { "type": "string", "enum": ["merge", "squash", "rebase"] },
+      "expectedHeadSha": { "type": "string" }
+    },
+    "required": ["owner", "repo", "pullNumber"]
+  },
+  "handler": "expectedHeadSha is passed as PullRequestOptions.SHA, the REST merge `sha` that the PR head must match",
+  "headField": "expectedHeadSha"
+}

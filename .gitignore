@@ -1,0 +1,7 @@
+node_modules/
+dist/
+*.tgz
+.DS_Store
+docs/probes/raw/
+# The private content-gate denylist (docs/RELEASE.md): never committed.
+.content-gate.private.json
