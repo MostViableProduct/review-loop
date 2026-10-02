@@ -6,6 +6,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { tmpDir } from "../engine/helpers.mjs";
 import { validateLine } from "../../plugin/engine/lib/events.mjs";
+import { MODEL_RE, EFFORTS } from "../../plugin/engine/lib/config.mjs";
 
 const SHIM = path.join(process.cwd(), "plugin", "bin", "hook");
 const G = "g" + "h";
@@ -52,6 +53,26 @@ test("T-DOC-9: without node the Advisory preset still never blocks; any other or
   assert.match(go("stop", stop, state()).stdout, /"decision":"block"/);
   fs.writeFileSync(cfg, JSON.stringify({ preset: ["advisory"] }));
   assert.match(go("stop", stop, state()).stdout, /"decision":"block"/, "a non-string preset");
+  // Advisory counts only in a config the node reader (isConfig) would accept.
+  const base = { version: 1, preset: "advisory", codex: { model: null, effort: null }, rubricPath: null, events: { path: null } };
+  fs.writeFileSync(cfg, JSON.stringify({ ...base, codex: { model: "gpt-5.5", effort: "high" }, rubricPath: "/r/rubric.md", events: { path: "/l/ev.jsonl" } }));
+  assert.deepEqual(Object.keys(JSON.parse(go("stop", stop, state()).stdout)), ["systemMessage"], "a full valid config still warns");
+  const { version: _v, ...noVersion } = base;
+  const { events: _e, ...noEvents } = base;
+  for (const bad of [
+    { ...base, version: 2 },
+    noVersion,
+    noEvents,
+    { ...base, codex: { model: "bad space", effort: null } },
+    { ...base, codex: { model: "gpt\n", effort: null } },
+    { ...base, codex: { model: null, effort: "max" } },
+    { ...base, rubricPath: "relative.md" },
+    { ...base, events: { path: 7 } },
+    [base],
+  ]) {
+    fs.writeFileSync(cfg, JSON.stringify(bad));
+    assert.match(go("stop", stop, state()).stdout, /"decision":"block"/, JSON.stringify(bad));
+  }
   write("advisory");
   const link = path.join(tmpDir(), "config.json");
   fs.symlinkSync(cfg, link);
@@ -124,4 +145,10 @@ test("T-DOC-9: without node the PR gates fail closed on every command, shell-esc
   const d2 = state();
   run("stop", { session_id: "../../etc/passwd", stop_hook_active: false }, d2);
   assert.equal(events(d2)[0].session_id, null);
+});
+
+test("the shim's copies of config.mjs's model pattern and effort list match the originals", () => {
+  const shim = fs.readFileSync(SHIM, "utf8");
+  assert.ok(shim.includes(`grep -Eqx '${MODEL_RE.source.slice(1, -1)}'`), "the model pattern drifted from MODEL_RE");
+  assert.ok(shim.includes(`effort) case "$v" in ${EFFORTS.join("|")}) return 0`), "the effort list drifted from EFFORTS");
 });

@@ -33,17 +33,37 @@ stop_active() {
 }
 
 # Advisory never blocks, Node or not (README presets; author's decision, round 27). The preset comes from the same file
-# config.mjs reads, under its rules: a symlink, a file over 64 KiB, or a non-string preset is not trusted, and anything
-# but "advisory" (unreadable config included) keeps the blocking default, as the node hook's quietPreset does.
+# config.mjs reads, under its rules: a symlink or a file over 64 KiB is not trusted, and Advisory counts only when the
+# whole config passes isConfig (version 1, codex and events objects, each optional field null or valid). Anything else,
+# unreadable or missing config included, keeps the blocking default, as the node hook's quietPreset does. A float 1.0
+# version, which JSON.parse accepts, blocks here: the fallback errs toward blocking.
+nl='
+'
 config_file() {
   if [ -n "${REVIEW_LOOP_CONFIG:-}" ]; then printf '%s' "$REVIEW_LOOP_CONFIG"; return; fi
   case "${XDG_CONFIG_HOME:-}" in /*) printf '%s' "$XDG_CONFIG_HOME/review-loop/config.json";; *) printf '%s' "$HOME/.config/review-loop/config.json";; esac
 }
+cfg_type() { /usr/bin/plutil -type "$1" "$cfg" 2>/dev/null; }
+# plutil prints a raw value plus one newline; the sentinel keeps any trailing newline the value itself has.
+cfg_value() { v=$(/usr/bin/plutil -extract "$1" raw -o - "$cfg" 2>/dev/null; printf x); v=${v%x}; v=${v%"$nl"}; }
+cfg_null_or() { # $1 rule, $2 key path; JSON null is plutil's "(any)", a missing key an error
+  t=$(cfg_type "$2")
+  [ "$t" = "(any)" ] && return 0
+  [ "$t" = string ] || return 1
+  cfg_value "$2"
+  case "$1" in
+    abs) case "$v" in /*) return 0;; esac; return 1;;
+    effort) case "$v" in none|minimal|low|medium|high|xhigh) return 0;; esac; return 1;;
+    model) case "$v" in *"$nl"*) return 1;; esac; printf '%s\n' "$v" | LC_ALL=C grep -Eqx '[A-Za-z0-9._:/-]{1,64}';;
+  esac
+}
 advisory() {
   cfg=$(config_file)
-  [ -f "$cfg" ] && [ ! -L "$cfg" ] && [ "$(stat -f %z "$cfg" 2>/dev/null || echo 65537)" -le 65536 ] &&
-    [ "$(/usr/bin/plutil -type preset "$cfg" 2>/dev/null)" = string ] &&
-    [ "$(/usr/bin/plutil -extract preset raw -o - "$cfg" 2>/dev/null)" = advisory ]
+  [ -f "$cfg" ] && [ ! -L "$cfg" ] && [ "$(stat -f %z "$cfg" 2>/dev/null || echo 65537)" -le 65536 ] || return 1
+  [ "$(cfg_type version)" = integer ] && cfg_value version && [ "$v" = 1 ] &&
+    [ "$(cfg_type preset)" = string ] && cfg_value preset && [ "$v" = advisory ] &&
+    [ "$(cfg_type codex)" = dictionary ] && [ "$(cfg_type events)" = dictionary ] &&
+    cfg_null_or model codex.model && cfg_null_or effort codex.effort && cfg_null_or abs rubricPath && cfg_null_or abs events.path
 }
 if advisory; then preset=advisory; else preset=default; fi
 warn="⚠ review-loop (Advisory): Node.js not found, so review is not enforced — run: brew install node — allowed under Advisory"
