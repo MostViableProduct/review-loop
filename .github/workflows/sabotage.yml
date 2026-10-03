@@ -9,6 +9,8 @@ on:
     branches: [main]
     paths:
       - "plugin/engine/lib/events.mjs"
+      - "cli/lib/selftest.mjs"
+      - "test/cli/selftest.test.mjs"
       - "cli/lib/preflight.mjs"
       - "plugin/engine/review-gate-hook.mjs"
       - "test/engine/presets.test.mjs"
@@ -77,6 +79,8 @@ on:
   pull_request:
     paths:
       - "plugin/engine/lib/events.mjs"
+      - "cli/lib/selftest.mjs"
+      - "test/cli/selftest.test.mjs"
       - "cli/lib/preflight.mjs"
       - "plugin/engine/review-gate-hook.mjs"
       - "test/engine/presets.test.mjs"

@@ -1,6 +1,6 @@
 {
   "name": "review-loop",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Enforced Codex adversarial review for Claude Code: presets, PR-head binding, JSONL events.",
   "license": "MIT",
   "author": {

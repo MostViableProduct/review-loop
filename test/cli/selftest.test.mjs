@@ -126,3 +126,36 @@ test("L15: selftest never runs the user's gh, even with one first on PATH", () =
     fs.rmSync(bin, { recursive: true, force: true });
   }
 });
+
+test("selftest reaches the real git when `git` on PATH is a wrapper that needs its own environment (Homebrew's shim in brew test)", () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "rl-st-home-"));
+  const shim = fs.mkdtempSync(path.join(os.tmpdir(), "rl-st-shim-"));
+  try {
+    const real = path.join(spawnSync("git", ["--exec-path"], { encoding: "utf8" }).stdout.trim(), "git");
+    // Like Homebrew's shims/shared/git: exits 1 unless a variable selftest's rebuilt environment never carries is set.
+    fs.writeFileSync(path.join(shim, "git"), `#!/bin/sh\n[ -n "$RL_SHIM_LIBRARY" ] || { echo "shim: RL_SHIM_LIBRARY is unset" >&2; exit 1; }\nexec '${real}' "$@"\n`, { mode: 0o755 });
+    const PATH = `${shim}:${PATH_MIN}`;
+    assert.equal(spawnSync("git", ["--version"], { env: { PATH } }).status, 1, "control: the wrapper fails without its variable");
+    const r = spawnSync(process.execPath, [path.join(ROOT, "cli", "review-loop.mjs"), "selftest", "--json"], { encoding: "utf8", env: { ...envFor(home), PATH, RL_SHIM_LIBRARY: "1" } });
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(JSON.parse(r.stdout).code, "ok");
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+    fs.rmSync(shim, { recursive: true, force: true });
+  }
+});
+
+test("selftest (−): a git that fails names git's own error, not only the step", () => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), "rl-st-home-"));
+  const bad = fs.mkdtempSync(path.join(os.tmpdir(), "rl-st-badgit-"));
+  try {
+    fs.writeFileSync(path.join(bad, "git"), "#!/bin/sh\necho 'warning: first line' >&2\necho 'fatal: boom from a broken git' >&2\nexit 128\n", { mode: 0o755 });
+    const r = spawnSync(process.execPath, [path.join(ROOT, "cli", "review-loop.mjs"), "selftest"], { encoding: "utf8", env: { ...envFor(home), PATH: `${bad}:${PATH_MIN}` } });
+    assert.equal(r.status, 4, r.stderr);
+    assert.match(r.stderr, /git unavailable or failed \(git init\): fatal: boom from a broken git/);
+    assert.doesNotMatch(r.stderr, /first line/, "only git's last line");
+  } finally {
+    fs.rmSync(home, { recursive: true, force: true });
+    fs.rmSync(bad, { recursive: true, force: true });
+  }
+});
