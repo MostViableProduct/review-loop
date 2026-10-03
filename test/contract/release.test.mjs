@@ -101,12 +101,18 @@ test("bump-version refuses a symlinked target and writes nothing", () => {
 
 test("bump-version is all-or-nothing: a missing marketplace entry or hook VERSION line writes no file", () => {
   for (const [file, edit, message] of /** @type {const} */ ([
-    [".claude-plugin/marketplace.json", (/** @type {string} */ s) => s.replace("\"name\": \"review-loop\", \"source\"", "\"name\": \"other\", \"source\""), /no review-loop entry/],
+    [".claude-plugin/marketplace.json", (/** @type {string} */ s) => {
+      const m = JSON.parse(s);
+      for (const p of m.plugins) if (p.name === "review-loop") p.name = "other";
+      return JSON.stringify(m, null, 2) + "\n";
+    }, /no review-loop entry/],
     ["plugin/bin/hook", (/** @type {string} */ s) => s.replace(/^VERSION=.*$/m, "V=1"), /no VERSION line/]
   ])) {
     const d = copyRepo();
     const p = path.join(d, file);
-    fs.writeFileSync(p, edit(fs.readFileSync(p, "utf8")));
+    const original = fs.readFileSync(p, "utf8");
+    fs.writeFileSync(p, edit(original));
+    assert.notEqual(fs.readFileSync(p, "utf8"), original, `${file}: the break was applied`);
     const before = snapshot(d);
     const r = node(d, "scripts/bump-version.mjs", "9.8.7");
     assert.equal(r.status, 1, file);

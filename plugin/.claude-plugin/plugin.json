@@ -1,7 +1,10 @@
 {
   "name": "review-loop",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "Enforced Codex adversarial review for Claude Code: presets, PR-head binding, JSONL events.",
   "license": "MIT",
-  "author": { "name": "MostViableProduct", "url": "https://github.com/MostViableProduct" }
+  "author": {
+    "name": "MostViableProduct",
+    "url": "https://github.com/MostViableProduct"
+  }
 }

@@ -1,13 +1,20 @@
 {
   "name": "review-loop",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "private": true,
   "type": "module",
   "description": "Enforced Codex adversarial review inside Claude Code",
   "license": "MIT",
-  "repository": { "type": "git", "url": "https://github.com/MostViableProduct/review-loop.git" },
-  "engines": { "node": ">=22" },
-  "bin": { "review-loop": "cli/review-loop.mjs" },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/MostViableProduct/review-loop.git"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "bin": {
+    "review-loop": "cli/review-loop.mjs"
+  },
   "scripts": {
     "test": "node --test --test-concurrency=${TEST_CONCURRENCY:-4} 'test/**/*.test.mjs'",
     "sabotage": "node scripts/sabotage.mjs",
