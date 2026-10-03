@@ -21,6 +21,31 @@ const checkFailed = (id, what) => new CliError("selftest_failed", `selftest: ${w
 const expect = (ok, id, what) => { if (!ok) throw checkFailed(id, what); };
 
 /**
+ * The real git binary, found with the caller's full environment. `git` on PATH can be a wrapper that needs variables
+ * the hermetic environment below drops: inside `brew test` it is Homebrew's shim, which exits 1 without
+ * HOMEBREW_LIBRARY; asdf and mise shims are alike. git's exec-path holds the binary itself. Falls back to `git`.
+ * @returns {string}
+ */
+function realGit() {
+  const r = spawnSync("git", ["--exec-path"], { encoding: "utf8", timeout: 15000 });
+  const dir = r.status === 0 ? r.stdout.trim() : "";
+  if (!path.isAbsolute(dir)) return "git";
+  const bin = path.join(dir, "git");
+  try {
+    fs.accessSync(bin, fs.constants.X_OK);
+    return fs.statSync(bin).isFile() ? bin : "git";
+  } catch {
+    return "git";
+  }
+}
+
+/** git's last stderr line, bounded: names why it failed without echoing more than a line. @param {string} stderr */
+const gitReason = (stderr) => {
+  const line = stderr.trim().split("\n").at(-1)?.trim() ?? "";
+  return line ? `: ${line.slice(0, 200)}` : "";
+};
+
+/**
  * @param {string[]} _args
  * @param {import("./io.mjs").IO} io
  * @param {{ json: boolean }} ctx
@@ -34,6 +59,9 @@ export async function run(_args, io, ctx) {
   fs.mkdirSync(bin);
   // Hook paths that would reach GitHub run this instead of the user's gh, so selftest stays hermetic.
   fs.writeFileSync(path.join(bin, G), "#!/bin/sh\necho 'selftest: gh is not available here' >&2\nexit 1\n", { mode: 0o755 });
+  // Every git call below, selftest's and the hooks', reaches the real binary even though the environment is rebuilt.
+  const gitBin = realGit();
+  if (gitBin !== "git") fs.writeFileSync(path.join(bin, "git"), `#!/bin/sh\nexec '${gitBin.replaceAll("'", "'\\''")}' "$@"\n`, { mode: 0o755 });
   const env = {
     PATH: `${bin}:${process.env.PATH ?? "/usr/bin:/bin"}`,
     HOME: home,
@@ -52,7 +80,7 @@ export async function run(_args, io, ctx) {
   /** @param {string} cwd @param {string[]} a */
   const git = (cwd, a) => {
     const r = spawnSync("git", ["-c", "commit.gpgsign=false", "-c", "init.defaultBranch=main", ...a], { cwd, env, encoding: "utf8" });
-    if (r.error || r.status !== 0) throw checkFailed("git_failed", `git unavailable or failed (git ${a[0]})`);
+    if (r.error || r.status !== 0) throw checkFailed("git_failed", `git unavailable or failed (git ${a[0]})${gitReason(r.stderr ?? "")}`);
   };
   /** @param {string} mode @param {Record<string, unknown>} input @param {boolean} [mustSpeak] @returns {string} */
   const hook = (mode, input, mustSpeak = false) => {
