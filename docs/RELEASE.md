@@ -11,7 +11,9 @@ Every step is a command with its expected output. Stop at the first mismatch.
   one secret, `TAP_PR_TOKEN`: a fine-grained token limited to `MostViableProduct/homebrew-tap`, with Contents and Pull
   requests write. Only the workflow's `tap-bump` job reads it, and only after the reviewer approves.
   - Deployment branches and tags: **Selected** → add the tag rule `v*.*.*`, so no other ref can start the job.
-  - Turn on **Prevent self-review**: the person who pushed the tag can't approve their own tap bump.
+  - **Prevent self-review** stops the person who pushed the tag from approving their own tap bump. Turn it on only
+    when a second maintainer can approve: with one maintainer it leaves no one able to approve, and every release
+    stops at `tap-bump`.
 - The private content-gate denylist as a repository secret, `CONTENT_GATE_DENYLIST` (Settings → Secrets and
   variables → Actions → New repository secret): a JSON array of `{ "name": "...", "pattern": "..." }`, the same
   list as your local `.content-gate.private.json` (gitignored, never committed). It holds the author's handle and
