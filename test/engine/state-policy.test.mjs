@@ -926,11 +926,12 @@ test("lock section: a marker that can't be read, or doesn't agree with its own n
   assert.ok(!fs.existsSync(markerFile(key, s.pid)), "once the named PID is dead, the next contender removes it");
 });
 
-// Marker unlinks fail; publishLock's temp-file cleanup (rmSync) is unaffected.
+// Marker unlinks fail. Temp files are spared: on Node 22, publishLock's rmSync goes through the public unlinkSync.
 const realUnlink = fs.unlinkSync.bind(fs);
+const isMarkerPath = (/** @type {fs.PathLike} */ p) => String(p).includes(".lock.reclaim.") && !String(p).endsWith(".tmp");
 const failMarkerUnlinks = () =>
   mock.method(fs, "unlinkSync", (/** @type {fs.PathLike} */ p) => {
-    if (String(p).includes(".lock.reclaim.")) throw Object.assign(new Error("EACCES: refused"), { code: "EACCES" });
+    if (isMarkerPath(p)) throw Object.assign(new Error("EACCES: refused"), { code: "EACCES" });
     return realUnlink(p);
   });
 
@@ -996,7 +997,7 @@ test("lock section: the exit handler retries a stranded marker; if it still fail
         process.env.REVIEW_LOOP_STATE_DIR=${JSON.stringify(stateRoot())};
         const fs = (await import("node:fs")).default;
         const real = fs.unlinkSync;
-        fs.unlinkSync = (p, ...r) => { if (String(p).includes(".lock.reclaim.")) throw Object.assign(new Error("refused"), { code: "EACCES" }); return real.call(fs, p, ...r); };
+        fs.unlinkSync = (p, ...r) => { if (String(p).includes(".lock.reclaim.") && !String(p).endsWith(".tmp")) throw Object.assign(new Error("refused"), { code: "EACCES" }); return real.call(fs, p, ...r); };
         const { acquireLock } = await import(${JSON.stringify(STATE_MJS)});
         acquireLock(${JSON.stringify(key)}, "s");
         if (${restoreBeforeExit}) fs.unlinkSync = real;
