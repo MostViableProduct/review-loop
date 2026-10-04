@@ -500,7 +500,8 @@ function sleepSync(ms) {
 /**
  * A process's identity as the kernel stores it: its start time and full command line, hashed. Neither changes after
  * the process starts (nothing in review-loop sets process.title), and a wall-clock change doesn't alter a stored start
- * time. The command line tells apart a PID reused within the same displayed second.
+ * time. lstart has one-second resolution; the command line tells apart a PID reused within that second unless the
+ * reuser runs the identical command (on macOS that needs the PID space to wrap within one second).
  * - /bin/ps, never a PATH lookup: this answer decides that a live process is SOMEONE ELSE, so a shim on one
  *   contender's PATH must not be able to fake a mismatch.
  * - A fixed environment, never the caller's: lstart prints local time, so TZ and the locale are pinned for every

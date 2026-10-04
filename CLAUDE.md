@@ -106,7 +106,11 @@ These are copied from the spec, and every task implicitly includes them.
   - **A marker is live while its owner process exists. No time limit.** Stale only when the name's PID is dead, or the
     marker is verified (well-formed, agreeing with its name) and `processIdent(pid)` differs. `ident` is the sha256 of
     `/bin/ps -ww -o lstart=,command=` under a fixed env (`TZ=UTC`, `LC_ALL=C`): absolute path, so a PATH shim can't
-    fake "another process"; command line included, so a PID reused within the same second differs. Unreadable or
+    fake "another process"; command line included, so a PID reused within the same `lstart` second differs unless
+    it also runs the identical command. `lstart` has one-second resolution and nothing finer is reachable without a
+    native addon; macOS assigns PIDs sequentially and wraps only at 99999, so that case needs ~100,000 process
+    creations within one second (`kern.maxproc` is a few thousand). If it ever happened, the marker would read as live
+    for that process's lifetime, the same "blocked while its owner lives" case below. Unreadable or
     inconsistent markers, and a failing `ps`, count as live while the name's PID lives. No identity → no marker
     (`lock_identity_unavailable`). Nothing in review-loop may set `process.title` (a test greps for it).
   - **When a key stays blocked**: for as long as a marker's owner lives (stuck, suspended, or a reused PID behind an
