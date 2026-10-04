@@ -576,3 +576,45 @@ test("RELEASE.md's signing key, tagger and allowed_signers agree", () => {
   assert.ok(doc.includes("gpg.ssh.allowedSignersFile=docs/allowed_signers tag -v vX.Y.Z"), "the verify command uses the file");
   assert.ok(!/git tag -s vX/.test(doc), "no tag command that would use a personal identity and key");
 });
+
+test("release.yml: the signature step passes a tag signed by the allowed key and refuses any other (real git, ssh-keygen)", () => {
+  const base = tmpDir("rl-sig-");
+  const env = { PATH: "/usr/bin:/bin", HOME: base, GIT_CONFIG_GLOBAL: path.join(base, "gitconfig"), GIT_CONFIG_NOSYSTEM: "1" };
+  fs.writeFileSync(env.GIT_CONFIG_GLOBAL, "[user]\n\tname = t\n\temail = t@example.com\n[init]\n\tdefaultBranch = main\n");
+  const git = (/** @type {string} */ cwd, /** @type {string[]} */ ...a) => execFileSync("git", a, { cwd, env, encoding: "utf8" }).trim();
+  for (const k of ["release", "other"]) execFileSync("ssh-keygen", ["-q", "-t", "ed25519", "-N", "", "-C", k, "-f", path.join(base, k)], { env });
+  const pub = fs.readFileSync(path.join(base, "release.pub"), "utf8").split(" ").slice(0, 2).join(" ");
+  const origin = path.join(base, "origin.git");
+  git(base, "init", "-q", "--bare", origin);
+  const work = path.join(base, "work");
+  git(base, "clone", "-q", origin, work);
+  fs.mkdirSync(path.join(work, "docs"));
+  fs.writeFileSync(path.join(work, "docs", "allowed_signers"), `rel@example.com namespaces="git" ${pub}\n`);
+  git(work, "add", ".");
+  git(work, "commit", "-q", "-m", "seed");
+  git(work, "push", "-q", "origin", "main");
+  /** @type {Record<string, string[]>} */
+  const tags = {
+    "v1.0.0": ["-c", "gpg.format=ssh", "-c", `user.signingkey=${path.join(base, "release.pub")}`, "tag", "-s", "v1.0.0", "-m", "r"],
+    "v1.0.1": ["-c", "gpg.format=ssh", "-c", `user.signingkey=${path.join(base, "other.pub")}`, "tag", "-s", "v1.0.1", "-m", "r"],
+    "v1.0.2": ["tag", "-a", "v1.0.2", "-m", "r"],
+    "v1.0.3": ["tag", "v1.0.3"]
+  };
+  for (const a of Object.values(tags)) git(work, ...a);
+  git(work, "push", "-q", "origin", "--tags");
+  const script = runScript("release", "The tag is signed by the release key in docs/allowed_signers");
+  /** @param {string} tag */
+  const run = (tag) => {
+    const co = tmpDir("rl-sig-co-");
+    git(co, "clone", "-q", origin, ".");
+    return spawnSync("bash", ["-c", script], { cwd: co, env: { ...env, GITHUB_REF_NAME: tag }, encoding: "utf8" });
+  };
+  const ok = run("v1.0.0");
+  assert.equal(ok.status, 0, ok.stderr);
+  assert.match(ok.stdout, /Good "git" signature for rel@example\.com /);
+  for (const [tag, why] of [["v1.0.1", /not signed by the release key/], ["v1.0.2", /not signed by the release key/], ["v1.0.3", /not an annotated tag/]]) {
+    const r = run(/** @type {string} */ (tag));
+    assert.notEqual(r.status, 0, `${tag} must be refused`);
+    assert.match(r.stderr, /** @type {RegExp} */ (why), `${tag}: ${r.stderr}`);
+  }
+});

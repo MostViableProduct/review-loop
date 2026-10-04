@@ -32,8 +32,8 @@ Every step is a command with its expected output. Stop at the first mismatch.
   [`allowed_signers`](allowed_signers), so anyone can verify a tag:
   `git -c gpg.ssh.allowedSignersFile=docs/allowed_signers tag -v vX.Y.Z`. The tagger is the org,
   `MostViableProduct <hello@mostviableproduct.com>`, never a personal git identity: a tag's tagger is public and
-  permanent. CI doesn't verify the signature; it checks only that the tagged commit is on `main`, so the releaser
-  verifies before pushing (step 7).
+  permanent. The `release` workflow refuses a tag that is not signed by that key as that principal, after checking
+  that the tagged commit is on `main`; the releaser verifies before pushing too (step 7).
 - Homebrew floor: the formula uses `formula_opt_bin`, which Homebrew has had since 6.0.3. On an older Homebrew
   the formula fails to load; `brew update` fixes it.
 
