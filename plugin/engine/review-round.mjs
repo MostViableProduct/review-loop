@@ -193,6 +193,9 @@ async function cmdRun(v) {
     rec.status = "reviewing";
     rec.fingerprint = prep.fingerprint;
     rec.meta = { ...(rec.meta ?? {}), projectRoot: prep.projectRoot };
+    const seamPause = process.env.REVIEW_LOOP_TEST_SEAMS === "1" ? Number(process.env.REVIEW_LOOP_TEST_BEFORE_REVIEWING_PAUSE_MS) : NaN;
+    if (seamPause > 0) await new Promise((r) => setTimeout(r, seamPause));
+    // The fence before paying: a holder displaced since acquireLock is stopped here (lock_lost), before runCompanion.
     writeRecord(rec);
 
     const focus = buildFocus({

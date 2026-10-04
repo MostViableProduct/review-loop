@@ -2,7 +2,7 @@ import { test, beforeEach, mock } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
-import { spawn, execFileSync } from "node:child_process";
+import { spawn, spawnSync, execFileSync } from "node:child_process";
 import {
   newRecord,
   writeRecord,
@@ -19,7 +19,11 @@ import {
   LOCK_TTL_MS,
   reclaimStale,
   writePendingSummary,
-  readPendingSummary
+  readPendingSummary,
+  processIdent,
+  markerName,
+  publishTempName,
+  pendingReleaseKeys
 } from "../../plugin/engine/lib/state.mjs";
 
 const observe = (/** @type {string} */ file) => {
@@ -30,6 +34,7 @@ import { applyRoundResult, applyDecision, resetIfNewLoop, sameFinding, withoutWa
 import { scoreFindings } from "../../plugin/engine/lib/scoring.mjs";
 import { tmpDir } from "./helpers.mjs";
 import { sha256hex } from "../../plugin/engine/lib/fsutil.mjs";
+import { ReviewLoopError } from "../../plugin/engine/lib/errors.mjs";
 
 /** Readable lock names for tests, as the real key shape. @param {string} name */
 const lk = (name) => sha256hex(name).slice(0, 24);
@@ -564,4 +569,482 @@ test("lock: a symlinked lock file (ELOOP) is logged as state_symlink_rejected, n
   assert.ok(hit.length >= 1, "the invalid lock is logged");
   assert.ok(hit.every((l) => l.code === "state_symlink_rejected"), JSON.stringify(hit.map((l) => l.code)));
   assert.equal(fs.readFileSync(target, "utf8"), "{}", "the link target is untouched");
+});
+
+// ---- the mover section (see CLAUDE.md "Locks") ----
+
+const STATE_MJS = new URL("../../plugin/engine/lib/state.mjs", import.meta.url).href;
+const locksDir = () => path.join(stateRoot(), "locks");
+const lockFile = (/** @type {string} */ key) => path.join(locksDir(), `${key}.lock`);
+const HEX = "0123456789abcdef";
+const markerFile = (/** @type {string} */ key, /** @type {number} */ pid, hex = HEX) => path.join(locksDir(), `${key}.lock.reclaim.${pid}.${hex}`);
+const markersOf = (/** @type {string} */ key) => fs.readdirSync(locksDir()).filter((n) => markerName(key, n) !== null);
+const pause = (/** @type {number} */ ms) => new Promise((r) => setTimeout(r, ms));
+/** @param {() => unknown} pred */
+async function waitFor(pred, ms = 10_000) {
+  const end = Date.now() + ms;
+  while (!pred()) {
+    if (Date.now() > end) throw new Error("timed out waiting");
+    await pause(10);
+  }
+}
+
+/** A lock whose holder is dead, so the next acquirer has to reclaim it through the section. @param {string} key */
+function staleLock(key) {
+  fs.mkdirSync(locksDir(), { recursive: true });
+  fs.writeFileSync(lockFile(key), JSON.stringify({ pid: 999_999_9, session: "x", token: "dead" }));
+  fs.utimesSync(lockFile(key), 0, 0);
+}
+
+/** A real process to name in markers; alive until stopped. */
+function sleeper() {
+  const c = spawn("/bin/sleep", ["120"], { stdio: "ignore" });
+  let exited = false;
+  c.on("exit", () => (exited = true));
+  return {
+    pid: /** @type {number} */ (c.pid),
+    stop: () => (exited ? Promise.resolve() : new Promise((r) => { c.on("exit", r); c.kill(); }))
+  };
+}
+
+/** A well-formed marker body for `pid`, as the owner itself writes one. */
+const markerBody = (/** @type {number} */ pid, /** @type {string | null} */ ident, hex = HEX) => JSON.stringify({ pid, ident, token: hex + "f".repeat(16) });
+
+/** What /bin/ps prints for `pid`, exactly as processIdent hashes it. @param {number} pid */
+const psLine = (pid) =>
+  execFileSync("/bin/ps", ["-ww", "-o", "lstart=,command=", "-p", String(pid)], { env: { PATH: "/usr/bin:/bin", LC_ALL: "C", TZ: "UTC" } }).toString("utf8").trim();
+
+/** acquireLock in a child process: prints `won` (then holds the lock for holdMs) or the error code. */
+function contender(/** @type {string} */ key, { env = {}, holdMs = 1000 } = {}) {
+  const script = `
+    process.env.REVIEW_LOOP_STATE_DIR=${JSON.stringify(stateRoot())};
+    const { acquireLock } = await import(${JSON.stringify(STATE_MJS)});
+    try { acquireLock(${JSON.stringify(key)}, "s"); console.log("won"); setTimeout(()=>{}, ${holdMs}); }
+    catch (e) { console.log(e.code); }`;
+  const c = spawn(process.execPath, ["--input-type=module", "-e", script], { env: { ...process.env, ...env } });
+  let out = "";
+  c.stdout.on("data", (b) => (out += b));
+  return { pid: /** @type {number} */ (c.pid), done: /** @type {Promise<string>} */ (new Promise((resolve) => c.on("close", () => resolve(out.trim())))) };
+}
+
+/** An assert.throws validator: a `busy` whose message passes `ok`. @param {(message: string) => boolean} ok */
+const busyWith = (ok) => (/** @type {unknown} */ e) => e instanceof ReviewLoopError && e.code === "busy" && ok(e.message);
+
+const lockEvents = () => {
+  const file = path.join(stateRoot(), "events.jsonl");
+  return fs.existsSync(file) ? fs.readFileSync(file, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l)) : [];
+};
+const cleanupFailures = () => lockEvents().filter((e) => e.event === "hook.error" && e.code === "lock_marker_cleanup_failed" && e.data.stage === "lock_marker_cleanup");
+
+test("lock: eight processes racing to reclaim a stale lock, 25 rounds → exactly one holder every round", { timeout: 240_000 }, async () => {
+  for (let i = 0; i < 25; i++) {
+    const key = lk(`stress-${i}`);
+    staleLock(key);
+    const results = await Promise.all(Array.from({ length: 8 }, () => contender(key).done));
+    assert.equal(results.filter((r) => r === "won").length, 1, `round ${i}: ${results.join(",")}`);
+    assert.ok(results.every((r) => r === "won" || r === "busy"), `round ${i}: ${results.join(",")}`);
+  }
+});
+
+test("lock section: a marker is never visible empty or half-written", async () => {
+  const key = lk("atomic");
+  const script = `
+    process.env.REVIEW_LOOP_STATE_DIR=${JSON.stringify(stateRoot())};
+    const { acquireLock } = await import(${JSON.stringify(STATE_MJS)});
+    for (let i = 0; i < 150; i++) acquireLock(${JSON.stringify(key)}, "s").release();`;
+  fs.mkdirSync(locksDir(), { recursive: true });
+  const c = spawn(process.execPath, ["--input-type=module", "-e", script], { env: { ...process.env, REVIEW_LOOP_TEST_SEAMS: "1", REVIEW_LOOP_TEST_MARKER_CHECK_PAUSE_MS: "2" } });
+  let running = true;
+  c.on("close", () => (running = false));
+  let seen = 0;
+  while (running) {
+    for (const n of fs.readdirSync(locksDir())) {
+      if (markerName(key, n) === null) continue;
+      let raw;
+      try {
+        raw = fs.readFileSync(path.join(locksDir(), n), "utf8");
+      } catch {
+        continue;
+      }
+      const v = JSON.parse(raw);
+      assert.ok(Number.isInteger(v.pid) && /^[0-9a-f]{64}$/.test(v.ident) && /^[0-9a-f]{32}$/.test(v.token), raw);
+      seen++;
+    }
+    await new Promise((r) => setImmediate(r));
+  }
+  assert.ok(seen > 0, "the poller saw markers while they existed");
+  const src = fs.readFileSync(new URL(STATE_MJS), "utf8");
+  assert.match(src, /publishLock\(own, /, "markers are published by link(), like the lock itself");
+  assert.doesNotMatch(src, /"wx"/);
+});
+
+test("lock section: a mover paused inside the section keeps it; contenders arriving meanwhile get busy, and its lock is the one on disk", async () => {
+  const key = lk("sec-pause");
+  staleLock(key);
+  const a = contender(key, { env: { REVIEW_LOOP_TEST_SEAMS: "1", REVIEW_LOOP_TEST_SECTION_PAUSE_MS: "2000" }, holdMs: 0 });
+  await waitFor(() => markersOf(key).length > 0);
+  await pause(150);
+  const others = await Promise.all([contender(key).done, contender(key).done]);
+  assert.deepEqual(others, ["busy", "busy"]);
+  assert.equal(await a.done, "won");
+  assert.equal(JSON.parse(fs.readFileSync(lockFile(key), "utf8")).pid, a.pid);
+});
+
+test("lock section: two contenders that publish, then both check, never both enter", async () => {
+  const key = lk("sec-both");
+  staleLock(key);
+  const env = { REVIEW_LOOP_TEST_SEAMS: "1", REVIEW_LOOP_TEST_MARKER_CHECK_PAUSE_MS: "300" };
+  const results = await Promise.all([contender(key, { env }).done, contender(key, { env }).done]);
+  assert.ok(results.filter((r) => r === "won").length <= 1, results.join(","));
+  assert.ok(results.every((r) => r === "won" || r === "busy"), results.join(","));
+});
+
+test("lock section: a suspended mover keeps its section however old its marker looks", async () => {
+  const key = lk("sec-suspended");
+  staleLock(key);
+  const a = contender(key, { env: { REVIEW_LOOP_TEST_SEAMS: "1", REVIEW_LOOP_TEST_SECTION_PAUSE_MS: "2500" }, holdMs: 0 });
+  await waitFor(() => markersOf(key).length > 0);
+  await pause(150);
+  const old = (Date.now() - 10 * 3600_000) / 1000;
+  for (const n of markersOf(key)) fs.utimesSync(path.join(locksDir(), n), old, old);
+  assert.equal(await contender(key).done, "busy", "A's PID is alive with the same identity: its marker is live");
+  assert.equal(await a.done, "won");
+  assert.equal(JSON.parse(fs.readFileSync(lockFile(key), "utf8")).pid, a.pid);
+});
+
+test("lock section: release never moves a lock it doesn't own — a holder judged stale while alive leaves its successor untouched", async () => {
+  const id = { kind: "spec", path: "/r/docs/specs/release.md" };
+  const key = identityKey(id);
+  const h = acquireLock(key, "s");
+  fs.utimesSync(lockFile(key), 0, 0); // H's heartbeat stopped: alive, but judged stale
+  assert.equal(await contender(key, { holdMs: 0 }).done, "won");
+  const successor = fs.readFileSync(lockFile(key), "utf8");
+  const ino = fs.lstatSync(lockFile(key)).ino;
+  assert.throws(() => writeRecord(newRecord(id)), { code: "lock_lost" }, "the stale holder is fenced, as always");
+  const rename = mock.method(fs, "renameSync");
+  try {
+    h.release();
+  } finally {
+    rename.mock.restore();
+  }
+  assert.equal(rename.mock.calls.filter((c) => c.arguments[0] === lockFile(key)).length, 0, "the successor's lock was never moved aside");
+  assert.equal(fs.readFileSync(lockFile(key), "utf8"), successor);
+  assert.equal(fs.lstatSync(lockFile(key)).ino, ino);
+});
+
+test("lock section: a release that finds the section busy is deferred with its token; the retry never removes a successor's lock", async (t) => {
+  const s = sleeper();
+  t.after(s.stop);
+  const key = lk("deferred");
+  const h = acquireLock(key, "s");
+  const blocker = markerFile(key, s.pid);
+  fs.writeFileSync(blocker, markerBody(s.pid, processIdent(s.pid)));
+  h.release();
+  assert.deepEqual(pendingReleaseKeys(), [key]);
+  assert.ok(lockEvents().some((e) => e.code === "busy" && e.data.stage === "lock_release_deferred"));
+  fs.rmSync(blocker);
+  fs.utimesSync(lockFile(key), 0, 0);
+  assert.equal(await contender(key, { holdMs: 0 }).done, "won");
+  const successor = fs.readFileSync(lockFile(key), "utf8");
+  const ino = fs.lstatSync(lockFile(key)).ino;
+  acquireLock(lk("deferred-next"), "s").release(); // any later lock call retries the deferred release
+  assert.deepEqual(pendingReleaseKeys(), []);
+  assert.equal(fs.readFileSync(lockFile(key), "utf8"), successor, "the successor's lock is untouched");
+  assert.equal(fs.lstatSync(lockFile(key)).ino, ino);
+
+  // Control: with no successor, the same retry removes our own lock.
+  const key2 = lk("deferred-own");
+  const h2 = acquireLock(key2, "s");
+  fs.writeFileSync(markerFile(key2, s.pid), markerBody(s.pid, processIdent(s.pid)));
+  h2.release();
+  assert.deepEqual(pendingReleaseKeys(), [key2]);
+  fs.rmSync(markerFile(key2, s.pid));
+  acquireLock(lk("deferred-next"), "s").release();
+  assert.deepEqual(pendingReleaseKeys(), []);
+  assert.ok(!fs.existsSync(lockFile(key2)));
+});
+
+test("lock: a pre-1.0.3 mover (no section) that displaces a holder during an upgrade is fenced by writeRecord, as before", () => {
+  const id = { kind: "spec", path: "/r/docs/specs/skew.md" };
+  const key = identityKey(id);
+  const h = acquireLock(key, "s");
+  const old = JSON.stringify({ pid: process.pid, session: "v1.0.2", token: "0".repeat(32) });
+  // What a 1.0.2 reclaimer does without a section: move the path aside, publish its own lock.
+  fs.renameSync(lockFile(key), `${lockFile(key)}.aside.old`);
+  fs.writeFileSync(lockFile(key), old);
+  assert.throws(() => writeRecord(newRecord(id)), { code: "lock_lost" });
+  h.release();
+  assert.equal(fs.readFileSync(lockFile(key), "utf8"), old, "and our release leaves the old version's lock alone");
+});
+
+test("lock section: a marker is stale only when its owner is gone — a dead PID, or a different process at that PID", async (t) => {
+  const s = sleeper();
+  t.after(s.stop);
+  const key = lk("owner");
+  const dead = /** @type {number} */ (spawnSync("/usr/bin/true").pid);
+  /** @param {number} pid @param {string} ident */
+  const reclaimedPast = (pid, ident) => {
+    staleLock(key);
+    fs.writeFileSync(markerFile(key, pid), markerBody(pid, ident));
+    acquireLock(key, "s").release();
+    return !fs.existsSync(markerFile(key, pid));
+  };
+  assert.ok(reclaimedPast(dead, sha256hex("x")), "dead PID: stale, removed");
+  assert.ok(reclaimedPast(s.pid, sha256hex("Thu Jan  1 00:00:00 1970  node x")), "a reused PID: another process's identity");
+  assert.ok(reclaimedPast(s.pid, sha256hex(psLine(s.pid).replace("sleep", "sleeq"))), "same start second, different command");
+  staleLock(key);
+  fs.writeFileSync(markerFile(key, s.pid), markerBody(s.pid, processIdent(s.pid)));
+  assert.throws(() => acquireLock(key, "s"), busyWith((m) => m.includes(`process ${s.pid}`) && /end it/.test(m)));
+  fs.rmSync(markerFile(key, s.pid));
+});
+
+test("lock section: names outside PID 2–99999 are never markers — they never block, and kill() is never asked about 0 or 1", () => {
+  const key = lk("pid-range");
+  staleLock(key);
+  for (const pid of ["0", "1", "100000", "01234"]) fs.writeFileSync(path.join(locksDir(), `${key}.lock.reclaim.${pid}.${HEX}`), markerBody(Number(pid), "a".repeat(64)));
+  const kill = mock.method(process, "kill");
+  try {
+    acquireLock(key, "s").release();
+  } finally {
+    kill.mock.restore();
+  }
+  assert.equal(kill.mock.calls.filter((c) => c.arguments[0] === 0 || c.arguments[0] === 1).length, 0);
+  assert.equal(markerName(key, `${key}.lock.reclaim.1.${HEX}`), null);
+  assert.equal(markerName(key, `${key}.lock.reclaim.100000.${HEX}`), null);
+  assert.deepEqual(markerName(key, `${key}.lock.reclaim.2.${HEX}`), { pid: 2, hex: HEX });
+});
+
+test("lock section: an owner's identity reads the same from another time zone and after a clock jump", async (t) => {
+  const key = lk("zone");
+  staleLock(key);
+  const a = contender(key, { env: { TZ: "Asia/Tokyo", REVIEW_LOOP_TEST_SEAMS: "1", REVIEW_LOOP_TEST_SECTION_PAUSE_MS: "2500" }, holdMs: 0 });
+  await waitFor(() => markersOf(key).length > 0);
+  await pause(150);
+  const prevTz = process.env.TZ;
+  process.env.TZ = "America/Los_Angeles";
+  mock.timers.enable({ apis: ["Date"], now: Date.now() + 3600_000 });
+  t.after(() => {
+    mock.timers.reset();
+    if (prevTz === undefined) delete process.env.TZ;
+    else process.env.TZ = prevTz;
+  });
+  const body = JSON.parse(fs.readFileSync(path.join(locksDir(), markersOf(key)[0]), "utf8"));
+  assert.equal(body.ident, processIdent(a.pid), "owner and checker read the same identity");
+  assert.throws(() => acquireLock(key, "s"), { code: "busy" });
+  assert.equal(await a.done, "won");
+});
+
+test("lock section: identity comes from /bin/ps alone — a PATH ps can't fake a mismatch, and a failing ps counts as live", async (t) => {
+  const s = sleeper();
+  t.after(s.stop);
+  acquireLock(lk("ps-warm"), "s").release(); // this process's own identity is read once, and cached
+  const key = lk("ps");
+  const live = /** @type {string} */ (processIdent(s.pid));
+  const bin = tmpDir("rl-ps-");
+  fs.writeFileSync(path.join(bin, "ps"), "#!/bin/sh\necho 'Thu Jan  1 00:00:00 1970  liar'\n", { mode: 0o755 });
+  const saved = { PATH: process.env.PATH, SEAMS: process.env.REVIEW_LOOP_TEST_SEAMS, PS: process.env.REVIEW_LOOP_TEST_PS_PATH };
+  t.after(() => {
+    process.env.PATH = saved.PATH;
+    for (const [k, v] of [["REVIEW_LOOP_TEST_SEAMS", saved.SEAMS], ["REVIEW_LOOP_TEST_PS_PATH", saved.PS]]) {
+      if (v === undefined) delete process.env[/** @type {string} */ (k)];
+      else process.env[/** @type {string} */ (k)] = v;
+    }
+  });
+  process.env.PATH = `${bin}:${process.env.PATH}`;
+  staleLock(key);
+  fs.writeFileSync(markerFile(key, s.pid), markerBody(s.pid, live));
+  assert.throws(() => acquireLock(key, "s"), { code: "busy" }, "a misleading ps on PATH is never consulted");
+  process.env.REVIEW_LOOP_TEST_SEAMS = "1";
+  for (const [label, body] of [["exits 1", "exit 1"], ["prints nothing", "exit 0"], ["hangs", "exec /bin/sleep 5"]]) {
+    fs.writeFileSync(path.join(bin, "badps"), `#!/bin/sh\n${body}\n`, { mode: 0o755 });
+    process.env.REVIEW_LOOP_TEST_PS_PATH = path.join(bin, "badps");
+    assert.throws(() => acquireLock(key, "s"), { code: "busy" }, `a ps that ${label} leaves the marker live`);
+  }
+  fs.rmSync(markerFile(key, s.pid));
+  const fresh = lk("ps-self");
+  staleLock(fresh);
+  fs.writeFileSync(path.join(bin, "badps"), "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+  const own = contender(fresh, { env: { REVIEW_LOOP_TEST_SEAMS: "1", REVIEW_LOOP_TEST_PS_PATH: path.join(bin, "badps") } });
+  assert.equal(await own.done, "lock_identity_unavailable");
+  assert.deepEqual(fs.readdirSync(locksDir()).filter((n) => n.startsWith(`${fresh}.lock.reclaim.`)), [], "no identity, no marker");
+
+  const src = fs.readFileSync(new URL(STATE_MJS), "utf8");
+  assert.match(src, /: "\/bin\/ps";/);
+  assert.match(src, /env: \{ PATH: "\/usr\/bin:\/bin", LC_ALL: "C", TZ: "UTC" \}/);
+  assert.doesNotMatch(src, /execFileSync\("ps"/);
+  const root = new URL("../../", import.meta.url).pathname;
+  for (const dir of ["plugin", "cli"]) {
+    for (const rel of fs.readdirSync(path.join(root, dir), { recursive: true })) {
+      if (!String(rel).endsWith(".mjs")) continue;
+      assert.doesNotMatch(fs.readFileSync(path.join(root, dir, String(rel)), "utf8"), /process\.title\s*=/, `${dir}/${rel} must not change the command line identity hashes`);
+    }
+  }
+});
+
+test("lock section: a marker that can't be read, or doesn't agree with its own name, is judged by the PID in its name — live while that PID lives, whatever its age", { skip: process.getuid?.() === 0 }, async (t) => {
+  const s = sleeper();
+  t.after(s.stop);
+  const key = lk("unverified");
+  const ident = /** @type {string} */ (processIdent(s.pid));
+  const target = path.join(tmpDir("rl-mk-"), "real.json");
+  fs.writeFileSync(target, markerBody(s.pid, ident));
+  /** @type {Record<string, (f: string) => void>} */
+  const variants = {
+    unreadable: (f) => fs.writeFileSync(f, markerBody(s.pid, ident), { mode: 0o000 }),
+    symlink: (f) => fs.symlinkSync(target, f),
+    fifo: (f) => execFileSync("mkfifo", [f]),
+    oversized: (f) => fs.writeFileSync(f, "x".repeat(10 * 1024 * 1024)),
+    "bad JSON": (f) => fs.writeFileSync(f, "{"),
+    "pid differs from the name": (f) => fs.writeFileSync(f, markerBody(s.pid + 1, ident)),
+    "ident not 64 hex": (f) => fs.writeFileSync(f, markerBody(s.pid, "abc")),
+    "token not the name's": (f) => fs.writeFileSync(f, JSON.stringify({ pid: s.pid, ident, token: "e".repeat(32) }))
+  };
+  const readSync = mock.method(fs, "readSync");
+  try {
+    for (const [label, make] of Object.entries(variants)) {
+      staleLock(key);
+      const f = markerFile(key, s.pid);
+      make(f);
+      const old = (Date.now() - 10 * 3600_000) / 1000;
+      fs.lutimesSync(f, old, old);
+      assert.throws(
+        () => acquireLock(key, "s"),
+        busyWith((m) => m.includes(f) && m.includes(`pid ${s.pid}`) && !/end it/.test(m)),
+        label
+      );
+      fs.rmSync(f); // what the message tells the operator to do, after checking `ps`
+      acquireLock(key, "s").release();
+    }
+  } finally {
+    readSync.mock.restore();
+  }
+  assert.equal(readSync.mock.calls.filter((c) => c.arguments[3] > 4096).length, 0, "never reads more than the lock bound");
+  staleLock(key);
+  fs.writeFileSync(markerFile(key, s.pid), "{");
+  await s.stop();
+  acquireLock(key, "s").release();
+  assert.ok(!fs.existsSync(markerFile(key, s.pid)), "once the named PID is dead, the next contender removes it");
+});
+
+// Marker unlinks fail. Temp files are spared: on Node 22, publishLock's rmSync goes through the public unlinkSync.
+const realUnlink = fs.unlinkSync.bind(fs);
+const isMarkerPath = (/** @type {fs.PathLike} */ p) => String(p).includes(".lock.reclaim.") && !String(p).endsWith(".tmp");
+const failMarkerUnlinks = () =>
+  mock.method(fs, "unlinkSync", (/** @type {fs.PathLike} */ p) => {
+    if (isMarkerPath(p)) throw Object.assign(new Error("EACCES: refused"), { code: "EACCES" });
+    return realUnlink(p);
+  });
+
+test("lock section: a marker that can't be removed never costs the acquirer its lock; it is logged and retried (won path, then release)", () => {
+  const key = lk("strand-a");
+  staleLock(key);
+  const m = failMarkerUnlinks();
+  let h;
+  try {
+    h = acquireLock(key, "s");
+  } finally {
+    m.mock.restore();
+  }
+  assert.equal(JSON.parse(fs.readFileSync(lockFile(key), "utf8")).pid, process.pid, "the lock was published and its handle returned");
+  assert.equal(cleanupFailures().length, 1);
+  assert.equal(markersOf(key).length, 1, "the stranded marker");
+  h.release();
+  assert.deepEqual(fs.readdirSync(locksDir()).filter((n) => n.startsWith(key)), [], "release removed the stranded marker and the lock");
+  assert.equal(cleanupFailures().length, 1, "a successful retry logs nothing");
+
+  // The failure kept through release(): the lock still goes; each failed unlink is logged once.
+  const key2 = lk("strand-b");
+  staleLock(key2);
+  const m2 = failMarkerUnlinks();
+  try {
+    acquireLock(key2, "s").release();
+  } finally {
+    m2.mock.restore();
+  }
+  assert.ok(!fs.existsSync(lockFile(key2)));
+  assert.equal(cleanupFailures().length, 4, "1 from the first case, then acquire's marker, release's retry of it, and release's own marker");
+  acquireLock(lk("strand-next"), "s").release();
+  assert.deepEqual(markersOf(key2), [], "the next lock call clears both");
+});
+
+test("lock section: busy path — stranded markers of a live process are retried on its next lock call, then a contender gets in", async (t) => {
+  const s = sleeper();
+  t.after(s.stop);
+  const key = lk("strand-c");
+  staleLock(key);
+  fs.writeFileSync(markerFile(key, s.pid), markerBody(s.pid, processIdent(s.pid)));
+  const m = failMarkerUnlinks();
+  try {
+    assert.throws(() => acquireLock(key, "s"), { code: "busy" });
+  } finally {
+    m.mock.restore();
+  }
+  const failed = cleanupFailures().length;
+  assert.equal(failed, 4, "one per section attempt");
+  assert.equal(markersOf(key).length, 5, "four of ours, stranded, plus the blocker");
+  acquireLock(lk("strand-c-next"), "s").release();
+  assert.deepEqual(markersOf(key), [path.basename(markerFile(key, s.pid))], "ours are gone; only the blocker is left");
+  assert.equal(cleanupFailures().length, failed, "no new failures");
+  await s.stop();
+  assert.equal(await contender(key, { holdMs: 0 }).done, "won");
+});
+
+test("lock section: the exit handler retries a stranded marker; if it still fails the PID's death frees it", async () => {
+  /** @param {string} key @param {boolean} restoreBeforeExit */
+  const run = (key, restoreBeforeExit) =>
+    new Promise((resolve) => {
+      const script = `
+        process.env.REVIEW_LOOP_STATE_DIR=${JSON.stringify(stateRoot())};
+        const fs = (await import("node:fs")).default;
+        const real = fs.unlinkSync;
+        fs.unlinkSync = (p, ...r) => { if (String(p).includes(".lock.reclaim.") && !String(p).endsWith(".tmp")) throw Object.assign(new Error("refused"), { code: "EACCES" }); return real.call(fs, p, ...r); };
+        const { acquireLock } = await import(${JSON.stringify(STATE_MJS)});
+        acquireLock(${JSON.stringify(key)}, "s");
+        if (${restoreBeforeExit}) fs.unlinkSync = real;
+        process.exit(0);`;
+      spawn(process.execPath, ["--input-type=module", "-e", script], { stdio: "ignore" }).on("close", resolve);
+    });
+  const key = lk("strand-d");
+  staleLock(key);
+  await run(key, false);
+  assert.equal(cleanupFailures().length, 2, "acquire's unlink, then the exit handler's retry");
+  assert.equal(markersOf(key).length, 1);
+  acquireLock(key, "s").release(); // the subprocess is gone: its lock and its marker are both stale
+  assert.deepEqual(markersOf(key), []);
+
+  const key2 = lk("strand-d2");
+  staleLock(key2);
+  await run(key2, true);
+  assert.equal(cleanupFailures().length, 3, "acquire's unlink only");
+  assert.deepEqual(markersOf(key2), [], "the exit handler removed it");
+});
+
+test("lock section: publishLock's temp files are never markers, and litter past the TTL is removed", (t) => {
+  const s = sleeper();
+  t.after(s.stop);
+  const key = lk("litter");
+  staleLock(key);
+  const marker = markerFile(key, s.pid);
+  const tmp = publishTempName(marker);
+  fs.writeFileSync(tmp, '{"pid":');
+  acquireLock(key, "s").release();
+  assert.ok(fs.existsSync(tmp), "a fresh temp file is left alone, and didn't block");
+  const old = (Date.now() - LOCK_TTL_MS - 60_000) / 1000;
+  fs.utimesSync(tmp, old, old);
+  staleLock(key);
+  acquireLock(key, "s").release();
+  assert.ok(!fs.existsSync(tmp), "litter past the TTL is removed by name");
+  assert.equal(markerName(key, path.basename(tmp)), null);
+  assert.deepEqual(markerName(key, path.basename(marker)), { pid: s.pid, hex: HEX });
+  assert.equal(markerName(lk("another"), path.basename(marker)), null);
+  assert.equal(markerName(key, `${path.basename(marker)}.x`), null);
+});
+
+test("lock section: no leftovers — after a won race only the lock remains, after release nothing", () => {
+  const key = lk("leftovers");
+  staleLock(key);
+  const h = acquireLock(key, "s");
+  assert.deepEqual(fs.readdirSync(locksDir()).filter((n) => n.startsWith(key)), [`${key}.lock`]);
+  h.release();
+  assert.deepEqual(fs.readdirSync(locksDir()).filter((n) => n.startsWith(key)), []);
 });

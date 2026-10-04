@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import crypto from "node:crypto";
+import { execFileSync } from "node:child_process";
 import path from "node:path";
 import { ReviewLoopError } from "./errors.mjs";
 import { atomicWriteJson, readJsonValidated, isObject, sha256hex, assertNoLinkedParent } from "./fsutil.mjs";
@@ -344,13 +345,18 @@ export function readLock(key) {
  * @param {string} file @param {string} content
  */
 function publishLock(file, content) {
-  const tmp = `${file}.${process.pid}.${crypto.randomBytes(4).toString("hex")}.tmp`;
+  const tmp = publishTempName(file);
   fs.writeFileSync(tmp, content, { mode: 0o600 });
   try {
     fs.linkSync(tmp, file);
   } finally {
     fs.rmSync(tmp, { force: true });
   }
+}
+
+/** The private temp file publishLock links from. Exported so a test can pin that it never matches a marker name. @param {string} file */
+export function publishTempName(file) {
+  return `${file}.${process.pid}.${crypto.randomBytes(4).toString("hex")}.tmp`;
 }
 
 const MAX_LOCK_BYTES = 4096;
@@ -364,12 +370,26 @@ const MAX_LOCK_BYTES = 4096;
  * @returns {{ raw: string, mtimeMs: number, ino: number } | null}
  */
 function observeLock(file) {
+  const obs = observeFile(file);
+  return obs === GONE ? null : obs;
+}
+
+const GONE = Symbol("gone");
+
+/**
+ * observeLock, keeping "no file at all" (GONE) apart from "a file that can't be read" (null): a section marker that
+ * vanished was removed, while one that can't be read may still belong to a live mover.
+ * @param {string} file
+ * @returns {{ raw: string, mtimeMs: number, ino: number } | null | typeof GONE}
+ */
+function observeFile(file) {
   let fd;
   try {
     fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
   } catch (e) {
     const errno = /** @type {NodeJS.ErrnoException} */ (e).code;
-    if (errno !== "ENOENT") lockInvalid(errno === "ELOOP" ? "state_symlink_rejected" : "open_failed");
+    if (errno === "ENOENT") return GONE;
+    lockInvalid(errno === "ELOOP" ? "state_symlink_rejected" : "open_failed");
     return null;
   }
   try {
@@ -424,7 +444,8 @@ export function reclaimStale(key, observed) {
 /**
  * The lock CAS: move the path aside atomically, then judge the file actually moved — never an earlier read of the
  * path, which a takeover can replace in between. Judged removable → deleted; otherwise put back (link never clobbers a
- * newer lock) and false is returned.
+ * newer lock) and false is returned. Only a mover inside the section calls this, so the file moved is the one it
+ * observed, give or take a heartbeat's mtime.
  * @param {string} file @param {(moved: ReturnType<typeof observeLock>) => boolean} removable
  */
 function takeAside(file, removable) {
@@ -442,7 +463,8 @@ function takeAside(file, removable) {
   try {
     fs.linkSync(aside, file);
   } catch {
-    // A third process created a lock meanwhile; the holder we displaced is fenced out by writeRecord's token check.
+    // Only a mover outside the section (a pre-1.0.3 process during an upgrade) can publish in this gap; the holder it
+    // displaced is fenced out by writeRecord's token check.
   }
   fs.rmSync(aside, { force: true });
   return false;
@@ -453,50 +475,343 @@ export function isLockLive(lock, now = Date.now()) {
   return !!lock && now - lock.at < LOCK_TTL_MS && isPidAlive(lock.pid);
 }
 
+// ---- the mover section ----
+// Every operation that MOVES the lock path (a stale reclaim, a release) runs inside a per-key section, one process at
+// a time. Publishing into an empty path needs none: link() is already exclusive. Each contender publishes its own
+// marker, then enters only if no other marker is live; a marker stays live for as long as its owner process exists,
+// with no time limit, so a suspended mover never loses its section. See CLAUDE.md "Locks".
+
+const SECTION_ATTEMPTS = 4;
+const MIN_MARKER_PID = 2;
+const MAX_MARKER_PID = 99_999;
+
+/** @param {string} name */
+function seamMs(name) {
+  if (process.env.REVIEW_LOOP_TEST_SEAMS !== "1") return 0;
+  const n = Number(process.env[name]);
+  return Number.isFinite(n) && n > 0 ? n : 0;
+}
+
+/** @param {number} ms */
+function sleepSync(ms) {
+  if (ms > 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+/**
+ * A process's identity as the kernel stores it: its start time and full command line, hashed. Neither changes after
+ * the process starts (nothing in review-loop sets process.title), and a wall-clock change doesn't alter a stored start
+ * time. lstart has one-second resolution; the command line tells apart a PID reused within that second unless the
+ * reuser runs the identical command (on macOS that needs the PID space to wrap within one second).
+ * - /bin/ps, never a PATH lookup: this answer decides that a live process is SOMEONE ELSE, so a shim on one
+ *   contender's PATH must not be able to fake a mismatch.
+ * - A fixed environment, never the caller's: lstart prints local time, so TZ and the locale are pinned for every
+ *   caller. -ww never truncates the command.
+ * @param {number} pid @returns {string | null} null on any failure or empty output
+ */
+export function processIdent(pid) {
+  const ps = process.env.REVIEW_LOOP_TEST_SEAMS === "1" && process.env.REVIEW_LOOP_TEST_PS_PATH ? process.env.REVIEW_LOOP_TEST_PS_PATH : "/bin/ps";
+  try {
+    const out = execFileSync(ps, ["-ww", "-o", "lstart=,command=", "-p", String(pid)], {
+      timeout: 2000,
+      maxBuffer: 256 * 1024,
+      stdio: ["ignore", "pipe", "ignore"],
+      env: { PATH: "/usr/bin:/bin", LC_ALL: "C", TZ: "UTC" }
+    })
+      .toString("utf8")
+      .trim();
+    return out === "" ? null : sha256hex(out);
+  } catch {
+    return null;
+  }
+}
+
+/** @type {string | null} this process's own identity, read once it succeeds */
+let selfIdent = null;
+
+/**
+ * A section marker's name: `<key>.lock.reclaim.<pid>.<first 16 hex of its token>`, the PID from 2 to 99999 (macOS
+ * PIDs never exceed 99999; 0 is the caller's process group to kill(), 1 is launchd). Anything else under the prefix,
+ * publishLock's temp files included, is litter, never a marker.
+ * @param {string} key @param {string} name @returns {{ pid: number, hex: string } | null}
+ */
+export function markerName(key, name) {
+  const m = new RegExp(`^${assertKey(key)}\\.lock\\.reclaim\\.([1-9]\\d{0,4})\\.([0-9a-f]{16})$`).exec(name);
+  if (m === null) return null;
+  const pid = Number(m[1]);
+  return pid >= MIN_MARKER_PID && pid <= MAX_MARKER_PID ? { pid, hex: m[2] } : null;
+}
+
+/**
+ * Judge another contender's marker. Stale only when its owner is provably gone: the name's PID is dead, or the marker
+ * is verified and the process now at that PID has a different identity. Everything else is live — a suspended owner,
+ * a marker that can't be read or doesn't agree with its own name, a /bin/ps that fails — because revoking a live
+ * mover's section is what lets two movers in. No branch reads the mtime: there is no time limit.
+ * @param {string} file @param {{ pid: number, hex: string }} named
+ * @returns {{ live: false } | { live: true, verified: boolean }}
+ */
+function markerState(file, named) {
+  // Our own PID: every section in this process is synchronous and already finished, so this is one we stranded.
+  if (named.pid === process.pid) return { live: false };
+  if (!isPidAlive(named.pid)) return { live: false };
+  const obs = observeFile(file);
+  if (obs === GONE) return { live: false };
+  /** @type {unknown} */
+  let v = null;
+  try {
+    v = obs === null ? null : JSON.parse(obs.raw);
+  } catch {
+    v = null;
+  }
+  const verified =
+    isObject(v) &&
+    v.pid === named.pid &&
+    typeof v.ident === "string" &&
+    /^[0-9a-f]{64}$/.test(v.ident) &&
+    typeof v.token === "string" &&
+    /^[0-9a-f]{32}$/.test(v.token) &&
+    v.token.startsWith(named.hex);
+  if (!verified) return { live: true, verified: false };
+  const now = processIdent(named.pid);
+  if (now !== null && now !== v.ident) return { live: false };
+  return { live: true, verified: true };
+}
+
+/** @param {string} file @param {number} pid @param {boolean} verified */
+function busyBy(file, pid, verified) {
+  return new ReviewLoopError(
+    "busy",
+    verified
+      ? `the review-loop lock is being changed by review-loop process ${pid} (\`ps -p ${pid}\`); if that process is stuck, end it, and the lock frees itself`
+      : `a review-lock marker can't be read, so its owner is unverified: ${file} (named for pid ${pid}). Check \`ps -p ${pid}\`: if that is not a review-loop process, delete that one file and retry`,
+    { pid, verified, ...(verified ? {} : { marker: file }) }
+  );
+}
+
+/** @param {string} code @param {string} stage */
+function lockEvent(code, stage) {
+  try {
+    emitEvent({ source: lockEventSource, event: "hook.error", code, data: { stage } });
+  } catch {
+    // Diagnostics only; emitEvent itself never throws.
+  }
+}
+
+/**
+ * Unlink a file by exact name; a name already gone is fine. Returns false (logged) when it can't be removed.
+ * @param {string} file
+ */
+function unlinkMarker(file) {
+  try {
+    fs.unlinkSync(file);
+    return true;
+  } catch (e) {
+    if (/** @type {NodeJS.ErrnoException} */ (e).code === "ENOENT") return true;
+    lockEvent("lock_marker_cleanup_failed", "lock_marker_cleanup");
+    return false;
+  }
+}
+
+/**
+ * List the other markers for `key`. Stale ones are removed by exact name (names are never reused, so this can't hit
+ * a live marker); litter past LOCK_TTL_MS goes too. Returns the busy error for the first live one, or null.
+ * @param {string} key @param {string} dir @param {string} ownName
+ */
+function othersLive(key, dir, ownName) {
+  const prefix = `${key}.lock.reclaim.`;
+  for (const n of fs.readdirSync(dir)) {
+    if (!n.startsWith(prefix) || n === ownName) continue;
+    const file = path.join(dir, n);
+    if (strandedMarkers.has(file)) continue; // ours, retried on its own; judging it here would log its failure twice
+    const named = markerName(key, n);
+    if (named === null) {
+      try {
+        if (Date.now() - fs.lstatSync(file).mtimeMs > LOCK_TTL_MS) unlinkMarker(file);
+      } catch {
+        // Gone already, or unreadable litter: never a marker either way.
+      }
+      continue;
+    }
+    const st = markerState(file, named);
+    if (!st.live) {
+      unlinkMarker(file);
+      continue;
+    }
+    return busyBy(file, named.pid, st.verified);
+  }
+  return null;
+}
+
+/** @type {Set<string>} our own markers whose unlink failed — exact paths, never another process's */
+const strandedMarkers = new Set();
+/** @type {Map<string, string>} key → the token of a release that found the section busy */
+const pendingReleases = new Map();
+let exitHooked = false;
+
+function hookExit() {
+  if (exitHooked) return;
+  exitHooked = true;
+  process.on("exit", () => {
+    try {
+      retryPendingReleases();
+    } catch {
+      // An exit handler can't report a throw; a lock left behind is reclaimed once this PID is gone.
+    }
+    retryStrandedMarkers();
+  });
+}
+
+function retryStrandedMarkers() {
+  for (const file of strandedMarkers) if (unlinkMarker(file)) strandedMarkers.delete(file);
+}
+
+function retryPendingReleases() {
+  for (const [key, token] of pendingReleases) {
+    if (!carriesToken(lockPath(key), token)) {
+      pendingReleases.delete(key);
+      continue;
+    }
+    try {
+      withSection(key, () => removeOwnLock(key, token));
+      pendingReleases.delete(key);
+    } catch (e) {
+      if (!isSectionRefusal(e)) throw e;
+    }
+  }
+}
+
+/** @param {unknown} e */
+const isSectionRefusal = (e) => e instanceof ReviewLoopError && (e.code === "busy" || e.code === "lock_identity_unavailable");
+
+/**
+ * Run `fn` inside `key`'s mover section. Each attempt publishes a fresh marker, then lists the others: a contender
+ * that created its marker before checking is always seen by every later checker, so at most one enters. Two that see
+ * each other both withdraw; a short random backoff lets one of them in on a later attempt.
+ * @template T @param {string} key @param {() => T} fn @returns {T}
+ */
+function withSection(key, fn) {
+  // No identity, no marker: a marker without one could never be told apart from a reused PID's.
+  selfIdent ??= processIdent(process.pid);
+  if (selfIdent === null) {
+    throw new ReviewLoopError("lock_identity_unavailable", "could not read this process's identity from /bin/ps, so the review lock can't be changed safely");
+  }
+  const dir = path.dirname(lockPath(key));
+  /** @type {ReviewLoopError | null} */
+  let blocked = null;
+  for (let attempt = 0; attempt < SECTION_ATTEMPTS; attempt++) {
+    if (attempt > 0) sleepSync(crypto.randomInt(1, 8 << attempt));
+    const token = crypto.randomBytes(16).toString("hex");
+    const name = `${key}.lock.reclaim.${process.pid}.${token.slice(0, 16)}`;
+    const own = path.join(dir, name);
+    publishLock(own, JSON.stringify({ pid: process.pid, ident: selfIdent, token }));
+    try {
+      sleepSync(seamMs("REVIEW_LOOP_TEST_MARKER_CHECK_PAUSE_MS"));
+      blocked = othersLive(key, dir, name);
+      if (blocked === null) return fn();
+    } finally {
+      // Never throws: a published lock always gets its handle back. A failure is logged and retried later.
+      if (!unlinkMarker(own)) {
+        strandedMarkers.add(own);
+        hookExit();
+      }
+    }
+  }
+  throw /** @type {ReviewLoopError} */ (blocked);
+}
+
+/**
+ * Whether the lock at `file` still carries `token`. Without it there is nothing for a release to move — the lock is
+ * gone (even with its directory, as after `uninstall --delete-history`) or someone else's — so no section is needed.
+ * @param {string} file @param {string} token
+ */
+const carriesToken = (file, token) => parseLock(observeLock(file))?.token === token;
+
+/**
+ * Inside the section: remove the lock only while it still carries `token`. A lock we don't own is never moved.
+ * @param {string} key @param {string} token
+ */
+function removeOwnLock(key, token) {
+  const file = lockPath(key);
+  if (!carriesToken(file, token)) return;
+  sleepSync(seamMs("REVIEW_LOOP_TEST_SECTION_PAUSE_MS"));
+  takeAside(file, (moved) => parseLock(moved)?.token === token);
+}
+
+/** Keys with a deferred release, for tests. */
+export function pendingReleaseKeys() {
+  return [...pendingReleases.keys()];
+}
+
 /**
  * Exclusive per-artifact lock. Held → throws `busy` immediately (callers never wait inside a hook).
  * The holder refreshes `at` every LOCK_HEARTBEAT_MS, so a round of any length keeps its lock; a lock whose PID is
  * gone, or whose heartbeat stopped for LOCK_TTL_MS (hung holder, or a recycled PID), is reclaimed.
+ *
+ * Contract: at most one process returns from acquireLock for a key until that lock is released, or until its HOLDER
+ * is judged stale by that rule (a holder judged stale while alive is fenced by writeRecord's `lock_lost`). A reclaimer
+ * or releaser never moves a lock other than the one it observed, however long it is suspended. This holds among
+ * 1.0.3+ processes; a pre-1.0.3 process still running during an upgrade moves the path without the section, as it
+ * always did, and the holder it displaces is fenced by writeRecord.
  * @param {string} key
  * @param {string | null} session
  */
 export function acquireLock(key, session) {
   stateSubdir("locks");
   const file = lockPath(key);
-  for (let attempt = 0; attempt < 2; attempt++) {
-    try {
-      const token = crypto.randomBytes(16).toString("hex");
-      publishLock(file, JSON.stringify({ pid: process.pid, session, token }));
-      heldTokens.set(key, token);
-      let released = false;
-      const beat = setInterval(() => {
-        const cur = readLock(key);
-        if (!cur || cur.token !== token) return clearInterval(beat);
-        // mtime only, never content: a heartbeat racing a takeover can at worst freshen the NEW holder's lock — it can
-        // never put our token back (the takeover itself is fenced by writeRecord).
-        const now = Date.now() / 1000;
-        fs.utimesSync(file, now, now);
-      }, LOCK_HEARTBEAT_MS);
-      beat.unref();
-      return {
-        release() {
-          if (released) return;
-          released = true;
-          clearInterval(beat);
-          heldTokens.delete(key);
-          // Checking the token and then unlinking by path could delete a successor that took over in between.
-          takeAside(file, (moved) => parseLock(moved)?.token === token);
-        }
-      };
-    } catch (e) {
-      if (/** @type {NodeJS.ErrnoException} */ (e).code !== "EEXIST") throw e;
+  retryStrandedMarkers();
+  retryPendingReleases();
+  const token = crypto.randomBytes(16).toString("hex");
+  const content = JSON.stringify({ pid: process.pid, session, token });
+  try {
+    publishLock(file, content);
+  } catch (e) {
+    if (/** @type {NodeJS.ErrnoException} */ (e).code !== "EEXIST") throw e;
+    const cur = parseLock(observeLock(file));
+    if (isLockLive(cur)) throw new ReviewLoopError("busy", `another review is running for this artifact (pid ${cur?.pid})`);
+    withSection(key, () => {
+      // Re-observed inside the section: the observation above may be out of date by the time we got in.
       const observed = observeLock(file);
-      const cur = parseLock(observed);
-      if (isLockLive(cur)) {
-        throw new ReviewLoopError("busy", `another review is running for this artifact (pid ${cur?.pid})`);
-      }
+      const now = parseLock(observed);
+      if (isLockLive(now)) throw new ReviewLoopError("busy", `another review is running for this artifact (pid ${now?.pid})`);
+      sleepSync(seamMs("REVIEW_LOOP_TEST_SECTION_PAUSE_MS"));
       if (!reclaimStale(key, observed)) throw new ReviewLoopError("busy", "the review lock changed hands while reclaiming it");
-    }
+      try {
+        publishLock(file, content);
+      } catch (err) {
+        // A first-time acquirer won the empty path; we moved only the stale lock, so nobody was displaced.
+        if (/** @type {NodeJS.ErrnoException} */ (err).code === "EEXIST") throw new ReviewLoopError("busy", "another review took the lock first");
+        throw err;
+      }
+    });
   }
-  throw new ReviewLoopError("busy", "could not acquire the review lock");
+  heldTokens.set(key, token);
+  let released = false;
+  const beat = setInterval(() => {
+    const cur = readLock(key);
+    if (!cur || cur.token !== token) return clearInterval(beat);
+    // mtime only, never content: a heartbeat racing a takeover can at worst freshen the NEW holder's lock — it can
+    // never put our token back (the takeover itself is fenced by writeRecord).
+    const now = Date.now() / 1000;
+    fs.utimesSync(file, now, now);
+  }, LOCK_HEARTBEAT_MS);
+  beat.unref();
+  return {
+    release() {
+      if (released) return;
+      released = true;
+      clearInterval(beat);
+      heldTokens.delete(key);
+      retryStrandedMarkers();
+      retryPendingReleases();
+      if (!carriesToken(file, token)) return;
+      try {
+        withSection(key, () => removeOwnLock(key, token));
+      } catch (e) {
+        if (!isSectionRefusal(e)) throw e;
+        // Deferred with OUR token: a retry removes the lock only while it still carries it.
+        pendingReleases.set(key, token);
+        hookExit();
+        lockEvent(/** @type {ReviewLoopError} */ (e).code, "lock_release_deferred");
+      }
+    }
+  };
 }

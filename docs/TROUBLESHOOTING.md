@@ -24,13 +24,13 @@ https://github.com/MostViableProduct/review-loop/issues with the code and the li
 | `base_moved` | 1 | the base branch moved; re-run the review round |  |
 | `branch_marker_missing` | 1 | run the PR creation command again so review-loop records the branch |  |
 | `broker_stop_failed` | 4 | a Codex app-server broker from a review round may still be running: find it with `ps -ax \| grep app-server-broker` and stop it, then report a bug |  |
-| `busy` | 1 | another review is running for this artifact; wait for it to finish |  |
+| `busy` | 1 | another review is running for this artifact; wait for it to finish, or follow the message if it names a stuck process or a marker file |  |
 | `cancelled` | 3 | re-run the command when ready; completed steps are kept |  |
 | `checkpoint` | 1 | answer Claude's question; to see it again, resume the review loop in Claude (the review-loop:review-loop skill) |  |
 | `claude_cli_unparseable` | 1 | update Claude Code (`claude update`), then re-run |  |
 | `claude_parent_process` | 1 | run this in a separate terminal, not from inside Claude Code |  |
 | `claude_running` | 1 | quit all Claude Code sessions, then re-run |  |
-| `cli_busy` | 1 | another review-loop command is running; wait for it to finish |  |
+| `cli_busy` | 1 | another review-loop command is running, or a stuck one is holding the CLI lock: follow the line above |  |
 | `codex_config_unreadable` | 4 | check that $CODEX_HOME/config.toml (default ~/.codex/config.toml) is a regular file, not a symlink |  |
 | `codex_failed` | 1 | check `codex` runs in a terminal (`review-loop doctor`), then re-run the review round |  |
 | `codex_output_invalid` | 4 | run `review-loop doctor`; if it persists, report a bug |  |
@@ -73,7 +73,9 @@ https://github.com/MostViableProduct/review-loop/issues with the code and the li
 | `legacy_hooks_present` | 1 | run `review-loop migrate`: the old review-loop hooks in settings.json double-gate with the plugin |  |
 | `legacy_pin_invalid` | 1 | run `review-loop setup` to pin the Codex plugin again; the old pin file was left where it was |  |
 | `live_check_failed` | 1 | run the fix for the detail: the CLI prints it, and the live-check table below lists each | `codex_missing`, `codex_auth`, `plugin_missing`, `git_failed`, `pin_mismatch`, `model_invalid`, `effort_invalid`, `timeout`, `unparseable`, `unknown` |
+| `lock_identity_unavailable` | 1 | check that `/bin/ps -p $$` runs in a terminal, then retry |  |
 | `lock_lost` | 4 | run `review-loop doctor`; if it persists, report a bug |  |
+| `lock_marker_cleanup_failed` | 4 | the state directory refused a delete; check its permissions (`review-loop doctor`) |  |
 | `merge_base_ambiguous` | 1 | resume the review loop in Claude (the review-loop:review-loop skill) and choose how to merge the base |  |
 | `merge_base_unavailable` | 1 | fetch the base branch, then re-run the review round |  |
 | `migration_archive_occupied` | 1 | move the named archive folder aside, then re-run `review-loop migrate` (to undo the earlier migration instead, run `review-loop migrate --rollback`) |  |
@@ -188,6 +190,10 @@ fix:
 
 ## Not in the tables
 
+- **A review or command stays `busy` long after nothing should be running.** The message tells you what is holding
+  it. If it names a review-loop process (`ps -p <pid>` shows it), that process is stuck: end it, and the lock frees
+  itself. If it says a marker file "can't be read, so its owner is unverified", check `ps -p <pid>` first: if that
+  isn't a review-loop process, delete the one file it names and retry. Don't end a process you can't identify.
 - **A settings change was lost during setup.** Your editor or sync tool still has it; save it again.
 - **`doctor` says the plugin is installed at the wrong scope.** It prints
   `claude plugin install review-loop@review-loop --scope user`. Claude Code accepts `--scope` there, but

@@ -6,7 +6,7 @@ import { spawnSync, spawn } from "node:child_process";
 import { tmpDir } from "../engine/helpers.mjs";
 import { validateLine } from "../../plugin/engine/lib/events.mjs";
 import { withCliLock, CLI_LOCK_KEY } from "../../cli/lib/lock.mjs";
-import { readLock } from "../../plugin/engine/lib/state.mjs";
+import { readLock, processIdent } from "../../plugin/engine/lib/state.mjs";
 import { isRealPid, signalPid } from "../fakes/signal.mjs";
 
 async function withStateDir(dir, fn) {
@@ -184,6 +184,33 @@ test("[RF-5] a second mutating command while one holds the lock → cli_busy", (
   const r = spawnSync(process.execPath, [BIN, "config", "set", "preset", "balanced", "--json"], { env: s.env, encoding: "utf8" });
   assert.equal(r.status, 1);
   assert.equal(JSON.parse(r.stdout).code, "cli_busy");
+});
+
+test("[RF-5] a stuck lock section blocking the CLI lock prints the engine's recovery text: the stuck PID, or the one marker file to check", (t) => {
+  const s = sandbox();
+  const locks = path.join(s.home, "state", "locks");
+  fs.mkdirSync(locks, { recursive: true, mode: 0o700 });
+  const lock = path.join(locks, `${CLI_LOCK_KEY}.lock`);
+  const sleeper = spawn("/bin/sleep", ["60"], { stdio: "ignore" });
+  t.after(() => sleeper.kill());
+  const pid = /** @type {number} */ (sleeper.pid);
+  const marker = path.join(locks, `${CLI_LOCK_KEY}.lock.reclaim.${pid}.0123456789abcdef`);
+  const run = () => {
+    // A stale CLI lock: reclaiming it has to go through the section the marker holds.
+    fs.writeFileSync(lock, JSON.stringify({ pid: 999_999_9, session: "gone", token: "d".repeat(32) }), { mode: 0o600 });
+    fs.utimesSync(lock, 0, 0);
+    return spawnSync(process.execPath, [BIN, "config", "set", "preset", "balanced"], { env: s.env, encoding: "utf8" });
+  };
+  fs.writeFileSync(marker, JSON.stringify({ pid, ident: processIdent(pid), token: "0123456789abcdef" + "f".repeat(16) }));
+  let r = run();
+  assert.equal(r.status, 1, r.stderr);
+  assert.match(r.stderr, new RegExp(`review-loop process ${pid} .*end it`));
+  assert.match(r.stderr, /cli_busy/);
+  fs.writeFileSync(marker, "{");
+  r = run();
+  assert.equal(r.status, 1, r.stderr);
+  assert.ok(r.stderr.includes(path.basename(marker)) && r.stderr.includes(`pid ${pid}`), r.stderr);
+  assert.doesNotMatch(r.stderr, /end it/, "an unverified owner is never named as a process to end");
 });
 
 test("R-D21: a non-zero exit in text mode prints the message line, then the code + remedy line", () => {
