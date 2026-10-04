@@ -365,6 +365,6 @@ main().catch(async (err) => {
     emit(warn ? { systemMessage: `⚠ ${text}` } : { continue: false, stopReason: text });
     if (!gateLogged) await logGate({ gate: "prverify", outcome: warn ? "warned" : "denied", preset, code: diagnosed, session: knownSession, pending: 1 });
   } else if (MODE === "stop" || MODE === "track" || MODE === "session") {
-    emit({ systemMessage: `⚠ review-loop ${MODE} hook failed (${code}); review status unknown — run \`review-round.mjs status\`` });
+    emit({ systemMessage: `⚠ review-loop ${MODE} hook failed (${code}); review status unknown — run \`node \"$(review-loop engine-path)/review-round.mjs\" status\`` });
   }
 });

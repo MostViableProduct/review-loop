@@ -24,6 +24,7 @@ function requireUsableConfig() {
 /** @param {string[]} args @param {import("./io.mjs").IO} io @param {{ json: boolean }} ctx */
 export async function run(args, io, ctx) {
   const [sub, key, raw] = args;
+  if ((sub === "show" || sub === "repair") && args.length > 1) throw new CliError("usage_bad_flag", `config ${sub} takes no other words (got ${String(args[1]).slice(0, 40)})`);
   if (sub === "show" || sub === undefined) {
     const r = readConfig();
     const d = codexDefaults();
@@ -31,12 +32,14 @@ export async function run(args, io, ctx) {
     const sources = { preset: c.preset === "default" ? "default" : "config", model: source(c.codex.model, "inherit"), effort: source(c.codex.effort, "inherit"), rubric: source(c.rubricPath, "built-in"), "events.path": source(c.events.path, "default") };
     if (ctx.json) return { code: "ok", json: { ...c, status: r.status, sources, codexInherited: { model: d.model, effort: d.effort } } };
     const problem = r.status === "invalid" ? `\nThe config file is unusable (${r.code}); the values above are defaults. Run \`review-loop config repair\`.\n` : "\n";
+    // A default value already says where it came from; only a value from the file is marked.
+    const set = (/** @type {string} */ src) => (src === "config" ? " (set in config)" : "");
     io.err(
-      `preset: ${c.preset} (${sources.preset})\n` +
-      `model:  ${c.codex.model ?? `inherit (${d.model ?? "Codex default"})`} (${sources.model})\n` +
-      `effort: ${c.codex.effort ?? `inherit (${d.effort ?? "Codex default"})`} (${sources.effort}; recorded, display only; not sent to Codex)\n` +
-      `rubric: ${c.rubricPath ?? "built-in"} (${sources.rubric})\n` +
-      `events: ${c.events.path ?? "default"} (${sources["events.path"]})\n` +
+      `preset: ${c.preset}${set(sources.preset)}\n` +
+      `model:  ${c.codex.model ?? `inherit (${d.model ?? "Codex default"})`}${set(sources.model)}\n` +
+      `effort: ${c.codex.effort ?? `inherit (${d.effort ?? "Codex default"})`} (${sources.effort === "config" ? "set in config; " : ""}display only; not sent to Codex)\n` +
+      `rubric: ${c.rubricPath ?? "built-in"}${set(sources.rubric)}\n` +
+      `events: ${c.events.path ?? "default"}${set(sources["events.path"])}\n` +
       `file:   ${configPath()} (${r.status})${problem}`
     );
     return { code: "ok" };

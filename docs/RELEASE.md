@@ -45,7 +45,7 @@ Every step is a command with its expected output. Stop at the first mismatch.
 3. `(set -o pipefail; npm test 2>&1 | tail -3)` → `# fail 0`; with your local `.content-gate.private.json`,
    `node scripts/content-gate.mjs --require-private` → `content-gate: ok (…)` and
    `node scripts/content-gate.mjs --tracked --require-private` → `content-gate: ok (… tracked files, private rules)`;
-   `npm run docs:check` → `README tables are current`; `npm run sabotage` →
+   `npm run docs:check` → `troubleshooting tables are current`; `npm run sabotage` →
    `sabotage: every break went red for its named test`
 4. Re-run probes P1 and P5 against the installed Claude Code, in an empty directory holding a signed-in
    `.claude` (never your real one):
