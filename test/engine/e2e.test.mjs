@@ -4,7 +4,7 @@ import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
+import { spawnSync, spawn } from "node:child_process";
 import { makeFakeBin } from "../fakes/fakebin.mjs";
 import { g, makeRepo, commitFile, writeFile, tmpDir, GIT_ENV } from "./helpers.mjs";
 import { classify } from "../../cli/lib/livecheck.mjs";
@@ -300,6 +300,32 @@ test("T-OBS-7: with the events file unwritable, the Stop hook still blocks with 
   assert.equal(unwritable.stdout, writable.stdout);
   assert.equal(unwritable.status, writable.status);
   assert.match(unwritable.stderr, /event log not writable/);
+});
+
+test("fenced before paying: a round whose lock is taken over before it starts reviewing stops at lock_lost, and Codex is never called", async () => {
+  const repo = specRepo();
+  const spec = writeFile(repo, "docs/specs/feature.md", "x");
+  respond([]);
+  const locks = path.join(env.REVIEW_LOOP_STATE_DIR, "locks");
+  const child = spawn(process.execPath, [ROUND, "run", "--kind", "spec", "--path", spec], {
+    env: { ...env, REVIEW_LOOP_TEST_SEAMS: "1", REVIEW_LOOP_TEST_BEFORE_REVIEWING_PAUSE_MS: "3000" }
+  });
+  let out = "";
+  child.stdout.on("data", (b) => (out += b));
+  const closed = new Promise((r) => child.on("close", r));
+  /** @type {string | undefined} */
+  let name;
+  const end = Date.now() + 10_000;
+  while (!(name = fs.existsSync(locks) ? fs.readdirSync(locks).find((n) => /^[0-9a-f]{24}\.lock$/.test(n)) : undefined)) {
+    assert.ok(Date.now() < end, "the round took its lock");
+    await new Promise((r) => setTimeout(r, 10));
+  }
+  const tmp = path.join(locks, "takeover.tmp");
+  fs.writeFileSync(tmp, JSON.stringify({ pid: process.pid, session: "taker", token: "f".repeat(32) }));
+  fs.renameSync(tmp, path.join(locks, name));
+  await closed;
+  assert.equal(JSON.parse(out).error.code, "lock_lost", out);
+  assert.equal(stubCalls().length, 0, "the companion was never called");
 });
 
 test("Codex returned bad JSON (parseError) → exit 30, retryable, attempts counted", () => {

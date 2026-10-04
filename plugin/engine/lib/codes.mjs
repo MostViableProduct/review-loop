@@ -41,7 +41,7 @@ export const CODES = Object.freeze({
   usage_bad_flag: { category: "usage", remedy: "run `review-loop <command> --help`" },
   node_too_old: { category: "usage", remedy: "brew upgrade node" },
   cancelled: { category: "cancelled", remedy: "re-run the command when ready; completed steps are kept" },
-  cli_busy: { category: "user_action", remedy: "another review-loop command is running; wait for it to finish" },
+  cli_busy: { category: "user_action", remedy: "another review-loop command is running, or a stuck one is holding the CLI lock: follow the line above" },
   claude_running: { category: "user_action", remedy: "quit all Claude Code sessions, then re-run" },
   claude_parent_process: { category: "user_action", remedy: "run this in a separate terminal, not from inside Claude Code" },
   tool_failed: {
@@ -130,6 +130,7 @@ export const CODES = Object.freeze({
   hook_input_too_large: { category: "internal", remedy: DOCTOR },
   hook_input_missing_session: { category: "internal", remedy: DOCTOR },
   lock_lost: { category: "internal", remedy: DOCTOR },
+  lock_marker_cleanup_failed: { category: "internal", remedy: "the state directory refused a delete; check its permissions (`review-loop doctor`)" },
   codex_config_unreadable: { category: "internal", remedy: "check that $CODEX_HOME/config.toml (default ~/.codex/config.toml) is a regular file, not a symlink" },
   open_failed: { category: "internal", remedy: DOCTOR },
   selftest_failed: {
@@ -210,7 +211,8 @@ export const CODES = Object.freeze({
   push_rejected: { category: "user_action", remedy: `pull the remote changes, then ${RERUN}` },
   head_diverged: { category: "user_action", remedy: `pull the remote changes or merge, then ${RERUN}` },
   plugin_pin: { category: "user_action", remedy: "look at what changed in the Codex plugin and approve the repin when Claude asks; to see the question again, resume the review loop in Claude (the review-loop:review-loop skill)" },
-  busy: { category: "user_action", remedy: "another review is running for this artifact; wait for it to finish" },
+  busy: { category: "user_action", remedy: "another review is running for this artifact; wait for it to finish, or follow the message if it names a stuck process or a marker file" },
+  lock_identity_unavailable: { category: "user_action", remedy: "check that `/bin/ps -p $$` runs in a terminal, then retry" },
   interrupted: { category: "cancelled", remedy: `${RERUN} when ready` }
 });
 
@@ -223,7 +225,7 @@ const token = (/** @type {unknown} */ v) => (typeof v === "string" && /^[A-Za-z0
 
 export const GATES = Object.freeze(["stop", "pr", "prompt", "prverify", "merge"]);
 export const OUTCOMES = Object.freeze(["blocked", "warned", "denied", "allowed", "skipped"]);
-export const STAGES = Object.freeze(["detection_failed", "snapshot_degraded", "hook_input_error", "hook_error", "prune_failed", "summary_write_failed", "lock_invalid", "status_post_failed", "broker_stop_failed", "session", "track", "prompt", "stop", "pr", "prverify"]);
+export const STAGES = Object.freeze(["detection_failed", "snapshot_degraded", "hook_input_error", "hook_error", "prune_failed", "summary_write_failed", "lock_invalid", "lock_marker_cleanup", "lock_release_deferred", "status_post_failed", "broker_stop_failed", "session", "track", "prompt", "stop", "pr", "prverify"]);
 export const COMMANDS_ENUM = Object.freeze(["setup", "config", "doctor", "update", "uninstall", "migrate", "selftest", "engine-path", "version", "help"]);
 export const KINDS = Object.freeze(["spec", "plan", "impl", "pr"]);
 export const DECISION_OPTIONS = Object.freeze(["continue", "more", "accept", "stop", "accept-finding", "waive", "repin", "override", "merge", "pull"]);

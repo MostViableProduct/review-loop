@@ -93,6 +93,34 @@ These are copied from the spec, and every task implicitly includes them.
   Claude Code or other writer is active.
 - **Per-user state:** files 0600, dirs 0700, via `ensurePrivateDir` / `atomicWriteJson` (a delegate of
   `atomicWriteText`, the one write-then-rename) / `readJsonValidated` / `quarantine` from `lib/fsutil.mjs`. Reuse these; never re-implement them.
+- **Locks** (`state.mjs`; one `<key>.lock` per artifact, plus the CLI's reserved key):
+  - **Contract.** At most one process returns from `acquireLock` for a key until the lock is released, or until its
+    HOLDER is judged stale (dead PID, or no heartbeat for `LOCK_TTL_MS`; a holder judged stale while alive is fenced
+    by `writeRecord`'s `lock_lost`, which runs before `runCompanion`). A reclaimer or releaser never moves a lock other
+    than the one it observed, however long it is suspended. This holds among 1.0.3+ processes; a pre-1.0.3 process
+    still running during an upgrade moves the path without the section, as before, and is fenced the same way.
+  - **The mover section.** Every operation that moves the lock path (a stale reclaim, a release) runs in a per-key
+    section; publishing into an empty path needs none (`link` is exclusive). Each contender publishes its own marker
+    `<key>.lock.reclaim.<pid>.<16 hex>` (`{pid, ident, token}`, via `publishLock`) and enters only if no other marker is
+    live; contenders that see each other back off at random, at most 4 attempts, then `busy`.
+  - **A marker is live while its owner process exists. No time limit.** Stale only when the name's PID is dead, or the
+    marker is verified (well-formed, agreeing with its name) and `processIdent(pid)` differs. `ident` is the sha256 of
+    `/bin/ps -ww -o lstart=,command=` under a fixed env (`TZ=UTC`, `LC_ALL=C`): absolute path, so a PATH shim can't
+    fake "another process"; command line included, so a PID reused within the same second differs. Unreadable or
+    inconsistent markers, and a failing `ps`, count as live while the name's PID lives. No identity → no marker
+    (`lock_identity_unavailable`). Nothing in review-loop may set `process.title` (a test greps for it).
+  - **When a key stays blocked**: for as long as a marker's owner lives (stuck, suspended, or a reused PID behind an
+    unreadable marker). `busy` says how to clear it: a verified owner's PID to end, or, unverified, the one marker file
+    to delete after checking `ps` (never "end it" for an unverified PID).
+  - **Cleanup.** Our own marker's unlink never throws: a failure logs `lock_marker_cleanup_failed`
+    (`lock_marker_cleanup`), and the path is retried on the next `acquireLock`/`release` and in an exit handler. A
+    release that finds the section busy is deferred as `key → token` (`lock_release_deferred`) and retried the same
+    way, removing the lock only while it still carries that token.
+  - Pinned by the `lock section:` tests in `state-policy.test.mjs`, the e2e "fenced before paying" test, and sabotage
+    rows `lock-section-exclusive`, `lock-marker-no-expiry`, `lock-ident-fixed-env`, `lock-release-own-only`.
+  - **Known follow-up (Coherence):** the other engine `ps` calls (`pin.mjs` broker verification and snapshot sweep,
+    `settings.mjs` writer check) still resolve `ps` through PATH. Moving them onto `/bin/ps` with a fixed env is a
+    separate change; their tests stub `ps` on PATH and would switch to `REVIEW_LOOP_TEST_PS_PATH`.
 - **Symlinks** are rejected on config, rubric, events path, the Codex config read and the state dir.
 - **The literal string of the GitHub CLI PR-create command** must not appear in any shell command you
   run in Claude Code: the author's live PR gate denies it. Build it from parts in scripts
