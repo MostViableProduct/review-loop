@@ -27,8 +27,13 @@ Every step is a command with its expected output. Stop at the first mismatch.
   this repo, never gets it and runs the generic rules with a notice.
 - A tag ruleset (Settings → Rules → Rulesets → New tag ruleset) targeting `v*`: restrict creations, updates and
   deletions to the release maintainers, so only they can start a release.
-- Tags are signed (spec §9), but CI doesn't verify the signature; it checks only that the tagged commit is on
-  `main`. The releaser verifies the signature locally before pushing: `git tag -v vX.Y.Z` → `Good signature`.
+- Release tags are signed with the project's release key, an SSH ed25519 key (fingerprint
+  `SHA256:D1pmgN3+VlnO5Lf5etQM4JxjB5KYrKJKWSUx1aUXk2k`), not a maintainer's personal key. Its public half is in
+  [`allowed_signers`](allowed_signers), so anyone can verify a tag:
+  `git -c gpg.ssh.allowedSignersFile=docs/allowed_signers tag -v vX.Y.Z`. The tagger is the org,
+  `MostViableProduct <hello@mostviableproduct.com>`, never a personal git identity: a tag's tagger is public and
+  permanent. The `release` workflow refuses a tag that is not signed by that key as that principal, after checking
+  that the tagged commit is on `main`; the releaser verifies before pushing too (step 7).
 - Homebrew floor: the formula uses `formula_opt_bin`, which Homebrew has had since 6.0.3. On an older Homebrew
   the formula fails to load; `brew update` fixes it.
 
@@ -47,11 +52,18 @@ Every step is a command with its expected output. Stop at the first mismatch.
    `PROBE_HOME=<that dir> sh scripts/probes/p1-p5/run.sh` → every `P1.…` and `P5.…` line shows the value its
    `(expect …)` names
 5. `npm run e2e` (paid; needs Codex sign-in) → `# fail 0`
-6. Dogfood (AC-20): the release PR itself passes the review loop at 9.2. Before the author has migrated
-   (Task 29), that is the legacy loop running the same engine; afterwards it is the plugin. `$RR status`
-   shows the PR marker with `status: passed`.
-7. Merge the release PR, then `git tag -s vX.Y.Z -m "review-loop X.Y.Z" && git tag -v vX.Y.Z` → `Good signature`;
-   then `git push origin vX.Y.Z` → the
+6. Dogfood: the release PR itself passes the review loop at 9.2.
+   `node "$(review-loop engine-path)/review-round.mjs" status` shows the PR marker with `status: passed`.
+7. Merge the release PR, `git fetch origin`, then tag the merge commit (`<sha>`) with the release key and the org
+   as tagger, and verify:
+
+       GIT_COMMITTER_NAME=MostViableProduct GIT_COMMITTER_EMAIL=hello@mostviableproduct.com \
+         git -c gpg.format=ssh -c user.signingkey=<path to the release key>.pub \
+         tag -s vX.Y.Z -m "review-loop X.Y.Z" <sha>
+       git -c gpg.ssh.allowedSignersFile=docs/allowed_signers tag -v vX.Y.Z
+
+   → `Good "git" signature for hello@mostviableproduct.com with ED25519 key SHA256:D1pmgN3+…` and
+   `tagger MostViableProduct <hello@mostviableproduct.com>`. Then `git push origin vX.Y.Z` → the
    `release` workflow's `release` job goes green: a GitHub release with `review-loop-X.Y.Z.tar.gz`, and the
    plugin tag `review-loop--vX.Y.Z`
 8. Approve the `tap-bump` job (the `release` environment) → a PR titled `review-loop X.Y.Z` appears on

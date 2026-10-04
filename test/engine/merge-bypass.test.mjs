@@ -9,6 +9,7 @@ import { makeFakeBin } from "../fakes/fakebin.mjs";
 import { writeRecord, newRecord, writeBaseline } from "../../plugin/engine/lib/state.mjs";
 import { mentionsMerge, mentionsPrCreate, parseMerge, parsePrCreate } from "../../plugin/engine/lib/cmdparse.mjs";
 import { advisoryText } from "../../plugin/engine/lib/presets.mjs";
+import { DEADLINE_MS } from "../../plugin/engine/lib/prgate.mjs";
 
 const G = "g" + "h";
 const bin = path.join(tmpDir(), "bin");
@@ -296,51 +297,68 @@ test("parse: grouped shorthands follow pflag; --input and GH_REPO reach the API 
 const LATENCY_CHILD = `
 import { mentionsMerge, mentionsPrCreate, parseMerge, parsePrCreate } from ${JSON.stringify(new URL("../../plugin/engine/lib/cmdparse.mjs", import.meta.url).href)};
 const G = "g" + "h";
-const big = [
-  "x".repeat(100_000),
-  G + " pr ".repeat(1) + (G + " pr ").repeat(17_000),
-  (G + " pr ").repeat(17_000) + "merge",
-  (G + " pr ").repeat(17_000) + "create",
-  (G + " api ").repeat(12_500) + "/merge",
-  "curl ".repeat(20_000) + "https://api.github.com/",
-  "curl api.github.com/".repeat(5_000),
-  "mutation " + "aPullRequestB ".repeat(7_000),
-  G + " api -X PUT %41" + "/".repeat(120_000) + "x; " + G + " api -X PUT repos/o/r/pulls/5/merge",
-  G + " api -X PUT a" + "/".repeat(120_000) + "x/merge",
+// Each input at full size (~100 KB) and at a tenth: a linear scan grows ~10x, a quadratic one ~100x. Comparing the two
+// sizes, not an absolute budget, keeps the check meaningful on a slow or loaded runner, which slows both alike.
+const r = (s, n) => Math.max(1, Math.round(n * s));
+const inputs = [
+  (s) => "x".repeat(r(s, 100_000)),
+  (s) => G + " pr " + (G + " pr ").repeat(r(s, 17_000)),
+  (s) => (G + " pr ").repeat(r(s, 17_000)) + "merge",
+  (s) => (G + " pr ").repeat(r(s, 17_000)) + "create",
+  (s) => (G + " api ").repeat(r(s, 12_500)) + "/merge",
+  (s) => "curl ".repeat(r(s, 20_000)) + "https://api.github.com/",
+  (s) => "curl api.github.com/".repeat(r(s, 5_000)),
+  (s) => "mutation " + "aPullRequestB ".repeat(r(s, 7_000)),
+  (s) => G + " api -X PUT %41" + "/".repeat(r(s, 120_000)) + "x; " + G + " api -X PUT repos/o/r/pulls/5/merge",
+  (s) => G + " api -X PUT a" + "/".repeat(r(s, 120_000)) + "x/merge",
   // Round 4: the gh-call counter over many flag-first gh words with one subcommand at the end, and brace scanning.
-  (G + " -f ").repeat(20_000) + "api -X PUT repos/o/r/pulls/5/merge",
-  (G + " -f ").repeat(20_000) + "pr create",
-  (G + " pr -t ").repeat(15_000) + "merge",
-  G + " api " + "{".repeat(120_000) + ",x",
-  G + " pr merge " + "{a,".repeat(40_000),
+  (s) => (G + " -f ").repeat(r(s, 20_000)) + "api -X PUT repos/o/r/pulls/5/merge",
+  (s) => (G + " -f ").repeat(r(s, 20_000)) + "pr create",
+  (s) => (G + " pr -t ").repeat(r(s, 15_000)) + "merge",
+  (s) => G + " api " + "{".repeat(r(s, 120_000)) + ",x",
+  (s) => G + " pr merge " + "{a,".repeat(r(s, 40_000)),
   // Round 5: the brace-rewrite arm, the sequence collapse and the ANSI-C check.
-  (G + " {a,b}").repeat(15_000),
-  "{a..".repeat(30_000) + G,
-  "{g..g}h ".repeat(15_000) + "pr merge",
-  "$'\\\\x".repeat(30_000) + " " + G,
-  (G + " $'a").repeat(24_000)
+  (s) => (G + " {a,b}").repeat(r(s, 15_000)),
+  (s) => "{a..".repeat(r(s, 30_000)) + G,
+  (s) => "{g..g}h ".repeat(r(s, 15_000)) + "pr merge",
+  (s) => "$'\\\\x".repeat(r(s, 30_000)) + " " + G,
+  (s) => (G + " $'a").repeat(r(s, 24_000))
 ];
-const out = [];
-for (const cmd of big) {
-  const t0 = performance.now();
-  mentionsMerge(cmd);
-  mentionsPrCreate(cmd);
-  try { parseMerge(cmd); } catch {}
-  try { parsePrCreate(cmd); } catch {}
-  out.push(Math.round(performance.now() - t0));
-}
-console.log(JSON.stringify(out));
+/** Best of three: one GC pause or scheduler hiccup must not decide the verdict. @param {string} cmd */
+const time = (cmd) => {
+  let best = Infinity;
+  for (let k = 0; k < 3; k++) {
+    const t0 = performance.now();
+    mentionsMerge(cmd);
+    mentionsPrCreate(cmd);
+    try { parseMerge(cmd); } catch {}
+    try { parsePrCreate(cmd); } catch {}
+    best = Math.min(best, performance.now() - t0);
+  }
+  return best;
+};
+for (const f of inputs) time(f(0.1)); // warm-up: a first run measures the JIT, not the scan
+console.log(JSON.stringify(inputs.map((f) => [time(f(0.1)), time(f(1))])));
 `;
 
+const FULL_CEILING_MS = 2000;
+
 test("the fast paths are linear: 100 KB commands finish well inside the hook budget", () => {
-  // SIGKILL on timeout (a sync loop can't run a SIGTERM handler anyway), and a 30 s CPU cap so the child dies even
+  // SIGKILL on timeout (a sync loop can't run a SIGTERM handler anyway), and a 60 s CPU cap so the child dies even
   // when this test process is killed first and spawnSync's timeout never fires.
-  const r = spawnSync("/bin/sh", ["-c", 'ulimit -t 30; exec "$0" --input-type=module -e "$1"', process.execPath, LATENCY_CHILD], { encoding: "utf8", timeout: 15_000, killSignal: "SIGKILL" });
-  assert.equal(r.signal, null, "the scans did not finish within 15 s (super-linear)");
+  const r = spawnSync("/bin/sh", ["-c", 'ulimit -t 60; exec "$0" --input-type=module -e "$1"', process.execPath, LATENCY_CHILD], { encoding: "utf8", timeout: 45_000, killSignal: "SIGKILL" });
+  assert.equal(r.signal, null, "the scans did not finish within 45 s (super-linear)");
   assert.equal(r.status, 0, r.stderr);
   const ms = JSON.parse(r.stdout);
   assert.equal(ms.length, 20);
-  for (const [i, t] of ms.entries()) assert.ok(t < 500, `input ${i} took ${t} ms`);
+  // Linear is ~10x; 25x plus a floor for sub-millisecond tenths leaves room for noise, and quadratic (~100x) fails.
+  // The ceiling catches a scan that is linear but slow: full size took at most ~40 ms locally and 658 ms on a loaded
+  // CI runner (before best-of-3), and the PR gate's whole deadline is DEADLINE_MS.
+  assert.ok(FULL_CEILING_MS * 10 <= DEADLINE_MS, "the ceiling leaves the gate at least 10x headroom");
+  for (const [i, [tenth, full]] of ms.entries()) {
+    assert.ok(full <= 25 * tenth + 50, `input ${i}: ${tenth.toFixed(1)} ms at a tenth, ${full.toFixed(1)} ms at full size (linear is ~10x)`);
+    assert.ok(full <= FULL_CEILING_MS, `input ${i}: ${full.toFixed(1)} ms at full size, over the ${FULL_CEILING_MS} ms ceiling`);
+  }
 });
 
 // The regexes the linear scans replaced: identical answers on every command the suites use, and on random ones.

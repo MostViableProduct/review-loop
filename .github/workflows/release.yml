@@ -31,6 +31,28 @@ jobs:
         run: node scripts/release-check.mjs "${GITHUB_REF_NAME#v}"
       - name: The tagged commit is on main (spec §9, releases come only from main)
         run: git merge-base --is-ancestor HEAD origin/main
+      # After the main check. The signer list is origin/main's current one, never the tagged commit's: an older commit
+      # on main may still list a key that has since been removed.
+      - name: The tag is signed by the release key in docs/allowed_signers
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="refs/tags/${GITHUB_REF_NAME}"
+          # The checkout may hold only a lightweight ref for the pushed tag; fetch the tag object, which carries the signature.
+          git fetch -q --force --no-tags origin "+${TAG}:${TAG}"
+          if [ "$(git cat-file -t "$TAG")" != tag ]; then echo "release: ${GITHUB_REF_NAME} is not an annotated tag, so it has no signature" >&2; exit 1; fi
+          if [ "$(git rev-parse "${TAG}^{commit}")" != "$(git rev-parse HEAD)" ]; then echo "release: ${GITHUB_REF_NAME} no longer points at the checked-out commit" >&2; exit 1; fi
+          SIGNERS="$(mktemp)"
+          git show origin/main:docs/allowed_signers > "$SIGNERS"
+          PRINCIPAL="$(awk 'NF { print $1; exit }' "$SIGNERS")"
+          if ! OUT="$(git -c gpg.ssh.allowedSignersFile="$SIGNERS" verify-tag "$TAG" 2>&1)"; then
+            printf '%s\n' "$OUT" >&2; echo "release: ${GITHUB_REF_NAME} is not signed by a key in main's docs/allowed_signers" >&2; exit 1
+          fi
+          # The principal by name too, so a key the file doesn't list never passes on any git version's exit status.
+          if ! printf '%s\n' "$OUT" | grep -qF "Good \"git\" signature for ${PRINCIPAL} "; then
+            printf '%s\n' "$OUT" >&2; echo "release: ${GITHUB_REF_NAME} is not signed as ${PRINCIPAL}" >&2; exit 1
+          fi
+          printf '%s\n' "$OUT"
       # The private denylist (docs/RELEASE.md) reaches only the gate steps, and --require-private fails the job when
       # the secret is empty or missing: a release never ships on the generic rules alone.
       - name: Content gate (packaged set, generic and private rules)

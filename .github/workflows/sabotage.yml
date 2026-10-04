@@ -9,6 +9,10 @@ on:
     branches: [main]
     paths:
       - "plugin/engine/lib/events.mjs"
+      - "docs/allowed_signers"
+      - "docs/RELEASE.md"
+      - "plugin/engine/lib/cmdparse.mjs"
+      - "test/engine/merge-bypass.test.mjs"
       - "cli/lib/selftest.mjs"
       - "test/cli/selftest.test.mjs"
       - "cli/lib/preflight.mjs"
@@ -79,6 +83,10 @@ on:
   pull_request:
     paths:
       - "plugin/engine/lib/events.mjs"
+      - "docs/allowed_signers"
+      - "docs/RELEASE.md"
+      - "plugin/engine/lib/cmdparse.mjs"
+      - "test/engine/merge-bypass.test.mjs"
       - "cli/lib/selftest.mjs"
       - "test/cli/selftest.test.mjs"
       - "cli/lib/preflight.mjs"
