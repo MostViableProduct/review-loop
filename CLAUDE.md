@@ -53,7 +53,7 @@ Enforced Codex adversarial review inside Claude Code, packaged as a Homebrew CLI
 | `.github/workflows/ci.yml`, `sabotage.yml`, `release.yml` | §10.3 | 25, 26 |
 | `scripts/bump-version.mjs`, `scripts/release-check.mjs`, `scripts/tap-formula.mjs` | version stamping (4 places), the tag-equality check, and the tap formula for a release (template + archive url/sha256; refuses a placeholder or malformed sha256) | 26 |
 | `test/e2e/live.test.mjs`, `isolation.mjs` | the opt-in paid live e2e (`npm run e2e`); its config-dir guard and child env, tested free by `isolation.test.mjs` | 27 |
-| `docs/RELEASE.md`, `README.md` | release checklist, user docs | 24, 26 |
+| `docs/RELEASE.md`, `docs/allowed_signers`, `README.md` | release checklist and the release key that verifies tags, user docs | 24, 26 |
 | `homebrew-tap/Formula/review-loop.rb`, `homebrew-tap/.github/workflows/tests.yml`, `homebrew-tap/README.md`, `homebrew-tap/.github/dependabot.yml` | the formula template (its all-zero sha256 never reaches the tap: Task 28 pushes the tap WITHOUT `Formula/`, and the first release adds it) and tap CI, staged here and pushed as its own repo in Task 28; never packaged (not in `package.files.json`; a content-gate test fails if it ever is) | 26, 28 |
 | `.github/dependabot.yml` | weekly `github-actions` pin bumps (same file in the tap) | 26 |
 
@@ -243,6 +243,7 @@ These are copied from the spec, and every task implicitly includes them.
 | P7-auto --auto with stale head | 2026-09-28 | pass P7-auto=bound (rejected, no autoMergeRequest armed) | `docs/probes/P7-2026-09-28.md` |
 | P7-mcp GitHub MCP merge tool | 2026-09-30 | verified from source: headField=expectedHeadSha (github/github-mcp-server@5a1a386, maps to the REST merge `sha`); live payload uncaptured | `docs/probes/P7-2026-09-28.md` |
 | e2e | 2026-09-30 | pass (attempt 2, after the probe re-sign-in; attempt 1 failed at Claude auth, $0). Isolated config (`CLAUDE_CONFIG_DIR` = the probe home), Claude Code 2.1.285, codex plugin 1.0.6, review-loop 0.1.0 from the working tree (6cc9d58). Round exit 10 (needs_fixes, mean 9.26, Verifiability 6.9, 1 finding), then `override`; Stop blocked (pending 1) → allowed (`reviewed`, pending 0) in the SAME resumed session; no broker from the round's snapshot survived. Spend: session 1 $0.110, session 2 $0.119 (sonnet), one Codex round. Before any spawn the test refuses a `CLAUDE_CONFIG_DIR` that is unset, missing, not a directory, or the real `~/.claude` (realpath or inode). Children get no `CLAUDE*` (except `CLAUDE_CONFIG_DIR`), `ANTHROPIC_*`, `CODEX_COMPANION_*` or `REVIEW_LOOP_*` variables; `REVIEW_LOOP_E2E_KEEP_API_KEY=1` keeps `ANTHROPIC_API_KEY` alone | `test/e2e/live.test.mjs`, guards in `test/e2e/isolation.mjs` (tested free by `isolation.test.mjs`) |
+| published | 2026-10-03 | v1.0.1 is the first tap release (`brew install MostViableProduct/tap/review-loop`, tap PR #3). v1.0.0 is a GitHub release only: its tap PR #2 failed `brew test` (Homebrew's git shim, fixed in 1.0.1) and was closed. Deferred work is in issues #4–#16. Both tags verify with `docs/allowed_signers` | GitHub releases v1.0.0 and v1.0.1, MostViableProduct/homebrew-tap |
 
 ### Live e2e record (Task 27, 2026-09-30)
 

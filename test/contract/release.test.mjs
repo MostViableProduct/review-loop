@@ -560,3 +560,19 @@ test("release.yml: a release left without its archive (create failed midway) get
   assert.deepEqual(r.gh.calls(), ["release view", "release download", "release upload"]);
   assert.equal(r.run("release", RELEASE).status, 0, "and the next re-run finds it in place");
 });
+
+// docs/RELEASE.md names the release key by fingerprint, and anyone verifies tags with docs/allowed_signers. The two
+// must name the same key, and the tag command must sign as the principal the file allows, or verification fails.
+test("RELEASE.md's signing key, tagger and allowed_signers agree", () => {
+  const doc = fs.readFileSync("docs/RELEASE.md", "utf8");
+  const lines = fs.readFileSync("docs/allowed_signers", "utf8").split("\n").filter((l) => l.trim() !== "");
+  assert.equal(lines.length, 1, "exactly one release key");
+  const m = /^(\S+@\S+) namespaces="git" ssh-ed25519 ([A-Za-z0-9+/]+=*)$/.exec(lines[0] ?? "");
+  assert.ok(m, "principal, git namespace and an ed25519 key");
+  const [, principal, blob] = m;
+  const fingerprint = `SHA256:${crypto.createHash("sha256").update(Buffer.from(blob, "base64")).digest("base64").replace(/=+$/, "")}`;
+  assert.ok(doc.includes(`\`${fingerprint}\``), `RELEASE.md names ${fingerprint}`);
+  assert.ok(doc.includes(`GIT_COMMITTER_EMAIL=${principal}`), "the tag command signs as the allowed principal");
+  assert.ok(doc.includes("gpg.ssh.allowedSignersFile=docs/allowed_signers tag -v vX.Y.Z"), "the verify command uses the file");
+  assert.ok(!/git tag -s vX/.test(doc), "no tag command that would use a personal identity and key");
+});
