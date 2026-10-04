@@ -582,21 +582,27 @@ test("release.yml: the signature step passes a tag signed by the allowed key and
   const env = { PATH: "/usr/bin:/bin", HOME: base, GIT_CONFIG_GLOBAL: path.join(base, "gitconfig"), GIT_CONFIG_NOSYSTEM: "1" };
   fs.writeFileSync(env.GIT_CONFIG_GLOBAL, "[user]\n\tname = t\n\temail = t@example.com\n[init]\n\tdefaultBranch = main\n");
   const git = (/** @type {string} */ cwd, /** @type {string[]} */ ...a) => execFileSync("git", a, { cwd, env, encoding: "utf8" }).trim();
-  for (const k of ["release", "other"]) execFileSync("ssh-keygen", ["-q", "-t", "ed25519", "-N", "", "-C", k, "-f", path.join(base, k)], { env });
-  const pub = fs.readFileSync(path.join(base, "release.pub"), "utf8").split(" ").slice(0, 2).join(" ");
+  for (const k of ["release", "other", "retired"]) execFileSync("ssh-keygen", ["-q", "-t", "ed25519", "-N", "", "-C", k, "-f", path.join(base, k)], { env });
+  const pub = (/** @type {string} */ k) => fs.readFileSync(path.join(base, `${k}.pub`), "utf8").split(" ").slice(0, 2).join(" ");
+  const sign = (/** @type {string} */ k, /** @type {string} */ tag) => ["-c", "gpg.format=ssh", "-c", `user.signingkey=${path.join(base, `${k}.pub`)}`, "tag", "-s", tag, "-m", "r"];
   const origin = path.join(base, "origin.git");
   git(base, "init", "-q", "--bare", origin);
   const work = path.join(base, "work");
   git(base, "clone", "-q", origin, work);
   fs.mkdirSync(path.join(work, "docs"));
-  fs.writeFileSync(path.join(work, "docs", "allowed_signers"), `rel@example.com namespaces="git" ${pub}\n`);
+  // An older commit on main still lists a key that main has since replaced: a tag there signed by it must fail.
+  fs.writeFileSync(path.join(work, "docs", "allowed_signers"), `rel@example.com namespaces="git" ${pub("retired")}\n`);
   git(work, "add", ".");
-  git(work, "commit", "-q", "-m", "seed");
+  git(work, "commit", "-q", "-m", "old signer");
+  git(work, ...sign("retired", "v1.0.4"));
+  fs.writeFileSync(path.join(work, "docs", "allowed_signers"), `rel@example.com namespaces="git" ${pub("release")}\n`);
+  git(work, "add", ".");
+  git(work, "commit", "-q", "-m", "current signer");
   git(work, "push", "-q", "origin", "main");
   /** @type {Record<string, string[]>} */
   const tags = {
-    "v1.0.0": ["-c", "gpg.format=ssh", "-c", `user.signingkey=${path.join(base, "release.pub")}`, "tag", "-s", "v1.0.0", "-m", "r"],
-    "v1.0.1": ["-c", "gpg.format=ssh", "-c", `user.signingkey=${path.join(base, "other.pub")}`, "tag", "-s", "v1.0.1", "-m", "r"],
+    "v1.0.0": sign("release", "v1.0.0"),
+    "v1.0.1": sign("other", "v1.0.1"),
     "v1.0.2": ["tag", "-a", "v1.0.2", "-m", "r"],
     "v1.0.3": ["tag", "v1.0.3"]
   };
@@ -607,12 +613,13 @@ test("release.yml: the signature step passes a tag signed by the allowed key and
   const run = (tag) => {
     const co = tmpDir("rl-sig-co-");
     git(co, "clone", "-q", origin, ".");
+    git(co, "checkout", "-q", tag); // as the runner checks out the pushed tag
     return spawnSync("bash", ["-c", script], { cwd: co, env: { ...env, GITHUB_REF_NAME: tag }, encoding: "utf8" });
   };
   const ok = run("v1.0.0");
   assert.equal(ok.status, 0, ok.stderr);
   assert.match(ok.stdout, /Good "git" signature for rel@example\.com /);
-  for (const [tag, why] of [["v1.0.1", /not signed by the release key/], ["v1.0.2", /not signed by the release key/], ["v1.0.3", /not an annotated tag/]]) {
+  for (const [tag, why] of [["v1.0.1", /not signed by a key in main's/], ["v1.0.2", /not signed by a key in main's/], ["v1.0.3", /not an annotated tag/], ["v1.0.4", /not signed by a key in main's/]]) {
     const r = run(/** @type {string} */ (tag));
     assert.notEqual(r.status, 0, `${tag} must be refused`);
     assert.match(r.stderr, /** @type {RegExp} */ (why), `${tag}: ${r.stderr}`);

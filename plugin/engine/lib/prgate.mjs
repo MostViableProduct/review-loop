@@ -132,7 +132,7 @@ export async function resolvePrTarget(root, args) {
 }
 
 /** The whole evaluation's budget, as merge.mjs and prverify.mjs use, under the PreToolUse hook's 40 s timeout. */
-const DEADLINE_MS = 30_000;
+export const DEADLINE_MS = 30_000;
 
 /**
  * A PreToolUse hook killed at its timeout does not block the call, so a slow repository or GitHub must end in a

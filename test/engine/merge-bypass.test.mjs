@@ -9,6 +9,7 @@ import { makeFakeBin } from "../fakes/fakebin.mjs";
 import { writeRecord, newRecord, writeBaseline } from "../../plugin/engine/lib/state.mjs";
 import { mentionsMerge, mentionsPrCreate, parseMerge, parsePrCreate } from "../../plugin/engine/lib/cmdparse.mjs";
 import { advisoryText } from "../../plugin/engine/lib/presets.mjs";
+import { DEADLINE_MS } from "../../plugin/engine/lib/prgate.mjs";
 
 const G = "g" + "h";
 const bin = path.join(tmpDir(), "bin");
@@ -340,6 +341,8 @@ for (const f of inputs) time(f(0.1)); // warm-up: a first run measures the JIT, 
 console.log(JSON.stringify(inputs.map((f) => [time(f(0.1)), time(f(1))])));
 `;
 
+const FULL_CEILING_MS = 2000;
+
 test("the fast paths are linear: 100 KB commands finish well inside the hook budget", () => {
   // SIGKILL on timeout (a sync loop can't run a SIGTERM handler anyway), and a 60 s CPU cap so the child dies even
   // when this test process is killed first and spawnSync's timeout never fires.
@@ -349,8 +352,12 @@ test("the fast paths are linear: 100 KB commands finish well inside the hook bud
   const ms = JSON.parse(r.stdout);
   assert.equal(ms.length, 20);
   // Linear is ~10x; 25x plus a floor for sub-millisecond tenths leaves room for noise, and quadratic (~100x) fails.
+  // The ceiling catches a scan that is linear but slow: full size took at most ~40 ms locally and 658 ms on a loaded
+  // CI runner (before best-of-3), and the PR gate's whole deadline is DEADLINE_MS.
+  assert.ok(FULL_CEILING_MS * 10 <= DEADLINE_MS, "the ceiling leaves the gate at least 10x headroom");
   for (const [i, [tenth, full]] of ms.entries()) {
     assert.ok(full <= 25 * tenth + 50, `input ${i}: ${tenth.toFixed(1)} ms at a tenth, ${full.toFixed(1)} ms at full size (linear is ~10x)`);
+    assert.ok(full <= FULL_CEILING_MS, `input ${i}: ${full.toFixed(1)} ms at full size, over the ${FULL_CEILING_MS} ms ceiling`);
   }
 });
 
