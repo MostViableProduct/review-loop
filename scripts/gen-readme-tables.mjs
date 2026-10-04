@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-// README exit-code and troubleshooting tables are generated from plugin/engine/lib/codes.mjs (spec §8.3).
+// The exit-code and troubleshooting tables in docs/TROUBLESHOOTING.md are generated from plugin/engine/lib/codes.mjs
+// (spec §8.3; the README held them until the user docs were split).
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -59,50 +60,50 @@ export function splice(text, name, body) {
 
 /** @param {string} msg @returns {number} */
 function usage(msg) {
-  process.stderr.write(`gen-readme-tables: ${msg}\nusage: gen-readme-tables.mjs [--check] [--readme <path>]\n`);
+  process.stderr.write(`gen-readme-tables: ${msg}\nusage: gen-readme-tables.mjs [--check] [--file <path>]\n`);
   return 2;
 }
 
 /** @param {string[]} args @returns {number} */
 function main(args) {
   let check = false;
-  let readme = path.join(ROOT, "README.md");
-  let readmeSet = false;
+  let file = path.join(ROOT, "docs", "TROUBLESHOOTING.md");
+  let fileSet = false;
   for (let i = 0; i < args.length; i++) {
     const a = args[i];
     if (a === "--check" && !check) check = true;
-    else if (a === "--readme" && !readmeSet) {
+    else if (a === "--file" && !fileSet) {
       const v = args[++i];
-      if (v === undefined || v.startsWith("--")) return usage("--readme needs a file path");
-      readme = path.resolve(v);
-      readmeSet = true;
+      if (v === undefined || v.startsWith("--")) return usage("--file needs a file path");
+      file = path.resolve(v);
+      fileSet = true;
     } else return usage(`unknown or repeated argument ${JSON.stringify(a.slice(0, 40))}`);
   }
   let before;
   try {
-    before = fs.readFileSync(readme, "utf8");
+    before = fs.readFileSync(file, "utf8");
   } catch (err) {
-    return usage(`cannot read ${readme} (${err instanceof Error && "code" in err ? String(err.code) : "error"})`);
+    return usage(`cannot read ${file} (${err instanceof Error && "code" in err ? String(err.code) : "error"})`);
   }
   let after = before;
   for (const [name, body] of [["exit-codes", exitTable()], ["troubleshooting", troubleshootingTable()], ["live-check", detailTable()]]) {
     const next = splice(after, name, body);
     if (next === null) {
-      process.stdout.write(`README is missing the ${name} markers\n`);
+      process.stdout.write(`${path.basename(file)} is missing the ${name} markers\n`);
       return 1;
     }
     after = next;
   }
   if (check) {
     if (after !== before) {
-      process.stdout.write("README tables are stale: run `node scripts/gen-readme-tables.mjs`\n");
+      process.stdout.write("troubleshooting tables are stale: run `node scripts/gen-readme-tables.mjs`\n");
       return 1;
     }
-    process.stdout.write("README tables are current\n");
+    process.stdout.write("troubleshooting tables are current\n");
     return 0;
   }
-  if (after !== before) fs.writeFileSync(readme, after);
-  process.stdout.write("README tables written\n");
+  if (after !== before) fs.writeFileSync(file, after);
+  process.stdout.write("troubleshooting tables written\n");
   return 0;
 }
 

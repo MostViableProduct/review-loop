@@ -9,6 +9,10 @@ on:
     branches: [main]
     paths:
       - "plugin/engine/lib/events.mjs"
+      - "cli/review-loop.mjs"
+      - "test/cli/help.test.mjs"
+      - "README.md"
+      - "test/contract/readme.test.mjs"
       - "docs/allowed_signers"
       - "docs/RELEASE.md"
       - "plugin/engine/lib/cmdparse.mjs"
@@ -43,7 +47,6 @@ on:
       - "plugin/engine/review-round.mjs"
       - "plugin/engine/lib/pin.mjs"
       - "plugin/engine/lib/fsutil.mjs"
-      - "cli/review-loop.mjs"
       - "cli/lib/settings.mjs"
       - "cli/lib/setup.mjs"
       - "cli/lib/doctor.mjs"
@@ -83,6 +86,10 @@ on:
   pull_request:
     paths:
       - "plugin/engine/lib/events.mjs"
+      - "cli/review-loop.mjs"
+      - "test/cli/help.test.mjs"
+      - "README.md"
+      - "test/contract/readme.test.mjs"
       - "docs/allowed_signers"
       - "docs/RELEASE.md"
       - "plugin/engine/lib/cmdparse.mjs"
@@ -117,7 +124,6 @@ on:
       - "plugin/engine/review-round.mjs"
       - "plugin/engine/lib/pin.mjs"
       - "plugin/engine/lib/fsutil.mjs"
-      - "cli/review-loop.mjs"
       - "cli/lib/settings.mjs"
       - "cli/lib/setup.mjs"
       - "cli/lib/doctor.mjs"

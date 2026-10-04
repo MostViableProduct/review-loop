@@ -101,7 +101,7 @@ test("L6: --version and --help print to stdout (so $(review-loop --version) work
   }
 });
 
-test("L11: a command with a payload prints it with the event embedded, as the README states; others print the bare event", () => {
+test("L11: a command with a payload prints it with the event embedded, as docs/TROUBLESHOOTING.md states; others print the bare event", () => {
   const s = sandbox();
   const bin = tmpDir();
   fs.symlinkSync(process.execPath, path.join(bin, "node"));
@@ -114,8 +114,8 @@ test("L11: a command with a payload prints it with the event embedded, as the RE
   }
   const bare = JSON.parse(spawnSync(process.execPath, [BIN, "version", "--json"], { env, encoding: "utf8" }).stdout);
   assert.equal(bare.event, "cli.exit", "a command without a payload prints the event itself");
-  const readme = fs.readFileSync(path.join(process.cwd(), "README.md"), "utf8").replace(/\s+/g, " ");
-  assert.match(readme, /for a command with a payload \(`doctor`, `selftest`, `engine-path`, `config show`\), that payload object with the event embedded under `event`/);
+  const doc = fs.readFileSync(path.join(process.cwd(), "docs", "TROUBLESHOOTING.md"), "utf8").replace(/\s+/g, " ");
+  assert.match(doc, /for a command with a payload \(`doctor`, `selftest`, `engine-path`, `config show`\), that payload object with the event embedded under `event`/);
 });
 
 test("piped output is complete: doctor --json (parsed) and help (bytes) through `| cat` equal a file redirect, five times each", () => {

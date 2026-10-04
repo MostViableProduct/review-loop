@@ -8,7 +8,7 @@
     {
       "name": "review-loop",
       "source": "./plugin",
-      "version": "1.0.1",
+      "version": "1.0.2",
       "description": "Enforced Codex adversarial review for Claude Code"
     }
   ]

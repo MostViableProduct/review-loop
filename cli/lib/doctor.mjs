@@ -280,8 +280,6 @@ const errorClass = (err) => (err instanceof Error ? err.name : "other");
  * @returns {Promise<{ code: string, json: { schema: string, ok: boolean, checks: Array<{ id: string } & Result> }> }>}
  */
 export async function run(args, io, ctx) {
-  const unknown = args.find((a) => a !== "--live");
-  if (unknown !== undefined) throw new CliError("usage_bad_flag", `doctor takes only --live (got ${unknown.slice(0, 40)})`);
   const live = args.includes("--live");
   const tool = memoRunner();
   /** @type {Array<{ id: string } & Result>} */

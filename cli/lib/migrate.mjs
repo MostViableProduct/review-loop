@@ -15,7 +15,6 @@ import { claudeConfigDir, stateRoot } from "../../plugin/engine/lib/paths.mjs";
 import { isPin, pinFile } from "../../plugin/engine/lib/pin.mjs";
 
 const SEAMS = process.env.REVIEW_LOOP_TEST_SEAMS === "1";
-const SEAM_FLAGS = ["--skip-doctor-gate", "--force-engine-move"];
 const OLD_REF = "~/.claude/review-loop/CLAUDE.md";
 // Replaced as a unit, backticks included: swapping only the inner path would nest backticks.
 const OLD_TOKEN = `\`${OLD_REF}\``;
@@ -265,9 +264,6 @@ function readLegacyPin(file, within) {
 
 /** @param {string[]} args @param {import("./io.mjs").IO} io @param {{ yes: boolean }} ctx */
 export async function run(args, io, ctx) {
-  const allowed = ["--rollback", ...(SEAMS ? SEAM_FLAGS : [])];
-  const bad = args.find((a) => !allowed.includes(a));
-  if (bad !== undefined) throw new CliError("usage_bad_flag", `migrate takes only --rollback and --yes (got ${bad.slice(0, 40)})`);
   if (!io.isTTY && !ctx.yes) throw new CliError("usage_noninteractive", "migrate needs a terminal, or --yes");
   return args.includes("--rollback") ? rollback(io, ctx) : migrate(args, io, ctx);
 }
@@ -412,6 +408,7 @@ async function migrate(args, io, ctx) {
 
   // The legacy engine is the fallback while anything is wrong, so it moves only once doctor passes. With no engine left
   // to move (a resumed run that already archived it) there is nothing for the gate to hold back.
+  // Test seams: main() refuses both flags unless REVIEW_LOOP_TEST_SEAMS=1.
   const gate = !present(P.engine) ? "skipped" : args.includes("--force-engine-move") ? "ok" : args.includes("--skip-doctor-gate") ? "skipped" : (await doctor([], io, { json: false })).code;
   if (gate !== "ok" && gate !== "skipped") {
     // The record stays in_progress: the engine step is pending, and the next `migrate` continues this record.
