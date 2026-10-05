@@ -1133,18 +1133,29 @@ async function sweepOne(root, name, table, remaining) {
     if (owner === "none") {
       if (Date.now() - fs.lstatSync(root).mtimeMs < LEGACY_SNAPSHOT_AGE_MS || referenced(root, table) !== false) return "skip";
     } else if (owner !== "dead") return "skip";
-    const procs = table.procs();
+    // Fresh, not the sweep's cached table: a decision to signal or to delete rests on what runs now.
+    const procs = readProcs();
     if (procs === null) return { left: 1, unattributed: 0, reason: "ps_unavailable" };
     if (!(await stopSnapshotCompanion(root, procs, remaining))) return { left: 1, unattributed: 0, reason: "unknown_rows" };
     const stop = await stopCompanionBroker(root, { deadline: performance.now() + Math.max(0, remaining()) });
     if (stop.left > 0 || stop.unattributed > 0) return stop;
-    // Re-checked just before the remove: still a real directory of ours, never a link swapped in.
+    // Re-checked just before the remove: still a real directory of ours, never a link swapped in, and nothing runs
+    // from it now (a fresh read; an unreadable table keeps it).
     if (!ownedRealDirectory(root)) return "skip";
+    if (runsFrom(root)) return { left: 1, unattributed: 0, reason: "members_left" };
     fs.rmSync(root, { recursive: true, force: true });
     return "swept";
   } catch {
     return "failed";
   }
+}
+
+/** Whether a companion or broker of this user runs from `root` now; true when that cannot be read. @param {string} root */
+function runsFrom(root) {
+  const procs = readProcs();
+  if (procs === null) return true;
+  const roots = rootsOf(root);
+  return procs.some((p) => p.uid === process.getuid?.() && (brokerArgv(p.args, roots) !== null || brokerArgv(p.args, roots, COMPANION_SCRIPT) !== null));
 }
 
 /** @param {string} p */
@@ -1225,6 +1236,10 @@ export async function stopOrphan(parentDir, o) {
   const table = readProcs();
   if (table === null) return "unverified";
   const tree = table.filter((p) => p.pgid === first.pid && p.uid === process.getuid?.());
+  // The whole identity again, right at the signal: the table read above took time.
+  const now = check();
+  if (typeof now === "string") return now === "gone" ? "mismatch" : now;
+  if (!sameMember(now, first)) return "mismatch";
   signal(-first.pid, "SIGTERM");
   await exitedWithin(first.pid, 5000);
   for (const m of tree) {

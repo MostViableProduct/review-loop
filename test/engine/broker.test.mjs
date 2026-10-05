@@ -532,7 +532,10 @@ test("B: a broker that died before writing broker.json leaves a codex app-server
   assert.equal(snapshots().length, 1, "and the snapshot is kept");
   assert.deepEqual(stopDetails().map((e) => [e.data.reason, e.data.left, e.data.unattributed]), [["unattributed", 0, 1]]);
   const marker = JSON.parse(fs.readFileSync(path.join(ws(), snapshots()[0], "companion.json"), "utf8"));
-  assert.ok(marker.pid < brokers()[0].pid && brokers()[0].pid < marker.after, `the companion's pid window holds the broker: ${JSON.stringify(marker)}`);
+  const b = brokers()[0].pid;
+  // A pid space that wrapped during the round (after < pid) leaves no window to check, by design.
+  assert.ok(Number.isInteger(marker.pid) && Number.isInteger(marker.after), `the companion's pid window was recorded: ${JSON.stringify(marker)}`);
+  if (marker.after > marker.pid) assert.ok(marker.pid < b && b < marker.after, `the window holds the broker: ${JSON.stringify(marker)} vs ${b}`);
   signalPid(k.pid, "SIGKILL");
   assert.ok(await until(() => !alive(k.pid), 5000));
   assert.equal(round().code, 0);
