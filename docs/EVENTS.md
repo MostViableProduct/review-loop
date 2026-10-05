@@ -31,3 +31,25 @@ service:
       receivers: [filelog/review_loop]
       exporters: [debug]
 ```
+
+## Event types
+
+Generated from the engine's event catalog: every event type, who writes it, and its `data` fields. A field
+that does not pass its check is written as `null`.
+
+<!-- events:start -->
+| Event | Written by | Data fields |
+|---|---|---|
+| `cli.exit` | cli | `command`, `duration_ms` |
+| `gate.decision` | hook | `gate`, `outcome`, `preset`, `pending_count` |
+| `round.result` | round | `kind`, `round`, `pass`, `mean`, `dims`, `model`, `effort`, `effort_source`, `preset`, `duration_ms` |
+| `round.decision` | round | `kind`, `option`, `reason` |
+| `round.dispute` | round | `kind` |
+| `round.push` | round | — |
+| `round.sweep` | round | `swept`, `brokers_left`, `failed`, `unattributed`, `incomplete`, `held`, `partition`, `partitions` |
+| `round.broker_stop` | round | `reason`, `left`, `unattributed`, `snapshot` |
+| `hook.error` | hook, round, cli | `stage`, `mode` |
+| `config.invalid` | hook, cli, round | — |
+| `override` | hook, round, cli | `kind`, `action` |
+| `event_unregistered` | cli, hook, round | — |
+<!-- events:end -->

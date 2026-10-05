@@ -114,7 +114,9 @@ function killGroup(child) {
 }
 
 /**
- * @typedef {{ cwd?: string, timeoutMs?: number, env?: NodeJS.ProcessEnv, input?: string | Buffer, maxBuffer?: number }} RunOpts
+ * `onSpawn` runs synchronously once the child exists, before it can have done anything this process waits on: a
+ * caller records the pid there (the child itself runs concurrently, so it is no proof the child has not started).
+ * @typedef {{ cwd?: string, timeoutMs?: number, env?: NodeJS.ProcessEnv, input?: string | Buffer, maxBuffer?: number, onSpawn?: (pid: number) => void }} RunOpts
  * @typedef {{ code: number | null, stdout: string, stderr: string, timedOut: boolean }} RunResult
  */
 
@@ -126,9 +128,19 @@ function killGroup(child) {
  * @returns {Promise<RunResult>}
  */
 export function run(cmd, args, opts = {}) {
-  const { cwd, timeoutMs = 60_000, env = process.env, input, maxBuffer = 16 * 1024 * 1024 } = opts;
+  const { cwd, timeoutMs = 60_000, env = process.env, input, maxBuffer = 16 * 1024 * 1024, onSpawn } = opts;
   return new Promise((resolve, reject) => {
     const child = spawnGroup(cmd, args, { cwd, env, stdio: ["pipe", "pipe", "pipe"] });
+    if (onSpawn && child.pid) {
+      try {
+        onSpawn(child.pid);
+      } catch (err) {
+        child.stdin.destroy();
+        killGroup(child);
+        child.once("close", () => reject(err));
+        return;
+      }
+    }
     /** @type {Buffer[]} */ const out = [];
     /** @type {Buffer[]} */ const err = [];
     let outBytes = 0;

@@ -87,6 +87,7 @@ https://github.com/MostViableProduct/review-loop/issues with the code and the li
 | `node_too_old` | 2 | brew upgrade node |  |
 | `not_regular_file` | 1 | remove the non-file lock entry from the state directory |  |
 | `open_failed` | 4 | run `review-loop doctor`; if it persists, report a bug |  |
+| `orphaned_brokers` | 1 | run `node "$(review-loop engine-path)/review-round.mjs" sweep`; for any broker still listed, check it with `ps -o pid,pgid,args -g <pgid>` and stop it with the `stop-orphan` command `review-loop doctor` prints for it |  |
 | `output_too_large` | 4 | run `review-loop doctor`; if it persists, report a bug |  |
 | `override_unverifiable` | 1 | make the repo readable (`git status` works), then re-run the override |  |
 | `pin_exists` | 1 | a pin already exists: to replace it, resume the review loop in Claude (the review-loop:review-loop skill) and approve the repin |  |
@@ -148,7 +149,8 @@ https://github.com/MostViableProduct/review-loop/issues with the code and the li
 | `shallow_file_symlink` | 1 | replace .git/shallow with a regular file, or run `git fetch --unshallow` |  |
 | `shallow_file_too_large` | 1 | run `git fetch --unshallow`, then re-run the review round |  |
 | `skill_duplicate` | 1 | run `review-loop migrate` to move the old skill at ~/.claude/skills/review-loop/ aside (it duplicates the plugin skill) |  |
-| `snapshot_sweep_incomplete` | 4 | a killed round's snapshot under the state dir's ws/ could not be cleaned up yet; the next round retries. If it repeats, check `ps -ax \| grep app-server-broker`, then report a bug |  |
+| `snapshot_owner_unknown` | 4 | ps could not name this round's process, so no Codex review was started; check that `ps -p $$` works, then re-run the review round |  |
+| `snapshot_sweep_incomplete` | 4 | a killed round's snapshot under the state dir's ws/ could not be cleaned up yet; the next round retries. Run `node "$(review-loop engine-path)/review-round.mjs" sweep` to finish now, then `review-loop doctor`; if it repeats, report a bug |  |
 | `spawn_failed` | 4 | run `review-loop doctor`; if it persists, report a bug |  |
 | `stall` | 1 | answer Claude's question; to see it again, resume the review loop in Claude (the review-loop:review-loop skill) |  |
 | `state_dir_insecure` | 1 | a state or repo path is not readable/writable by you, is owned by someone else, or is group/world-accessible: make the review-loop state directory yours with mode 700 (`chmod 700`) and repo paths accessible, then re-run |  |
@@ -194,6 +196,14 @@ fix:
   it. If it names a review-loop process (`ps -p <pid>` shows it), that process is stuck: end it, and the lock frees
   itself. If it says a marker file "can't be read, so its owner is unverified", check `ps -p <pid>` first: if that
   isn't a review-loop process, delete the one file it names and retry. Don't end a process you can't identify.
+- **Codex broker processes keep running after reviews (`orphaned_brokers`).** Each review starts a Codex
+  `app-server-broker.mjs` with a `codex app-server` under it, and review-loop stops that tree when the review ends,
+  or at the start of the next review if one was killed. What it can't tie to a review it never stops on its own:
+  a broker whose review copy (`ws/plugin-XXXXXX` in the state dir) is already gone, for example one left by an
+  older version. `doctor` lists those with a ready-made command. First run
+  `node "$(review-loop engine-path)/review-round.mjs" sweep`, then check each listed tree with
+  `ps -o pid,pgid,args -g <pgid>`. If no review is running, stop it with the `stop-orphan` command `doctor`
+  printed for it; that command re-checks the process right before signalling, and does nothing if it changed.
 - **A settings change was lost during setup.** Your editor or sync tool still has it; save it again.
 - **`doctor` says the plugin is installed at the wrong scope.** It prints
   `claude plugin install review-loop@review-loop --scope user`. Claude Code accepts `--scope` there, but
@@ -211,6 +221,11 @@ command refuses any other flag (exit 2, `usage_bad_flag`) before it does anythin
   under `event`. Human text goes to stderr; `--version` and `--help` print to stdout when `--json` is not given.
 
 ### Exit codes
+
+These are the `review-loop` command's exit codes. The review engine (`review-round.mjs`, which the review loop runs)
+has its own, listed by `node "$(review-loop engine-path)/review-round.mjs" --help`: among them, `sweep` and
+`stop-orphan` exit 0 when everything was cleaned up and 60 when something is still left (50 means another review
+holds the lock).
 
 <!-- exit-codes:start -->
 | Exit | Category | Meaning |

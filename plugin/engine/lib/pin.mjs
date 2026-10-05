@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import fs from "node:fs";
 import net from "node:net";
 import os from "node:os";
@@ -211,7 +212,11 @@ export function snapshotVerified(parentDir) {
     if (!same) throw new ReviewLoopError("plugin_pin_mismatch", `codex plugin ${pin.version} changed while it was being verified`);
     // Written after the hash check (it is not a plugin file). A round killed without its finally leaves the snapshot;
     // the next round's sweepStaleSnapshots removes it once this owner is provably gone.
-    fs.writeFileSync(path.join(root, OWNER_FILE), JSON.stringify({ pid: process.pid, started: startTimeOf(process.pid) }), { mode: 0o600, flag: "wx" });
+    // Before the companion can start: a snapshot whose owner cannot be named would never read as dead, so it is not
+    // made at all. Written whole (rename), so a kill mid-write leaves no half-file.
+    const started = startTimeOf(process.pid);
+    if (started === null) throw new ReviewLoopError("snapshot_owner_unknown", "ps could not read this round's start time, so its snapshot could not be marked");
+    atomicWriteJson(path.join(root, OWNER_FILE), { pid: process.pid, started }, root);
     return { root, cleanup };
   } catch (err) {
     cleanup();
@@ -342,7 +347,32 @@ export async function runCompanion(root, p) {
   fs.mkdirSync(dataDir, { recursive: true, mode: 0o700 });
   // The broker outlives the companion (detached, own session), so a signal must reap it from its broker.json.
   if (!reapers.has(root)) reapers.set(root, onReap(() => reapCompanionBroker(root)));
-  const r = await run(process.execPath, args, { cwd: p.cwd, env: { ...process.env, CLAUDE_PLUGIN_DATA: dataDir }, timeoutMs: p.timeoutMs ?? 15 * 60_000, maxBuffer: 32 * MiB });
+  /** @type {number | null} */
+  let companionPid = null;
+  // Recorded before the companion can have started a broker: a broker that dies before writing broker.json is then
+  // still bounded by this pid window (see leaderlessAppServers). A failed write kills the companion's group at once
+  // (run's onSpawn contract); the round's finally still stops whatever it may have started.
+  const onSpawn = (/** @type {number} */ pid) => {
+    atomicWriteJson(path.join(root, COMPANION_FILE), { pid }, root);
+    companionPid = pid;
+  };
+  let r;
+  try {
+    r = await run(process.execPath, args, { cwd: p.cwd, env: { ...process.env, CLAUDE_PLUGIN_DATA: dataDir }, timeoutMs: p.timeoutMs ?? 15 * 60_000, maxBuffer: 32 * MiB, onSpawn });
+  } catch (err) {
+    if (companionPid === null && !(err instanceof ReviewLoopError)) throw new ReviewLoopError("snapshot_owner_unknown", `could not record the companion's pid: ${/** @type {Error} */ (err).message}`);
+    throw err;
+  } finally {
+    // The first pid issued after the companion is gone closes the window: every broker it started has a lower one.
+    const after = companionPid === null ? null : ps(["-o", "pid=", "-p", String(process.pid)])?.pid;
+    if (companionPid !== null && typeof after === "number") {
+      try {
+        atomicWriteJson(path.join(root, COMPANION_FILE), { pid: companionPid, after }, root);
+      } catch {
+        // The window stays open-ended (no `after`), which only widens what keeps the snapshot.
+      }
+    }
+  }
   if (r.timedOut) throw new ReviewLoopError("codex_timeout", `codex review exceeded ${Math.round((p.timeoutMs ?? 15 * 60_000) / 60_000)} minutes`);
   return r;
 }
@@ -355,54 +385,210 @@ const reapers = new Map();
 
 const BROKER_JSON_MAX_BYTES = 64 * 1024;
 const BROKER_SCRIPT = path.join("scripts", "app-server-broker.mjs");
+const COMPANION_SCRIPT = path.join("scripts", "codex-companion.mjs");
+const COMPANION_FILE = "companion.json";
+const COMPANION_MAX_BYTES = 4096;
+/** A snapshot's companion data holds one state dir per workspace; more than this is not a companion's doing. */
+const REGISTRY_MAX_ENTRIES = 32;
+/** A round's own stop, in its finally. */
+export const STOP_DEADLINE_MS = 15_000;
+
+/** @param {string} s */
+const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+/** The snapshot root as given and as its realpath: Node runs the companion from its realpath (macOS /var → /private/var). @param {string} root */
+function rootsOf(root) {
+  const roots = [root];
+  try {
+    const real = fs.realpathSync(root);
+    if (real !== root) roots.push(real);
+  } catch {
+    // Matched as given.
+  }
+  return roots;
+}
 
 /**
- * The brokers the companion recorded in this snapshot's data dir (companion 1.0.6 layout:
- * `<data>/state/<slug>-<hash>/broker.json` = { endpoint: "unix:<sock>", pidFile, logFile, sessionDir, pid }).
- * @param {string} root
- * @returns {Array<{ pid: number, socket: string | null, sessionDir: string | null }>}
+ * Which of `roots` these args run `<…/node> <root>/<script> serve` from, anchored at both ends of the script path, or
+ * null. A wrapper, a debugger or a shell whose args merely contain the path never matches.
+ * @param {string} args @param {string[]} roots @param {string} [script]
+ * @returns {string | null}
  */
-function brokerSessions(root) {
-  const stateDir = path.join(companionDataDir(root), "state");
-  let names = [];
-  try {
-    names = fs.readdirSync(stateDir).slice(0, 32);
-  } catch {
-    return [];
+export function brokerArgv(args, roots, script = BROKER_SCRIPT) {
+  const tail = script === BROKER_SCRIPT ? " serve(?: |$)" : "(?: |$)";
+  for (const r of roots) if (new RegExp(`^\\S*/node ${escapeRe(path.join(r, script))}${tail}`).test(args)) return r;
+  return null;
+}
+
+/** @typedef {{ uid: number, pid: number, ppid: number, pgid: number, lstart: string, started: number, args: string }} Proc */
+
+const PROC_FIELDS = "uid=,pid=,ppid=,pgid=,lstart=,args=";
+const PROC_ROW = /^\s*(\d+)\s+(\d+)\s+(\d+)\s+(\d+)\s+([A-Z][a-z]{2} [A-Z][a-z]{2} [ \d]\d \d\d:\d\d:\d\d \d{4})(?:\s+(\S.*))?$/;
+
+/** One `ps -o uid=,pid=,ppid=,pgid=,lstart=,args=` line (C locale, UTC), or null when any field does not parse. @param {string} line @returns {Proc | null} */
+export function parseProcRow(line) {
+  const m = PROC_ROW.exec(line);
+  if (!m) return null;
+  const lstart = squash(m[5]);
+  const started = Date.parse(`${lstart} UTC`) / 1000;
+  if (!Number.isFinite(started)) return null;
+  return { uid: Number(m[1]), pid: Number(m[2]), ppid: Number(m[3]), pgid: Number(m[4]), lstart, started, args: m[6] ?? "" };
+}
+
+/**
+ * The whole process table, read once. Exit 0 is not enough: null unless every line parses and the table holds this
+ * process's own row, so an empty, header-only or truncated answer is never read as "no such process".
+ * @returns {Proc[] | null}
+ */
+function readProcs() {
+  const r = ps(["-ww", "-A", "-o", PROC_FIELDS]);
+  if (r === null) return null;
+  /** @type {Proc[]} */
+  const rows = [];
+  for (const line of r.out.split("\n")) {
+    if (!line.trim()) continue;
+    const row = parseProcRow(line);
+    if (row === null) return null;
+    rows.push(row);
   }
-  const out = [];
-  for (const name of names) {
-    let v;
-    try {
-      v = JSON.parse(safeReadFile(path.join(stateDir, name, "broker.json"), BROKER_JSON_MAX_BYTES, { symlink: "state_symlink_rejected" }, { within: root }).toString("utf8"));
-    } catch {
-      continue;
-    }
-    if (!isObject(v) || !Number.isInteger(v.pid) || /** @type {number} */ (v.pid) <= 1) continue;
-    const ep = typeof v.endpoint === "string" && v.endpoint.startsWith("unix:") ? v.endpoint.slice("unix:".length) : null;
-    out.push({ pid: /** @type {number} */ (v.pid), socket: ep && path.isAbsolute(ep) ? ep : null, sessionDir: typeof v.sessionDir === "string" ? v.sessionDir : null });
+  return rows.some((p) => p.pid === process.pid && p.uid === process.getuid?.()) ? rows : null;
+}
+
+/** One process now: its row, "gone", or null when ps could not answer. @param {number} pid @returns {Proc | "gone" | null} */
+function procRow(pid) {
+  const r = spawnSync("ps", ["-ww", "-o", PROC_FIELDS, "-p", String(pid)], { encoding: "utf8", timeout: 2000, env: psEnv() });
+  if (r.error || r.signal) return null;
+  const lines = r.stdout.split("\n").filter((l) => l.trim());
+  if (r.status === 1 && lines.length === 0) return "gone";
+  if (r.status !== 0 || lines.length !== 1) return null;
+  const row = parseProcRow(lines[0]);
+  return row && row.pid === pid ? row : null;
+}
+
+/** The same process, unchanged: a pid that was reused differs in start time, group or args. @param {Proc} a @param {Proc} b */
+export const sameMember = (a, b) => a.pid === b.pid && a.lstart === b.lstart && a.pgid === b.pgid && a.args === b.args;
+
+/**
+ * The members of a dead leader's group `pgid` that this snapshot's round can have started: they began strictly after
+ * the snapshot's creation second (the companion starts only after it). Same-second ones are `unattributed` (never
+ * signalled); a row whose start did not parse is `unknown`. PPID is not used: a grandchild's parent is a member.
+ * @param {Proc[]} rows @param {number} pgid @param {number} snapshotSec @param {number | undefined} uid
+ */
+export function treeMembers(rows, pgid, snapshotSec, uid) {
+  /** @type {{ members: Proc[], unattributed: Proc[], unknown: Proc[] }} */
+  const out = { members: [], unattributed: [], unknown: [] };
+  for (const p of rows) {
+    if (p.pgid !== pgid || p.uid !== uid) continue;
+    if (!Number.isFinite(p.started)) out.unknown.push(p);
+    else if (p.started > snapshotSec) out.members.push(p);
+    else if (p.started === snapshotSec) out.unattributed.push(p);
   }
   return out;
 }
 
+/** The snapshot root's creation second, which every process its round starts is strictly after. @param {string} root */
+export function snapshotSecond(root) {
+  return Math.floor(fs.lstatSync(root).birthtimeMs / 1000);
+}
+
 /**
- * Whether `pid` is this snapshot's broker, from its args (`node <root>/scripts/app-server-broker.mjs serve …`). The
- * root is matched as given and as its realpath: Node runs the companion from its realpath (macOS /var → /private/var).
- * "unknown" when ps could not answer.
- * @param {number} pid @param {string} root
- * @returns {"ours" | "other" | "unknown"}
+ * Waits until the clock is past the snapshot's creation second, so no process the round starts can share it: a
+ * same-second process (lstart has one-second resolution) could be another's, and is never signalled.
+ * @param {string} root
  */
-function brokerIdentity(pid, root) {
-  const r = spawnSync("ps", ["-ww", "-o", "args=", "-p", String(pid)], { encoding: "utf8", timeout: 2000 });
-  if (r.error || r.signal || (r.status !== 0 && r.status !== 1)) return "unknown";
-  let real = root;
+export async function afterSnapshotSecond(root) {
+  const wait = (snapshotSecond(root) + 1) * 1000 - Date.now();
+  if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+}
+
+/**
+ * The brokers the companion recorded in this snapshot's data dir (companion 1.0.6 layout:
+ * `<data>/state/<slug>-<hash>/broker.json` = { endpoint: "unix:<sock>", pidFile, logFile, sessionDir, pid }).
+ * `ok` is false when the registry exists but cannot be read whole: a stop then signals nothing.
+ * @param {string} root
+ * @returns {{ ok: boolean, sessions: Array<{ pid: number, socket: string | null, sessionDir: string | null }> }}
+ */
+function brokerRegistry(root) {
+  const stateDir = path.join(companionDataDir(root), "state");
+  let names = [];
   try {
-    real = fs.realpathSync(root);
-  } catch {
-    // The snapshot is still there while a broker is stopped; the as-given root is matched regardless.
+    names = fs.readdirSync(stateDir);
+  } catch (e) {
+    return { ok: /** @type {NodeJS.ErrnoException} */ (e).code === "ENOENT", sessions: [] };
   }
-  const args = r.stdout.trim();
-  return [root, real].some((p) => args.includes(`${path.join(p, BROKER_SCRIPT)} serve`)) ? "ours" : "other";
+  if (names.length > REGISTRY_MAX_ENTRIES) return { ok: false, sessions: [] };
+  const sessions = [];
+  for (const name of names) {
+    const file = path.join(stateDir, name, "broker.json");
+    try {
+      fs.lstatSync(file);
+    } catch (e) {
+      const code = /** @type {NodeJS.ErrnoException} */ (e).code;
+      if (code === "ENOENT" || code === "ENOTDIR") continue;
+      return { ok: false, sessions: [] };
+    }
+    let v;
+    try {
+      v = JSON.parse(safeReadFile(file, BROKER_JSON_MAX_BYTES, { symlink: "state_symlink_rejected" }, { within: root }).toString("utf8"));
+    } catch {
+      return { ok: false, sessions: [] };
+    }
+    if (!isObject(v) || !Number.isInteger(v.pid) || /** @type {number} */ (v.pid) <= 1) return { ok: false, sessions: [] };
+    const ep = typeof v.endpoint === "string" && v.endpoint.startsWith("unix:") ? v.endpoint.slice("unix:".length) : null;
+    sessions.push({ pid: /** @type {number} */ (v.pid), socket: ep && path.isAbsolute(ep) ? ep : null, sessionDir: typeof v.sessionDir === "string" ? v.sessionDir : null });
+  }
+  return { ok: true, sessions };
+}
+
+/** @param {unknown} v @returns {v is { pid: number, after?: number }} */
+function isCompanionMarker(v) {
+  if (!isObject(v)) return false;
+  const keys = Object.keys(v);
+  const posInt = (/** @type {unknown} */ x) => Number.isInteger(x) && /** @type {number} */ (x) > 1;
+  return posInt(v.pid) && (v.after === undefined || posInt(v.after)) && keys.every((k) => k === "pid" || k === "after");
+}
+
+/**
+ * The companion's pid window, read only through the safe reader (no link followed, size-bounded, shape-checked).
+ * @param {string} root
+ * @returns {{ state: "absent" } | { state: "bad" } | { state: "ok", pid: number, after: number | undefined }}
+ */
+function readCompanionMarker(root) {
+  const file = path.join(root, COMPANION_FILE);
+  try {
+    fs.lstatSync(file);
+  } catch (e) {
+    return /** @type {NodeJS.ErrnoException} */ (e).code === "ENOENT" ? { state: "absent" } : { state: "bad" };
+  }
+  try {
+    const v = readJsonValidated(file, isCompanionMarker, root, COMPANION_MAX_BYTES, { readOnly: true });
+    return v ? { state: "ok", pid: v.pid, after: v.after } : { state: "bad" };
+  } catch {
+    return { state: "bad" };
+  }
+}
+
+const APP_SERVER_ARGS = /^(?:\S*\/)?codex app-server$/;
+
+/**
+ * `codex app-server` processes whose broker died before anyone recorded it: in a group whose leader is gone, started
+ * strictly after the snapshot's second, and (with the companion's pid window) in a group the companion could have
+ * started. They cannot be tied to this snapshot for sure, so they are never signalled; they keep the snapshot.
+ * Groups of brokers already attributed are skipped. Narrow on purpose: a desktop session always has leaderless groups
+ * of its own (crash handlers, a terminal's helpers), and a rule matching every one would keep every snapshot.
+ * @param {Proc[]} rows @param {number} snapshotSec @param {ReturnType<typeof readCompanionMarker>} marker @param {Set<number>} known
+ */
+function leaderlessAppServers(rows, snapshotSec, marker, known) {
+  const uid = process.getuid?.();
+  const pids = new Set(rows.map((p) => p.pid));
+  const inWindow = (/** @type {number} */ pgid) => {
+    if (marker.state !== "ok") return true;
+    if (marker.after === undefined) return pgid > marker.pid;
+    // A PID space that wrapped during the round leaves no usable window.
+    if (marker.after < marker.pid) return true;
+    return pgid > marker.pid && pgid < marker.after;
+  };
+  return rows.filter((p) => p.uid === uid && !known.has(p.pgid) && !pids.has(p.pgid) && p.started > snapshotSec && APP_SERVER_ARGS.test(p.args) && inWindow(p.pgid)).length;
 }
 
 /** @param {number} pid */
@@ -415,14 +601,30 @@ function isAlive(pid) {
   }
 }
 
+/** @param {number} ms */
+const sleep = (ms) => new Promise((r) => setTimeout(r, Math.max(0, ms)));
+
 /** @param {number} pid @param {number} ms */
 async function exitedWithin(pid, ms) {
   const end = Date.now() + ms;
   while (isAlive(pid)) {
     if (Date.now() >= end) return false;
-    await new Promise((r) => setTimeout(r, 50));
+    await sleep(50);
   }
   return true;
+}
+
+/** @param {number} pid negative for a group @param {NodeJS.Signals} sig */
+function signal(pid, sig) {
+  // kill(-0) is this process's own group and kill(-1) every process the user owns.
+  if (Math.abs(pid) <= 1) return;
+  // A broker that outlives even SIGKILL (uninterruptible sleep) cannot be made in a test: the seam stands in for it.
+  if (sig === "SIGKILL" && process.env.REVIEW_LOOP_TEST_SEAMS === "1" && process.env.REVIEW_LOOP_TEST_KILL_NOOP === "1") return;
+  try {
+    process.kill(pid, sig);
+  } catch {
+    // Exited in between.
+  }
 }
 
 /** The companion's own shutdown request, bounded; any failure falls through to SIGTERM. @param {string} socket @param {number} ms */
@@ -434,7 +636,7 @@ function requestShutdown(socket, ms) {
     } catch {
       return resolve(undefined);
     }
-    if (!st.isSocket()) return resolve(undefined);
+    if (!st.isSocket() || ms <= 0) return resolve(undefined);
     const conn = net.createConnection(socket);
     const done = () => {
       clearTimeout(timer);
@@ -470,107 +672,252 @@ function removeSessionDir(dir) {
 }
 
 /**
- * Stops the detached app-server broker(s) a round's companion started: `broker/shutdown` over its socket first, then
- * SIGTERM, which the broker handles by shutting down. A pid is signalled only when it comes from this snapshot's
- * broker.json AND its args name this snapshot's broker script, so a reused pid is never touched. Never throws.
- * @param {string} root the snapshot root, before its cleanup
- * @returns {Promise<number>} how many brokers may still be running
+ * Sends `sig` to `p`'s whole group, but only while a fresh read of `p` is still the very process recorded, so a group
+ * id that changed hands is never signalled. Returns false when that could not be confirmed.
+ * @param {Proc} p @param {NodeJS.Signals} sig
  */
-export async function stopCompanionBroker(root) {
-  let left = 0;
+function signalGroupIfSame(p, sig) {
+  const seam = process.env.REVIEW_LOOP_TEST_SEAMS === "1" && process.env.REVIEW_LOOP_TEST_LEADER_RECHECK === "changed";
+  const now = seam ? { ...p, lstart: "Thu Jan 1 00:00:00 1970" } : procRow(p.pid);
+  if (now === "gone") return true;
+  if (now === null || !sameMember(now, p)) return false;
+  signal(-p.pid, sig);
+  return true;
+}
+
+/** @typedef {{ left: number, unattributed: number, reason: string | null }} StopResult */
+
+/**
+ * Empties the process groups of the brokers a round's companion started from this snapshot, and says whether any may
+ * still run. A broker is this snapshot's when broker.json names it or the process table shows it running this
+ * snapshot's broker script (anchored), and either way only while it leads its own group (the companion starts it
+ * detached). Order: `broker/shutdown` over its socket, SIGTERM to the broker, then SIGKILL to its whole group (the
+ * `codex app-server` child and whatever that started). A leader that already died leaves members that are signalled
+ * one by one after a re-read. Nothing is signalled when the table or the registry cannot be read whole, and nothing
+ * after `deadline` (performance.now() ms): those return `left` ≥ 1, so the caller keeps the snapshot. Never throws.
+ * @param {string} root the snapshot root, before its cleanup
+ * @param {{ deadline?: number }} [opts]
+ * @returns {Promise<StopResult>}
+ */
+export async function stopCompanionBroker(root, opts = {}) {
+  const deadline = opts.deadline ?? Infinity;
+  const remaining = () => deadline - performance.now();
+  /** @type {StopResult} */
+  const res = { left: 0, unattributed: 0, reason: null };
+  const keep = (/** @type {string} */ reason) => {
+    res.left = Math.max(res.left, 1);
+    if (res.reason === null) res.reason = reason;
+  };
   try {
-    for (const s of brokerSessions(root)) {
-      if (s.socket) await requestShutdown(s.socket, 2000);
-      if (!(await exitedWithin(s.pid, 1000))) {
-        const who = brokerIdentity(s.pid, root);
-        if (who === "ours") {
-          try {
-            process.kill(s.pid, "SIGTERM");
-          } catch {
-            // Exited in between.
-          }
-          if (!(await exitedWithin(s.pid, 2000))) left++;
-        } else if (who === "unknown") left++;
-      }
-      removeSessionDir(s.sessionDir);
+    const uid = process.getuid?.();
+    const roots = rootsOf(root);
+    const snapshotSec = snapshotSecond(root);
+    const reg = brokerRegistry(root);
+    const marker = readCompanionMarker(root);
+    const table = readProcs();
+    if (table === null) {
+      keep("ps_unavailable");
+      return res;
     }
+    if (!reg.ok || marker.state === "bad") {
+      keep("registry_unreadable");
+      return res;
+    }
+    /** @type {Map<number, Proc>} */
+    const leaders = new Map();
+    for (const s of reg.sessions) {
+      const row = table.find((p) => p.pid === s.pid);
+      if (row) {
+        if (row.uid === uid && brokerArgv(row.args, roots)) leaders.set(row.pid, row);
+      } else if (isAlive(s.pid)) keep("unknown_rows");
+    }
+    for (const p of table) if (p.uid === uid && brokerArgv(p.args, roots)) leaders.set(p.pid, p);
+    const groups = new Set([...reg.sessions.map((s) => s.pid), ...leaders.keys()]);
+
+    for (const b of leaders.values()) {
+      if (b.pgid !== b.pid) {
+        keep("unknown_rows");
+        continue;
+      }
+      const session = reg.sessions.find((s) => s.pid === b.pid);
+      if (session?.socket) await requestShutdown(session.socket, Math.min(2000, remaining()));
+      if (await exitedWithin(b.pid, Math.min(1000, remaining()))) continue;
+      if (remaining() <= 0) {
+        keep("deadline");
+        continue;
+      }
+      const now = procRow(b.pid);
+      if (now === null) keep("unknown_rows");
+      else if (now !== "gone" && sameMember(now, b)) {
+        signal(b.pid, "SIGTERM");
+        await exitedWithin(b.pid, Math.min(2000, remaining()));
+      }
+    }
+    if (res.left > 0) return res;
+
+    // Second pass, on a fresh table: SIGKILL whatever of each tree is still running.
+    const again = readProcs();
+    if (again === null) {
+      keep("ps_unavailable");
+      return res;
+    }
+    let killed = false;
+    for (const pgid of groups) {
+      if (remaining() <= 0) {
+        keep("deadline");
+        return res;
+      }
+      const leaderNow = again.find((p) => p.pid === pgid);
+      const leaderThen = leaders.get(pgid);
+      if (leaderNow) {
+        // A live process holding this pid is either the same broker (its whole group is killed), or another process
+        // that took the pid, which means this tree is gone: the pid of a live group's id is never reissued.
+        if (leaderThen && sameMember(leaderNow, leaderThen)) {
+          if (!signalGroupIfSame(leaderThen, "SIGKILL")) keep("unknown_rows");
+          killed = true;
+        }
+        continue;
+      }
+      const t = treeMembers(again, pgid, snapshotSec, uid);
+      if (t.unknown.length) keep("unknown_rows");
+      for (const m of t.members) {
+        const now = procRow(m.pid);
+        if (now === null) keep("unknown_rows");
+        else if (now !== "gone" && sameMember(now, m)) {
+          signal(m.pid, "SIGKILL");
+          killed = true;
+        }
+      }
+    }
+    // A tree that could not be verified is reported as such, not counted again below.
+    if (res.left > 0) return res;
+    if (killed) await sleep(Math.min(1000, remaining()));
+
+    const last = readProcs();
+    if (last === null) {
+      keep("ps_unavailable");
+      return res;
+    }
+    for (const pgid of groups) {
+      const leaderNow = last.find((p) => p.pid === pgid);
+      const leaderThen = leaders.get(pgid);
+      if (leaderNow) {
+        if (leaderThen && sameMember(leaderNow, leaderThen)) res.left++;
+        continue;
+      }
+      const t = treeMembers(last, pgid, snapshotSec, uid);
+      if (t.members.length || t.unknown.length) res.left++;
+      res.unattributed += t.unattributed.length;
+    }
+    res.unattributed += leaderlessAppServers(last, snapshotSec, marker, groups);
+    if (res.left > 0) res.reason ??= "members_left";
+    else if (res.unattributed > 0) res.reason ??= "unattributed";
+    if (res.left === 0) for (const s of reg.sessions) removeSessionDir(s.sessionDir);
   } catch {
-    left++;
+    keep("unknown_rows");
   } finally {
     reapers.get(root)?.();
     reapers.delete(root);
   }
-  return left;
+  return res;
 }
 
-/** The signal-path twin of stopCompanionBroker: synchronous, SIGTERM only, same pid checks. @param {string} root */
+/** The signal-path twin of stopCompanionBroker: synchronous, SIGTERM only, same identity checks. @param {string} root */
 function reapCompanionBroker(root) {
-  for (const s of brokerSessions(root)) {
-    if (isAlive(s.pid) && brokerIdentity(s.pid, root) === "ours") {
-      try {
-        process.kill(s.pid, "SIGTERM");
-      } catch {
-        // Exited in between.
-      }
-    }
+  const roots = rootsOf(root);
+  for (const s of brokerRegistry(root).sessions) {
+    const now = procRow(s.pid);
+    if (now !== null && now !== "gone" && now.uid === process.getuid?.() && brokerArgv(now.args, roots)) signal(s.pid, "SIGTERM");
   }
+}
+
+/**
+ * Stops a dead round's companion before its brokers: a round killed without its finally leaves the companion (its own
+ * process group) running from the snapshot, where it could start another broker. Found by companion.json's pid and by
+ * the table, and only while its args run this snapshot's companion script and it leads its group. Returns false when
+ * it could not be confirmed gone.
+ * @param {string} root @param {Proc[]} table @param {() => number} remaining
+ */
+async function stopSnapshotCompanion(root, table, remaining) {
+  const uid = process.getuid?.();
+  const roots = rootsOf(root);
+  const marker = readCompanionMarker(root);
+  if (marker.state === "bad") return false;
+  const found = table.filter((p) => p.uid === uid && brokerArgv(p.args, roots, COMPANION_SCRIPT));
+  if (marker.state === "ok") {
+    const row = table.find((p) => p.pid === marker.pid);
+    if (row && row.uid === uid && brokerArgv(row.args, roots, COMPANION_SCRIPT) && !found.includes(row)) found.push(row);
+  }
+  if (found.length === 0) return true;
+  if (found.some((c) => c.pgid !== c.pid)) return false;
+  for (const c of found) if (!signalGroupIfSame(c, "SIGTERM")) return false;
+  for (const c of found) await exitedWithin(c.pid, Math.min(2000, remaining()));
+  for (const c of found) if (isAlive(c.pid) && !signalGroupIfSame(c, "SIGKILL")) return false;
+  for (const c of found) await exitedWithin(c.pid, Math.min(1000, remaining()));
+  return found.every((c) => !isAlive(c.pid));
 }
 
 const OWNER_FILE = "owner.json";
 const OWNER_MAX_BYTES = 4096;
-/** Snapshots acted on (stopped and removed, or found still running) per sweep. */
-export const SWEEP_MAX = 16;
-/** `ws/plugin-*` entries looked at per sweep; each costs an lstat and at most one 4 KiB read. */
-const SWEEP_SCAN_MAX = 256;
+/** Snapshot names per partition: about this many are examined per sweep, however many there are. */
+export const SWEEP_PART = 16;
+/** `ws/` entries counted per sweep; past this the state is an anomaly, reported and not walked. */
+export const SWEEP_LIST_MAX = 65_536;
+/** A round's sweep stops acting once this much time has passed (the first act always runs). */
+export const SWEEP_DEADLINE_MS = 10_000;
+/** The manual `sweep` subcommand's budget. */
+export const SWEEP_MANUAL_DEADLINE_MS = 300_000;
 /** A snapshot with no owner file (the legacy engine's, or one mid-creation) is only a candidate after this long. */
 export const LEGACY_SNAPSHOT_AGE_MS = 24 * 60 * 60_000;
 
 /**
- * `ps` in the C locale and UTC, bounded; null when it could not answer. lstart is printed in local time: without the TZ
- * pin, an owner.json written under one TZ reads as another start time under another, and a live round looks dead.
+ * `ps` in the C locale and UTC, bounded: its stdout and the pid it ran as, or null when it could not answer. lstart is
+ * printed in local time: without the TZ pin, an owner.json written under one TZ reads as another start time under
+ * another, and a live round looks dead.
  * @param {string[]} args
+ * @returns {{ out: string, pid: number } | null}
  */
 function ps(args) {
-  const r = spawnSync("ps", args, { encoding: "utf8", timeout: 2000, maxBuffer: 16 * MiB, env: { ...process.env, LC_ALL: "C", TZ: "UTC" } });
-  return r.error || r.signal || r.status !== 0 ? null : r.stdout;
+  const r = spawnSync("ps", args, { encoding: "utf8", timeout: 2000, maxBuffer: 16 * MiB, env: psEnv() });
+  return r.error || r.signal || r.status !== 0 ? null : { out: r.stdout, pid: r.pid };
 }
+
+/** Every `ps` here runs in the C locale and UTC (see ps). */
+const psEnv = () => ({ ...process.env, LC_ALL: "C", TZ: "UTC" });
 
 /** @param {string} s */
 const squash = (s) => s.trim().replace(/\s+/g, " ");
 
 /** A process's start time as `ps -o lstart=` prints it: with the pid, a reuse-safe identity. @param {number} pid */
 function startTimeOf(pid) {
-  const out = ps(["-o", "lstart=", "-p", String(pid)]);
-  return out && squash(out) ? squash(out) : null;
+  const r = ps(["-o", "lstart=", "-p", String(pid)]);
+  return r && squash(r.out) ? squash(r.out) : null;
 }
 
-/** Every process's start time, and every process's args, each read at most once per sweep. */
+/** The process table, read at most once per sweep and shared by every check in it. */
 function processTable() {
-  /** @type {Map<number, string> | null | undefined} */
-  let starts;
-  /** @type {string[] | null | undefined} */
-  let args;
+  /** @type {Proc[] | null | undefined} */
+  let procs;
   return {
+    procs() {
+      if (procs === undefined) procs = readProcs();
+      return procs;
+    },
     starts() {
-      if (starts === undefined) {
-        const out = ps(["-A", "-o", "pid=,lstart="]);
-        starts = out === null ? null : new Map(out.split("\n").map((l) => /^\s*(\d+)\s+(.+)$/.exec(l)).filter((m) => m !== null).map((m) => [Number(m[1]), squash(m[2])]));
-      }
-      return starts;
+      const p = this.procs();
+      return p === null ? null : new Map(p.map((r) => [r.pid, r.lstart]));
     },
     args() {
-      if (args === undefined) {
-        const out = ps(["-ww", "-A", "-o", "args="]);
-        args = out === null ? null : out.split("\n");
-      }
-      return args;
+      const p = this.procs();
+      return p === null ? null : p.map((r) => r.args);
     }
   };
 }
 
 /**
- * Whose snapshot this is: "none" (no owner file), "alive", "dead" (the pid is gone, or now another process), or
- * "unknown" (a linked, unreadable or malformed owner file, or ps could not answer).
+ * Whose snapshot this is: "none" (no owner file, or one too damaged to name anyone in a snapshot older than
+ * LEGACY_SNAPSHOT_AGE_MS: both go by the legacy rule), "alive", "dead" (the pid is gone, or now another process), or
+ * "unknown" (a linked or unreadable owner file, a fresh damaged one, or ps could not answer).
  * @param {string} root @param {ReturnType<typeof processTable>} table
  * @returns {"none" | "alive" | "dead" | "unknown"}
  */
@@ -581,13 +928,14 @@ function ownerState(root, table) {
   } catch (e) {
     return /** @type {NodeJS.ErrnoException} */ (e).code === "ENOENT" ? "none" : "unknown";
   }
+  const damaged = () => (Date.now() - fs.lstatSync(root).mtimeMs >= LEGACY_SNAPSHOT_AGE_MS ? "none" : "unknown");
   let v;
   try {
     v = JSON.parse(safeReadFile(file, OWNER_MAX_BYTES, { symlink: "state_symlink_rejected" }, { within: root }).toString("utf8"));
-  } catch {
-    return "unknown";
+  } catch (e) {
+    return e instanceof SyntaxError ? damaged() : "unknown";
   }
-  if (!isObject(v) || !Number.isInteger(v.pid) || /** @type {number} */ (v.pid) <= 1) return "unknown";
+  if (!isObject(v) || !Number.isInteger(v.pid) || /** @type {number} */ (v.pid) <= 1) return damaged();
   const pid = /** @type {number} */ (v.pid);
   if (!isAlive(pid)) return "dead";
   if (typeof v.started !== "string") return "unknown";
@@ -606,60 +954,194 @@ function ownerState(root, table) {
 function referenced(root, table) {
   const lines = table.args();
   if (lines === null) return null;
-  let real = root;
-  try {
-    real = fs.realpathSync(root);
-  } catch {
-    // Matched as given.
-  }
-  return lines.some((l) => l.includes(root) || l.includes(real));
+  return lines.some((l) => rootsOf(root).some((r) => l.includes(r)));
+}
+
+/** The first 4 bytes of sha256(name), unsigned: a snapshot's fixed place in every partitioning. @param {string} name */
+export function hashOf(name) {
+  return crypto.createHash("sha256").update(name).digest().readUInt32BE(0);
 }
 
 /**
+ * How many partitions `n` snapshots are split into: the smallest power of two that leaves about `part` per partition
+ * (at most 4096). Powers of two nest, which is what makes coverage survive a changing `n`: see isHeld.
+ * @param {number} n @param {number} [part]
+ */
+export function partitionCount(n, part = SWEEP_PART) {
+  let p = 1;
+  while (p * part < n && p < 4096) p *= 2;
+  return p;
+}
+
+/**
+ * Whether the snapshot with this hash is examined at `tick` when there are `p` partitions. For P ≤ 2^K throughout any
+ * 2^K consecutive ticks, the one tick t ≡ hash (mod 2^K) also satisfies t ≡ hash (mod P), so every snapshot is reached
+ * within 2^K ticks however `n` (and with it P) changes in between.
+ * @param {number} hash @param {number} tick @param {number} p
+ */
+export const isHeld = (hash, tick, p) => hash % p === ((tick % p) + p) % p;
+
+/** The minute, or the test seam's fixed value. */
+function sweepTick() {
+  const seam = process.env.REVIEW_LOOP_TEST_SEAMS === "1" ? Number(process.env.REVIEW_LOOP_TEST_SWEEP_TICK) : NaN;
+  return Number.isInteger(seam) ? seam : Math.floor(Date.now() / 60_000);
+}
+
+function sweepPart() {
+  const seam = process.env.REVIEW_LOOP_TEST_SEAMS === "1" ? Number(process.env.REVIEW_LOOP_TEST_SWEEP_PART) : NaN;
+  return Number.isInteger(seam) && seam > 0 ? seam : SWEEP_PART;
+}
+
+/**
+ * Streams `parentDir`'s `plugin-*` names without buffering the directory: `onName` sees each one. Stops early (and
+ * says so) past SWEEP_LIST_MAX entries or the deadline.
+ * @param {string} parentDir @param {(name: string) => void} onName @param {() => number} remaining
+ * @returns {"done" | "absent" | "failed" | "too_large" | "deadline"}
+ */
+function walkSnapshots(parentDir, onName, remaining) {
+  let dir;
+  try {
+    dir = fs.opendirSync(parentDir);
+  } catch (e) {
+    return /** @type {NodeJS.ErrnoException} */ (e).code === "ENOENT" ? "absent" : "failed";
+  }
+  try {
+    let seen = 0;
+    for (let ent = dir.readSync(); ent !== null; ent = dir.readSync()) {
+      if (++seen > SWEEP_LIST_MAX) return "too_large";
+      if (seen % 256 === 0 && remaining() <= 0) return "deadline";
+      if (ent.name.startsWith("plugin-")) onName(ent.name);
+    }
+    return "done";
+  } catch {
+    return "failed";
+  } finally {
+    dir.closeSync();
+  }
+}
+
+/**
+ * @typedef {{ swept: number, brokersLeft: number, unattributed: number, failed: number, incomplete: boolean,
+ *   held: number, partition: number, partitions: number, counted: number,
+ *   stops: Array<{ snapshot: string, reason: string, left: number, unattributed: number }> }} SweepResult
+ */
+
+/**
  * Round-start sweep of the `ws/plugin-*` snapshots a killed round left behind (a SIGKILL runs no finally and no
- * reaper): their companion data (Codex job files), `cxc-*` session dir and, possibly, a live detached broker.
+ * reaper): their companion, companion data (Codex job files), `cxc-*` session dir and broker trees.
  * A snapshot is swept only when its owner round is provably gone, or, with no owner file, when it is older than
  * LEGACY_SNAPSHOT_AGE_MS and no live process's args name it. Alive or unknown → left alone. Links are never followed:
- * the entry itself must be a real directory this user owns. Its broker is stopped by stopCompanionBroker (pid from
- * its own broker.json, args matching that snapshot); a snapshot whose broker may still run is kept for a later sweep.
- * At most SWEEP_MAX snapshots are acted on per call. Never throws.
+ * the entry itself must be a real directory this user owns. One partition of the names is examined per sweep (see
+ * isHeld); `opts.all` examines every partition against one frozen count, re-counting until two counts agree (at most
+ * three cycles). Acting stops at the deadline (the first act always runs). Never throws.
  * @param {string} parentDir the private ws dir
- * @returns {Promise<{ swept: number, brokersLeft: number, failed: number }>}
+ * @param {{ all?: boolean, deadlineMs?: number }} [opts]
+ * @returns {Promise<SweepResult>}
  */
-export async function sweepStaleSnapshots(parentDir) {
-  const res = { swept: 0, brokersLeft: 0, failed: 0 };
-  let names;
-  try {
-    names = fs.readdirSync(parentDir).filter((n) => n.startsWith("plugin-")).slice(0, SWEEP_SCAN_MAX);
-  } catch {
-    return res;
-  }
+export async function sweepStaleSnapshots(parentDir, opts = {}) {
+  const deadline = performance.now() + (opts.deadlineMs ?? SWEEP_DEADLINE_MS);
+  const remaining = () => deadline - performance.now();
+  const tick = sweepTick();
+  const part = sweepPart();
+  /** @type {SweepResult} */
+  const res = { swept: 0, brokersLeft: 0, unattributed: 0, failed: 0, incomplete: false, held: 0, partition: 0, partitions: 1, counted: 0, stops: [] };
   const table = processTable();
   let acted = 0;
-  for (const name of names) {
-    if (acted >= SWEEP_MAX) break;
-    const root = path.join(parentDir, name);
-    try {
-      if (!ownedRealDirectory(root)) continue;
-      const owner = ownerState(root, table);
-      if (owner === "none") {
-        if (Date.now() - fs.lstatSync(root).mtimeMs < LEGACY_SNAPSHOT_AGE_MS || referenced(root, table) !== false) continue;
-      } else if (owner !== "dead") continue;
-      acted++;
-      const left = await stopCompanionBroker(root);
-      if (left > 0) {
-        res.brokersLeft += left;
-        continue;
-      }
-      // Re-checked just before the remove: still a real directory of ours, never a link swapped in.
-      if (!ownedRealDirectory(root)) continue;
-      fs.rmSync(root, { recursive: true, force: true });
-      res.swept++;
-    } catch {
+  const count = () => {
+    let n = 0;
+    const w = walkSnapshots(parentDir, () => n++, remaining);
+    return { n, w };
+  };
+  let { n, w } = count();
+  for (let cycle = 0; ; cycle++) {
+    if (w === "absent") return res;
+    if (w !== "done") {
       res.failed++;
+      res.incomplete = true;
+      return res;
     }
+    res.counted = n;
+    const p = partitionCount(n, part);
+    res.partitions = p;
+    const residues = opts.all ? [...Array(p).keys()] : [((tick % p) + p) % p];
+    for (const k of residues) {
+      res.partition = k;
+      /** @type {string[]} */
+      const held = [];
+      // A partition holding more than 4 × part names stops collecting (uniform hashing makes it vanishingly rare).
+      let over = false;
+      const hw = walkSnapshots(parentDir, (name) => {
+        if (!isHeld(hashOf(name), k, p)) return;
+        if (held.length >= 4 * part) over = true;
+        else held.push(name);
+      }, remaining);
+      res.held += held.length;
+      // A held snapshot judged without the process table was not examined at all.
+      if (held.length > 0 && table.procs() === null) {
+        res.failed++;
+        res.incomplete = true;
+        return res;
+      }
+      if (hw !== "done" && hw !== "absent") {
+        res.failed++;
+        res.incomplete = true;
+        return res;
+      }
+      if (over) res.incomplete = true;
+      held.sort((a, b) => hashOf(a) - hashOf(b) || (a < b ? -1 : 1));
+      const start = held.length ? ((tick % held.length) + held.length) % held.length : 0;
+      for (const name of [...held.slice(start), ...held.slice(0, start)]) {
+        if (acted > 0 && remaining() <= 0) {
+          res.incomplete = true;
+          break;
+        }
+        const r = await sweepOne(path.join(parentDir, name), name, table, remaining);
+        if (r === "skip") continue;
+        acted++;
+        if (r === "failed") res.failed++;
+        else if (r === "swept") res.swept++;
+        else {
+          res.brokersLeft += r.left;
+          res.unattributed += r.unattributed;
+          res.stops.push({ snapshot: name, reason: r.reason ?? "members_left", left: r.left, unattributed: r.unattributed });
+        }
+      }
+    }
+    if (!opts.all) return res;
+    const again = count();
+    if (again.w === w && again.n === n) return res;
+    if (cycle >= 2) {
+      res.incomplete = true;
+      return res;
+    }
+    ({ n, w } = again);
   }
-  return res;
+}
+
+/**
+ * One snapshot: left alone ("skip"), removed ("swept"), kept with what is still running, or "failed".
+ * @param {string} root @param {string} name @param {ReturnType<typeof processTable>} table @param {() => number} remaining
+ * @returns {Promise<"skip" | "swept" | "failed" | StopResult>}
+ */
+async function sweepOne(root, name, table, remaining) {
+  try {
+    if (!ownedRealDirectory(root)) return "skip";
+    const owner = ownerState(root, table);
+    if (owner === "none") {
+      if (Date.now() - fs.lstatSync(root).mtimeMs < LEGACY_SNAPSHOT_AGE_MS || referenced(root, table) !== false) return "skip";
+    } else if (owner !== "dead") return "skip";
+    const procs = table.procs();
+    if (procs === null) return { left: 1, unattributed: 0, reason: "ps_unavailable" };
+    if (!(await stopSnapshotCompanion(root, procs, remaining))) return { left: 1, unattributed: 0, reason: "unknown_rows" };
+    const stop = await stopCompanionBroker(root, { deadline: performance.now() + Math.max(0, remaining()) });
+    if (stop.left > 0 || stop.unattributed > 0) return stop;
+    // Re-checked just before the remove: still a real directory of ours, never a link swapped in.
+    if (!ownedRealDirectory(root)) return "skip";
+    fs.rmSync(root, { recursive: true, force: true });
+    return "swept";
+  } catch {
+    return "failed";
+  }
 }
 
 /** @param {string} p */
@@ -669,5 +1151,89 @@ function ownedRealDirectory(p) {
     return st.isDirectory() && st.uid === process.getuid?.();
   } catch {
     return false;
+  }
+}
+
+/** @typedef {{ kind: "missing_snapshot", pid: number, pgid: number, snapshot: string, started: number, argsSha: string }} Orphan */
+
+/**
+ * Read-only, for doctor: brokers this user runs from a `ws/plugin-*` snapshot that is gone (nothing can attribute
+ * them now, so nothing signals them automatically), and snapshots a sweep would still act on (`kept`: an owner that is
+ * dead, whose brokers the next sweep stops). One table read; never signals. `verified` is false when the table or
+ * `ws/` could not be read.
+ * @param {string} parentDir the private ws dir
+ * @returns {{ count: number, kept: number, verified: boolean, orphans: Orphan[] }}
+ */
+export function countOrphanBrokers(parentDir) {
+  /** @type {{ count: number, kept: number, verified: boolean, orphans: Orphan[] }} */
+  const res = { count: 0, kept: 0, verified: false, orphans: [] };
+  const table = processTable();
+  const procs = table.procs();
+  if (procs === null) return res;
+  const uid = process.getuid?.();
+  const re = new RegExp(`^\\S*/node (?:${rootsOf(parentDir).map(escapeRe).join("|")})/(plugin-[A-Za-z0-9]{6})/${escapeRe(BROKER_SCRIPT)} serve(?: |$)`);
+  for (const p of procs) {
+    const m = p.uid === uid ? re.exec(p.args) : null;
+    if (!m) continue;
+    try {
+      fs.lstatSync(path.join(parentDir, m[1]));
+      continue;
+    } catch (e) {
+      if (/** @type {NodeJS.ErrnoException} */ (e).code !== "ENOENT") return res;
+    }
+    res.orphans.push({ kind: "missing_snapshot", pid: p.pid, pgid: p.pgid, snapshot: m[1], started: p.started, argsSha: sha256hex(p.args) });
+  }
+  const w = walkSnapshots(parentDir, (name) => {
+    const root = path.join(parentDir, name);
+    if (ownedRealDirectory(root) && ownerState(root, table) === "dead") res.kept++;
+  }, () => Infinity);
+  if (w !== "done" && w !== "absent") return res;
+  res.count = res.orphans.length;
+  res.verified = true;
+  return res;
+}
+
+/**
+ * The operator's `stop-orphan`: ends one broker tree whose snapshot is gone, re-reading the leader right before each
+ * signal and acting only while it is still the very process doctor listed (pid, start second, args hash), still leads
+ * its group, still runs `<parentDir>/<snapshot>`'s broker script, and that snapshot is still missing.
+ * @param {string} parentDir @param {{ snapshot: string, pid: number, started: number, argsSha: string }} o
+ * @returns {Promise<"stopped" | "mismatch" | "still_running" | "unverified">}
+ */
+export async function stopOrphan(parentDir, o) {
+  const check = () => {
+    const now = procRow(o.pid);
+    if (now === null) return "unverified";
+    if (now === "gone") return "gone";
+    try {
+      fs.lstatSync(path.join(parentDir, o.snapshot));
+      return "mismatch";
+    } catch (e) {
+      if (/** @type {NodeJS.ErrnoException} */ (e).code !== "ENOENT") return "unverified";
+    }
+    const ok = now.uid === process.getuid?.() && now.pgid === now.pid && now.started === o.started && sha256hex(now.args) === o.argsSha && brokerArgv(now.args, rootsOf(parentDir).map((r) => path.join(r, o.snapshot))) !== null;
+    return ok ? now : "mismatch";
+  };
+  const first = check();
+  if (first === "gone") return "mismatch";
+  if (typeof first === "string") return first;
+  signal(-first.pid, "SIGTERM");
+  if (await exitedWithin(first.pid, 5000)) return groupEmpty(first.pid) ? "stopped" : "still_running";
+  const second = check();
+  if (second === "gone") return groupEmpty(first.pid) ? "stopped" : "still_running";
+  if (typeof second === "string") return second;
+  signal(-second.pid, "SIGKILL");
+  await exitedWithin(second.pid, 2000);
+  await sleep(200);
+  return groupEmpty(second.pid) ? "stopped" : "still_running";
+}
+
+/** @param {number} pgid */
+function groupEmpty(pgid) {
+  try {
+    process.kill(-pgid, 0);
+    return false;
+  } catch (e) {
+    return /** @type {NodeJS.ErrnoException} */ (e).code === "ESRCH";
   }
 }

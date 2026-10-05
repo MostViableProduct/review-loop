@@ -12,15 +12,27 @@ import { spawn, spawnSync } from "node:child_process";
 import { makeRepo, commitFile, writeFile, tmpDir, GIT_ENV } from "./helpers.mjs";
 import { isRealPid, signalPid } from "../fakes/signal.mjs";
 import { validateLine } from "../../plugin/engine/lib/events.mjs";
+import {
+  afterSnapshotSecond, brokerArgv, hashOf, isHeld, parseProcRow, partitionCount, sameMember, stopCompanionBroker, sweepStaleSnapshots, treeMembers
+} from "../../plugin/engine/lib/pin.mjs";
 
 const HERE = path.dirname(new URL(import.meta.url).pathname);
 const ROUND = path.join(HERE, "..", "..", "plugin", "engine", "review-round.mjs");
 const REAL_BASE = path.join(HERE, "..", "fixtures", "fake-codex-plugin");
 
-const BROKER = `import fs from "node:fs"; import net from "node:net";
+// FAKE_BROKER_CHILD=1 gives the broker a `codex app-server` child in its group, as the real one has (its args read
+// exactly `<dir>/codex app-server`: a link to node named codex, running ./app-server); =2 also gives it a grandchild. FAKE_BROKER_TERM_LEAVES_CHILD: on SIGTERM
+// the broker exits without closing its child.
+const BROKER = `import fs from "node:fs"; import net from "node:net"; import { spawn } from "node:child_process";
 const sock = process.argv[process.argv.indexOf("--endpoint") + 1].slice("unix:".length);
 const conns = new Set();
-const stop = () => { clearTimeout(life); server.close(); for (const c of conns) c.destroy(); };
+const kids = [];
+if (process.env.FAKE_BROKER_CHILD) {
+  const c = spawn(process.env.FAKE_CODEX_BIN, ["app-server"], { cwd: process.env.FAKE_CODEX_CWD, stdio: "ignore" });
+  fs.appendFileSync(process.env.BROKER_KIDS, JSON.stringify({ pid: c.pid }) + "\\n");
+  kids.push(c);
+}
+const stop = () => { clearTimeout(life); server.close(); for (const c of conns) c.destroy(); for (const k of kids) k.kill(); };
 // A lifetime cap, so a broker the test failed to reap still dies on its own.
 const life = setTimeout(stop, 120_000);
 const server = net.createServer((c) => {
@@ -32,7 +44,11 @@ const server = net.createServer((c) => {
     c.end(JSON.stringify({ id: 1, result: {} }) + "\\n", stop);
   });
 });
-process.on("SIGTERM", () => { fs.appendFileSync(process.env.BROKER_LOG, "sigterm\\n"); if (process.env.FAKE_BROKER_IGNORE_SIGTERM !== "1") stop(); });
+process.on("SIGTERM", () => {
+  fs.appendFileSync(process.env.BROKER_LOG, "sigterm\\n");
+  if (process.env.FAKE_BROKER_TERM_LEAVES_CHILD === "1") process.exit(0);
+  if (process.env.FAKE_BROKER_IGNORE_SIGTERM !== "1") stop();
+});
 server.listen(sock);
 `;
 
@@ -45,12 +61,21 @@ if (args[0] === "help") { console.log("Usage:\\n  ${usage}"); } else {
   fs.writeFileSync(path.join(state, "jobs", "review-1.json"), JSON.stringify({ output: "CODEX REVIEW TEXT" }));
   const sessionDir = fs.mkdtempSync(path.join(os.tmpdir(), "cxc-"));
   const sock = path.join(sessionDir, "broker.sock");
-  const child = spawn(process.execPath, [path.join(import.meta.dirname, "app-server-broker.mjs"), "serve", "--endpoint", "unix:" + sock, "--cwd", process.cwd()], { detached: true, stdio: "ignore" });
+  if (process.env.COMPANION_START) fs.writeFileSync(process.env.COMPANION_START, JSON.stringify({ now: Date.now(), birth: fs.statSync(path.dirname(import.meta.dirname)).birthtimeMs }));
+  const child = spawn(process.execPath, [path.join(import.meta.dirname, "app-server-broker.mjs"), "serve", "--endpoint", "unix:" + sock, "--cwd", process.cwd()], { detached: process.env.FAKE_BROKER_NOT_DETACHED !== "1", stdio: "ignore" });
   child.unref();
   fs.appendFileSync(process.env.BROKER_PIDS, JSON.stringify({ pid: child.pid, sessionDir }) + "\\n");
   const end = Date.now() + 10_000;
   while (!fs.existsSync(sock) && Date.now() < end) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
-  fs.writeFileSync(path.join(state, "broker.json"), JSON.stringify({ endpoint: "unix:" + sock, pidFile: path.join(sessionDir, "broker.pid"), logFile: path.join(sessionDir, "broker.log"), sessionDir, pid: child.pid }, null, 2));
+  let named = child.pid;
+  if (process.env.LOOKALIKE_PID) {
+    // Its args contain this snapshot's broker script and serve, but it is not \`<node> <script> serve\`.
+    const l = spawn(process.execPath, ["-e", "setTimeout(() => {}, 60000)", path.join(import.meta.dirname, "app-server-broker.mjs"), "serve"], { detached: true, stdio: "ignore" });
+    l.unref();
+    fs.writeFileSync(process.env.LOOKALIKE_PID, String(l.pid));
+    named = l.pid;
+  }
+  if (process.env.FAKE_NO_BROKER_JSON !== "1") fs.writeFileSync(path.join(state, "broker.json"), JSON.stringify({ endpoint: "unix:" + sock, pidFile: path.join(sessionDir, "broker.pid"), logFile: path.join(sessionDir, "broker.log"), sessionDir, pid: named }, null, 2));
   if (process.env.COMPANION_PID) fs.writeFileSync(process.env.COMPANION_PID, String(process.pid));
   fs.writeFileSync(process.env.BROKER_READY, "1");
   if (process.env.STUB_SLEEP_MS) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Number(process.env.STUB_SLEEP_MS));
@@ -59,6 +84,15 @@ if (args[0] === "help") { console.log("Usage:\\n  ${usage}"); } else {
 }
 `;
 }
+
+// The fake `codex app-server`: node (through a link named codex) runs this file from its cwd.
+const APP_SERVER = `import fs from "node:fs"; import { spawn } from "node:child_process";
+if (process.env.FAKE_BROKER_CHILD === "2") {
+  const g = spawn("/bin/sleep", ["300"], { stdio: "ignore" });
+  fs.appendFileSync(process.env.BROKER_KIDS, JSON.stringify({ pid: g.pid, grand: true }) + "\\n");
+}
+setTimeout(() => process.exit(0), 120_000);
+`;
 
 function stubPlugin() {
   const base = tmpDir("rl-broker-plugin-");
@@ -116,8 +150,15 @@ beforeEach(() => {
     CLAUDE_SESSION_ID: "broker-session",
     BROKER_PIDS: path.join(dir, "brokers.jsonl"),
     BROKER_LOG: path.join(dir, "broker.log"),
-    BROKER_READY: path.join(dir, "ready")
+    BROKER_READY: path.join(dir, "ready"),
+    BROKER_KIDS: path.join(dir, "kids.jsonl"),
+    FAKE_CODEX_BIN: path.join(dir, "bin", "codex"),
+    FAKE_CODEX_CWD: path.join(dir, "app-server-cwd")
   };
+  fs.mkdirSync(path.join(dir, "bin"));
+  fs.symlinkSync(process.execPath, env.FAKE_CODEX_BIN);
+  fs.mkdirSync(env.FAKE_CODEX_CWD);
+  fs.writeFileSync(path.join(env.FAKE_CODEX_CWD, "app-server"), APP_SERVER);
   const r = spawnSync(process.execPath, [ROUND, "repin"], { env, encoding: "utf8" });
   assert.equal(r.status, 0, r.stdout + r.stderr);
 });
@@ -128,7 +169,14 @@ afterEach(() => {
     if (alive(b.pid)) signalPid(b.pid, "SIGKILL");
     fs.rmSync(b.sessionDir, { recursive: true, force: true });
   }
+  for (const k of kids()) if (alive(k.pid)) signalPid(k.pid, "SIGKILL");
+  for (const pid of reapAfter.splice(0)) if (alive(pid)) signalPid(pid, "SIGKILL", { group: true });
 });
+
+/** The fake broker's children and grandchildren, as each recorded itself. @returns {Array<{ pid: number, grand?: boolean }>} */
+const kids = () => (fs.existsSync(env.BROKER_KIDS) ? fs.readFileSync(env.BROKER_KIDS, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l)) : []);
+/** Other process groups a test started, reaped after it. @type {number[]} */
+const reapAfter = [];
 
 function specRepo() {
   const repo = makeRepo();
@@ -184,7 +232,7 @@ test("H1: a companion timeout still stops the broker", async () => {
 function brokerStopEvents() {
   const f = path.join(env.REVIEW_LOOP_STATE_DIR, "events.jsonl");
   const lines = fs.existsSync(f) ? fs.readFileSync(f, "utf8").split("\n").filter(Boolean) : [];
-  const out = lines.filter((l) => l.includes('"broker_stop_failed"'));
+  const out = lines.filter((l) => l.includes('"broker_stop_failed"') && l.includes('"hook.error"'));
   const pids = brokers().map((b) => String(b.pid));
   for (const l of out) {
     assert.deepEqual(validateLine(JSON.parse(l)), [], "a schema-v1 line");
@@ -196,24 +244,48 @@ function brokerStopEvents() {
   return out;
 }
 
-test("R1: a broker is never signalled when ps cannot say whose it is; the possible leak is logged as broker_stop_failed", async () => {
-  const bin = path.join(dir, "failing-ps");
-  fs.mkdirSync(bin);
-  fs.writeFileSync(path.join(bin, "ps"), "#!/bin/sh\necho 'ps: unavailable' >&2\nexit 2\n", { mode: 0o755 });
-  const r = round({ FAKE_BROKER_IGNORE_SHUTDOWN: "1", PATH: `${bin}:${env.PATH}` });
+/** The round.broker_stop details, each schema v1 and content-free (a bounded reason, counts, the snapshot's name). */
+function stopDetails() {
+  const f = path.join(env.REVIEW_LOOP_STATE_DIR, "events.jsonl");
+  const lines = fs.existsSync(f) ? fs.readFileSync(f, "utf8").split("\n").filter((l) => l.includes('"round.broker_stop"')) : [];
+  for (const l of lines) {
+    assert.deepEqual(validateLine(JSON.parse(l)), [], "a schema-v1 line");
+    for (const bad of [dir, fs.realpathSync(os.tmpdir()), "cxc-", "/Users/", "/private/"]) assert.ok(!l.includes(bad), `no path in the event (${bad})`);
+  }
+  return lines.map((l) => JSON.parse(l));
+}
+
+/** A `ps` on PATH whose whole-table reads (-A) fail and whose one-process reads work: the table cannot be read. */
+function tablePsFails() {
+  const bin = path.join(dir, "table-ps-fails");
+  fs.mkdirSync(bin, { recursive: true });
+  fs.writeFileSync(path.join(bin, "ps"), '#!/bin/sh\nfor a in "$@"; do [ "$a" = "-A" ] && { echo "ps: unavailable" >&2; exit 2; }; done\nexec /bin/ps "$@"\n', { mode: 0o755 });
+  return bin;
+}
+
+test("A: when the process table cannot be read, nothing is signalled and the snapshot is kept; the next round clears it", { timeout: 60_000 }, async () => {
+  const r = round({ FAKE_BROKER_IGNORE_SHUTDOWN: "1", PATH: `${tablePsFails()}:${env.PATH}` });
   assert.equal(r.code, 0, JSON.stringify(r.json));
   const [b] = brokers();
-  assert.ok(alive(b.pid), "an unverified broker is left running (afterEach reaps it)");
-  assert.deepEqual(brokerLog(), [], "no SIGTERM on an unknown ps read");
+  assert.ok(alive(b.pid), "an unverified broker is left running");
+  assert.deepEqual(brokerLog(), [], "no shutdown, no signal on an unread table");
   assert.equal(brokerStopEvents().length, 1);
+  assert.deepEqual(stopDetails().map((e) => [e.code, e.data.reason, e.data.left, e.data.unattributed]), [["broker_stop_failed", "ps_unavailable", 1, 0]]);
+  assert.equal(snapshots().length, 1, "the snapshot is kept: it is the only evidence tying the broker to the round");
+  assert.equal(round().code, 0, "a later round, with ps working");
+  assert.ok(await until(() => !alive(b.pid), 5000), "the dead round's broker is stopped by the sweep");
+  assert.deepEqual(snapshots(), [], "and its snapshot removed");
 });
 
-test("R1: a broker that survives broker/shutdown and SIGTERM is logged as broker_stop_failed, content-free", async () => {
-  const r = round({ FAKE_BROKER_IGNORE_SHUTDOWN: "1", FAKE_BROKER_IGNORE_SIGTERM: "1" });
+test("B: a broker that ignores broker/shutdown and SIGTERM is SIGKILLed with its whole group, its codex app-server too", { timeout: 60_000 }, async () => {
+  const r = round({ FAKE_BROKER_IGNORE_SHUTDOWN: "1", FAKE_BROKER_IGNORE_SIGTERM: "1", FAKE_BROKER_CHILD: "1" });
   assert.equal(r.code, 0, JSON.stringify(r.json));
-  assert.deepEqual(brokerLog(), ["sigterm"], "the verified broker was sent SIGTERM");
-  assert.ok(alive(brokers()[0].pid), "it ignored it (afterEach reaps it)");
-  assert.equal(brokerStopEvents().length, 1);
+  assert.deepEqual(brokerLog(), ["sigterm"], "the verified broker was sent SIGTERM first");
+  const [k] = kids();
+  assert.ok(k, "the broker started its codex app-server");
+  assert.ok(await until(() => !alive(k.pid), 5000), "the child died with its group");
+  await assertCleanedUp("ignored SIGTERM");
+  assert.deepEqual(brokerStopEvents(), [], "nothing left, nothing to report");
 });
 
 test("H1: SIGTERM mid-round reaps the broker from the signal path", { timeout: 60_000 }, async () => {
@@ -283,12 +355,15 @@ function sweepEvents() {
   }
   return lines.map((l) => JSON.parse(l));
 }
+/** A round.sweep's code and outcome counts (its partition fields vary with the minute). @param {{ code: string, data: Record<string, number> }} e */
+const outcome = (e) => [e.code, { swept: e.data.swept, brokers_left: e.data.brokers_left, failed: e.data.failed, unattributed: e.data.unattributed, incomplete: e.data.incomplete }];
+const OK0 = { swept: 0, brokers_left: 0, failed: 0, unattributed: 0, incomplete: 0 };
 
 /**
  * A round SIGKILLed mid-review (no finally, no reaper): its snapshot, its broker and the broker's cxc-* dir are left
  * behind. The orphaned companion (its own process group, asleep for 60 s) is killed here, while it is known to be ours.
  */
-async function killedRound(extra = {}) {
+async function killedRound(extra = {}, opts = { keepCompanion: false }) {
   const companionPid = path.join(dir, `companion-${Date.now()}.pid`);
   const child = spawn(process.execPath, [ROUND, "run", "--kind", "spec", "--path", specRepo()], { env: { ...env, ...extra, STUB_SLEEP_MS: "60000", COMPANION_PID: companionPid }, stdio: "ignore" });
   const exited = new Promise((r) => child.once("exit", r));
@@ -297,14 +372,18 @@ async function killedRound(extra = {}) {
   } finally {
     child.kill("SIGKILL");
     await exited;
-    if (fs.existsSync(companionPid)) signalPid(Number(fs.readFileSync(companionPid, "utf8")), "SIGKILL", { group: true });
+    if (fs.existsSync(companionPid)) {
+      const pid = Number(fs.readFileSync(companionPid, "utf8"));
+      if (opts.keepCompanion) reapAfter.push(pid);
+      else signalPid(pid, "SIGKILL", { group: true });
+    }
   }
   fs.rmSync(env.BROKER_READY);
   const [name, ...more] = snapshots();
   assert.equal(more.length, 0, "one snapshot left behind");
   const broker = brokers().at(-1);
   assert.ok(broker && alive(broker.pid), "its broker is left running");
-  return { root: path.join(ws(), name), broker, owner: /** @type {number} */ (child.pid) };
+  return { root: path.join(ws(), name), broker, owner: /** @type {number} */ (child.pid), companion: fs.existsSync(companionPid) ? Number(fs.readFileSync(companionPid, "utf8")) : 0 };
 }
 
 test("R2: a SIGKILLed round's snapshot, broker and cxc-* dir are swept by the next round once the owner is gone", { timeout: 90_000 }, async () => {
@@ -320,16 +399,18 @@ test("R2: a SIGKILLed round's snapshot, broker and cxc-* dir are swept by the ne
   assert.equal(brokerLog().filter((l) => l === "shutdown").length, 2, "both brokers were asked to shut down, neither signalled");
   assert.ok(!fs.existsSync(left.broker.sessionDir), "its cxc-* session dir is removed");
   assert.deepEqual(snapshots(), [], "its snapshot (and the job files in it) is removed");
-  assert.deepEqual(sweepEvents().map((e) => [e.code, e.data]), [["ok", { swept: 1, brokers_left: 0, failed: 0 }]]);
+  assert.deepEqual(sweepEvents().map(outcome), [["ok", { ...OK0, swept: 1 }]]);
 });
 
 test("R2: a dead round's broker that will not stop keeps its snapshot for a later sweep, logged snapshot_sweep_incomplete", { timeout: 90_000 }, async () => {
   const left = await killedRound({ FAKE_BROKER_IGNORE_SHUTDOWN: "1", FAKE_BROKER_IGNORE_SIGTERM: "1" });
-  assert.equal(round().code, 0);
+  // Through the seam, SIGKILL is not sent, so the broker outlives the whole stop.
+  assert.equal(round({ REVIEW_LOOP_TEST_SEAMS: "1", REVIEW_LOOP_TEST_KILL_NOOP: "1" }).code, 0);
   assert.ok(alive(left.broker.pid), "it ignored broker/shutdown and SIGTERM (afterEach reaps it)");
   assert.ok(brokerLog().includes("sigterm"), "the verified broker was sent SIGTERM");
   assert.deepEqual(snapshots(), [path.basename(left.root)], "its broker.json is kept, so the next sweep retries");
-  assert.deepEqual(sweepEvents().map((e) => [e.code, e.data]), [["snapshot_sweep_incomplete", { swept: 0, brokers_left: 1, failed: 0 }]]);
+  assert.deepEqual(sweepEvents().map(outcome), [["snapshot_sweep_incomplete", { ...OK0, brokers_left: 1 }]]);
+  assert.deepEqual(stopDetails().map((e) => [e.data.reason, e.data.left, e.data.snapshot]), [["members_left", 1, path.basename(left.root)]]);
 });
 
 test("R2: a snapshot whose owner is alive is never touched; a reused owner pid (another start time) counts as gone", { timeout: 90_000 }, async () => {
@@ -340,7 +421,7 @@ test("R2: a snapshot whose owner is alive is never touched; a reused owner pid (
   assert.ok(alive(left.broker.pid), "a live owner's broker is left running (afterEach reaps it)");
   assert.ok(fs.existsSync(left.broker.sessionDir));
   assert.deepEqual(snapshots(), [path.basename(left.root)]);
-  assert.deepEqual(sweepEvents(), [], "nothing swept, nothing logged");
+  assert.deepEqual(sweepEvents().map(outcome), [["ok", OK0]], "nothing swept");
   fs.writeFileSync(ownerFile, JSON.stringify({ pid: process.pid, started: "Thu Jan 1 00:00:00 1970" }));
   assert.equal(round().code, 0);
   assert.ok(await until(() => !alive(left.broker.pid), 5000), "a pid now held by another process is not the owner");
@@ -357,7 +438,7 @@ test("R2: a symlinked ws/plugin-* entry is never followed: the linked snapshot a
   assert.ok(alive(left.broker.pid));
   assert.ok(fs.lstatSync(left.root).isSymbolicLink(), "the link is left");
   assert.ok(fs.existsSync(path.join(moved, "owner.json")), "and so is what it points at");
-  assert.deepEqual(sweepEvents(), []);
+  assert.deepEqual(sweepEvents().map(outcome), [["ok", OK0]], "nothing swept");
 });
 
 test("R2: when ps cannot answer, a live-owner snapshot and an old legacy snapshot are both left alone", { timeout: 90_000 }, async () => {
@@ -367,13 +448,10 @@ test("R2: when ps cannot answer, a live-owner snapshot and an old legacy snapsho
   fs.mkdirSync(legacy, { mode: 0o700 });
   const old = new Date(Date.now() - 25 * 60 * 60_000);
   fs.utimesSync(legacy, old, old);
-  const bin = path.join(dir, "failing-ps");
-  fs.mkdirSync(bin);
-  fs.writeFileSync(path.join(bin, "ps"), "#!/bin/sh\nexit 2\n", { mode: 0o755 });
-  assert.equal(round({ PATH: `${bin}:${env.PATH}` }).code, 0);
+  assert.equal(round({ PATH: `${tablePsFails()}:${env.PATH}` }).code, 0);
   assert.ok(alive(left.broker.pid));
-  assert.deepEqual(snapshots(), [path.basename(left.root), "plugin-legacy-old"].sort());
-  assert.deepEqual(sweepEvents(), []);
+  for (const kept of [path.basename(left.root), "plugin-legacy-old"]) assert.ok(snapshots().includes(kept), `${kept} is left alone`);
+  assert.deepEqual(sweepEvents().map((e) => [e.code, e.data.swept, e.data.incomplete]), [["snapshot_sweep_incomplete", 0, 1]], "nothing swept, and the sweep says it could not verify");
 });
 
 test("R2: a legacy snapshot (no owner file) is swept only when older than 24 h and named by no live process", { timeout: 90_000 }, async () => {
@@ -388,7 +466,7 @@ test("R2: a legacy snapshot (no owner file) is swept only when older than 24 h a
   assert.equal(round().code, 0);
   assert.ok(alive(left.broker.pid), "a legacy snapshot a live broker's args name is left, broker and all");
   assert.deepEqual(snapshots(), [path.basename(left.root), "plugin-legacy-fresh"].sort(), "only the old, unreferenced one is swept");
-  assert.deepEqual(sweepEvents().map((e) => [e.code, e.data]), [["ok", { swept: 1, brokers_left: 0, failed: 0 }]]);
+  assert.deepEqual(sweepEvents().map(outcome), [["ok", { ...OK0, swept: 1 }]]);
 });
 
 test("S1: a live owner whose owner.json was written under another TZ is untouched by sweeps under any TZ", { timeout: 90_000 }, async () => {
@@ -408,9 +486,349 @@ test("S1: a live owner whose owner.json was written under another TZ is untouche
       assert.equal(r.status, 0, r.stdout + r.stderr);
       assert.ok(fs.existsSync(path.join(root, "owner.json")), `untouched with TZ=${runEnv.TZ ?? "(unset)"}`);
     }
-    assert.deepEqual(sweepEvents(), [], "nothing swept, nothing logged");
+    assert.ok(sweepEvents().every((e) => e.code === "ok" && e.data.swept === 0), "nothing swept");
   } finally {
     owner.kill("SIGKILL");
   }
 });
 
+
+/** @param {Record<string, string>} extra @param {string} [spec] a spec path to review (default: a new repo's) */
+function startRound(extra = {}, spec = specRepo()) {
+  const child = spawn(process.execPath, [ROUND, "run", "--kind", "spec", "--path", spec], { env: { ...env, ...extra }, stdio: ["ignore", "pipe", "pipe"] });
+  let stdout = "";
+  child.stdout.on("data", (d) => { stdout += d; });
+  const done = new Promise((r) => child.once("close", (code) => r({ code, json: stdout ? JSON.parse(stdout) : null })));
+  return { child, done: /** @type {Promise<{ code: number | null, json: { [k: string]: unknown } | null }>} */ (done) };
+}
+
+test("B: a broker killed mid-round leaves its child and grandchild; the round's finally kills both before removing the snapshot", { timeout: 60_000 }, async () => {
+  const r = startRound({ STUB_SLEEP_MS: "4000", FAKE_BROKER_CHILD: "2" });
+  assert.ok(await until(() => fs.existsSync(env.BROKER_READY) && kids().length === 2, 20_000), "broker, child and grandchild started");
+  signalPid(brokers()[0].pid, "SIGKILL");
+  const res = await r.done;
+  assert.equal(res.code, 0, JSON.stringify(res.json));
+  for (const k of kids()) assert.ok(await until(() => !alive(k.pid), 5000), `${k.grand ? "grandchild" : "child"} ${k.pid} was stopped`);
+  assert.deepEqual(snapshots(), [], "removed only once the tree is empty");
+  assert.deepEqual(brokerStopEvents(), []);
+});
+
+test("B: a broker that exits on SIGTERM without closing its child still leaves nothing running", { timeout: 60_000 }, async () => {
+  const r = round({ FAKE_BROKER_IGNORE_SHUTDOWN: "1", FAKE_BROKER_TERM_LEAVES_CHILD: "1", FAKE_BROKER_CHILD: "1" });
+  assert.equal(r.code, 0, JSON.stringify(r.json));
+  const [k] = kids();
+  assert.ok(await until(() => !alive(k.pid), 5000), "the child it left behind was killed");
+  await assertCleanedUp("term leaves child");
+});
+
+test("B: a broker that died before writing broker.json leaves a codex app-server that is never signalled; the snapshot is kept until it is gone", { timeout: 90_000 }, async () => {
+  const r = startRound({ STUB_SLEEP_MS: "4000", FAKE_BROKER_CHILD: "1", FAKE_NO_BROKER_JSON: "1" });
+  assert.ok(await until(() => fs.existsSync(env.BROKER_READY) && kids().length === 1, 20_000));
+  signalPid(brokers()[0].pid, "SIGKILL");
+  const res = await r.done;
+  assert.equal(res.code, 0, JSON.stringify(res.json));
+  const [k] = kids();
+  assert.ok(alive(k.pid), "nothing ties it to this snapshot for sure, so it is not signalled");
+  assert.equal(snapshots().length, 1, "and the snapshot is kept");
+  assert.deepEqual(stopDetails().map((e) => [e.data.reason, e.data.left, e.data.unattributed]), [["unattributed", 0, 1]]);
+  const marker = JSON.parse(fs.readFileSync(path.join(ws(), snapshots()[0], "companion.json"), "utf8"));
+  assert.ok(marker.pid < brokers()[0].pid && brokers()[0].pid < marker.after, `the companion's pid window holds the broker: ${JSON.stringify(marker)}`);
+  signalPid(k.pid, "SIGKILL");
+  assert.ok(await until(() => !alive(k.pid), 5000));
+  assert.equal(round().code, 0);
+  assert.deepEqual(snapshots(), [], "the next sweep removes it once the process is gone");
+});
+
+test("B: a live broker with no broker.json is found in the process table and stopped", { timeout: 60_000 }, async () => {
+  const r = round({ FAKE_NO_BROKER_JSON: "1", FAKE_BROKER_CHILD: "1" });
+  assert.equal(r.code, 0, JSON.stringify(r.json));
+  assert.deepEqual(brokerLog(), ["sigterm"], "no socket was known, so SIGTERM");
+  assert.ok(await until(() => !alive(kids()[0].pid), 5000));
+  const [b] = brokers();
+  assert.ok(await until(() => !alive(b.pid), 5000));
+  assert.deepEqual(snapshots(), []);
+});
+
+test("B: a broker.json pid whose args merely contain the broker path is never signalled", { timeout: 60_000 }, async () => {
+  const lookalike = path.join(dir, "lookalike.pid");
+  const r = round({ LOOKALIKE_PID: lookalike });
+  assert.equal(r.code, 0, JSON.stringify(r.json));
+  const pid = Number(fs.readFileSync(lookalike, "utf8"));
+  reapAfter.push(pid);
+  assert.ok(alive(pid), "`node -e … <root>/scripts/app-server-broker.mjs serve` is not the broker");
+  assert.ok(await until(() => !alive(brokers()[0].pid), 5000), "the real broker, found in the table, was stopped");
+  assert.deepEqual(snapshots(), []);
+});
+
+test("B: a broker that does not lead its own group is never signalled; the snapshot is kept and reported", { timeout: 60_000 }, async () => {
+  const r = round({ FAKE_BROKER_NOT_DETACHED: "1", FAKE_BROKER_IGNORE_SHUTDOWN: "1" });
+  assert.equal(r.code, 0, JSON.stringify(r.json));
+  assert.ok(alive(brokers()[0].pid));
+  assert.deepEqual(brokerLog(), []);
+  assert.equal(snapshots().length, 1);
+  assert.deepEqual(stopDetails().map((e) => e.data.reason), ["unknown_rows"]);
+});
+
+test("B: the companion starts strictly after the snapshot's creation second", { timeout: 90_000 }, async () => {
+  for (let i = 0; i < 3; i++) {
+    const start = path.join(dir, `start-${i}.json`);
+    assert.equal(round({ COMPANION_START: start, REVIEW_LOOP_TEST_SEAMS: "1", REVIEW_LOOP_TEST_SNAPSHOT_AT_SECOND_START: "1" }).code, 0);
+    const s = JSON.parse(fs.readFileSync(start, "utf8"));
+    assert.ok(Math.floor(s.now / 1000) > Math.floor(s.birth / 1000), `round ${i}: ${s.now} vs ${s.birth}`);
+  }
+});
+
+test("C: a round that returns early (already passed) still sweeps first", { timeout: 90_000 }, async () => {
+  const spec = specRepo();
+  assert.equal(spawnSync(process.execPath, [ROUND, "run", "--kind", "spec", "--path", spec], { env, encoding: "utf8" }).status, 0);
+  const left = await killedRound();
+  const before = brokers().length;
+  const r = spawnSync(process.execPath, [ROUND, "run", "--kind", "spec", "--path", spec], { env, encoding: "utf8" });
+  assert.equal(r.status, 0, r.stdout);
+  assert.equal(JSON.parse(r.stdout).status, "passed");
+  assert.equal(brokers().length, before, "no companion ran");
+  assert.ok(await until(() => !alive(left.broker.pid), 5000), "the dead round's broker was stopped");
+  assert.deepEqual(snapshots(), []);
+});
+
+test("B2: a killed round's companion still running is stopped before its broker, then the snapshot removed", { timeout: 90_000 }, async () => {
+  const left = await killedRound({}, { keepCompanion: true });
+  assert.ok(alive(left.companion), "the companion outlived its round");
+  assert.equal(round().code, 0);
+  assert.ok(await until(() => !alive(left.companion) && !alive(left.broker.pid), 5000));
+  assert.deepEqual(snapshots(), []);
+});
+
+test("D: `sweep` clears a dead round's snapshot and prints the documented result", { timeout: 90_000 }, async () => {
+  await killedRound();
+  const r = spawnSync(process.execPath, [ROUND, "sweep"], { env, encoding: "utf8" });
+  assert.equal(r.status, 0, r.stdout + r.stderr);
+  const o = JSON.parse(r.stdout);
+  assert.deepEqual(Object.keys(o), ["exit", "status", "swept", "brokers_left", "unattributed", "failed", "incomplete", "orphans_detected"]);
+  assert.deepEqual(o, { exit: 0, status: "clean", swept: 1, brokers_left: 0, unattributed: 0, failed: 0, incomplete: false, orphans_detected: 0 });
+  assert.deepEqual(snapshots(), []);
+});
+
+test("D: `sweep` exits 60 when a broker will not stop, and when ws/ cannot be listed", { timeout: 90_000 }, async () => {
+  const left = await killedRound({ FAKE_BROKER_IGNORE_SHUTDOWN: "1", FAKE_BROKER_IGNORE_SIGTERM: "1" });
+  const r = spawnSync(process.execPath, [ROUND, "sweep"], { env: { ...env, REVIEW_LOOP_TEST_SEAMS: "1", REVIEW_LOOP_TEST_KILL_NOOP: "1" }, encoding: "utf8" });
+  assert.equal(r.status, 60, r.stdout);
+  assert.deepEqual([JSON.parse(r.stdout).status, JSON.parse(r.stdout).brokers_left], ["incomplete", 1]);
+  signalPid(left.broker.pid, "SIGKILL");
+  fs.chmodSync(ws(), 0o000);
+  try {
+    const r2 = spawnSync(process.execPath, [ROUND, "sweep"], { env, encoding: "utf8" });
+    assert.equal(r2.status, 60, r2.stdout);
+    assert.deepEqual([JSON.parse(r2.stdout).status, JSON.parse(r2.stdout).failed > 0], ["incomplete", true]);
+  } finally {
+    fs.chmodSync(ws(), 0o700);
+  }
+});
+
+test("C: a lost round.broker_stop line is said on stderr, never silent", { timeout: 60_000 }, async () => {
+  fs.mkdirSync(env.REVIEW_LOOP_STATE_DIR, { recursive: true, mode: 0o700 });
+  const events = path.join(env.REVIEW_LOOP_STATE_DIR, "events.jsonl");
+  fs.writeFileSync(events, "", { mode: 0o400 });
+  try {
+    const r = spawnSync(process.execPath, [ROUND, "run", "--kind", "spec", "--path", specRepo()], { env: { ...env, PATH: `${tablePsFails()}:${env.PATH}` }, encoding: "utf8" });
+    assert.equal(r.status, 0, r.stdout);
+    assert.match(r.stderr, /review-loop: event_write_failed \{"event":"round\.broker_stop","code":"broker_stop_failed"/);
+  } finally {
+    fs.chmodSync(events, 0o600);
+  }
+});
+
+test("units: brokerArgv matches only `<…/node> <root>/scripts/app-server-broker.mjs serve`", () => {
+  const root = "/s/ws/plugin-AbC123";
+  const script = `${root}/scripts/app-server-broker.mjs`;
+  assert.equal(brokerArgv(`/opt/bin/node ${script} serve --endpoint unix:/t/x.sock`, [root]), root);
+  assert.equal(brokerArgv(`/opt/bin/node ${script} serve`, ["/other", root]), root);
+  for (const args of [
+    `/opt/bin/node -e x ${script} serve`, `/bin/sh ${script} serve`, `/opt/bin/node ${script}`, `/opt/bin/node ${script} serves`,
+    `/opt/bin/node /s/ws/plugin-XyZ789/scripts/app-server-broker.mjs serve`, `/opt/bin/node ${script}.bak serve`
+  ]) assert.equal(brokerArgv(args, [root]), null, args);
+});
+
+test("units: parseProcRow reads ps's C-locale UTC row and refuses anything else", () => {
+  const row = parseProcRow("  501 4242     1  4240 Mon Oct  5 09:04:01 2026     /x/codex app-server");
+  assert.deepEqual(row, { uid: 501, pid: 4242, ppid: 1, pgid: 4240, lstart: "Mon Oct 5 09:04:01 2026", started: Date.UTC(2026, 9, 5, 9, 4, 1) / 1000, args: "/x/codex app-server" });
+  for (const bad of ["", "UID PID", "501 x 1 2 Mon Oct  5 09:04:01 2026 a", "501 1 1 2 Mon Oct 99 09:04:01 2026 a", "501 1 1 2 lun. oct. 5 a"]) assert.equal(parseProcRow(bad), null, bad);
+});
+
+test("units: treeMembers keeps the group's later starts whatever their parent, sets same-second ones apart", () => {
+  const p = (/** @type {number} */ pid, /** @type {number} */ pgid, /** @type {number} */ started, ppid = 1, uid = 501) => ({ uid, pid, ppid, pgid, lstart: String(started), started, args: "a" });
+  const rows = [p(11, 10, 101), p(12, 10, 102, 11), p(13, 10, 100), p(14, 10, 99), p(15, 20, 105), p(16, 10, 103, 1, 0), p(17, 10, Number.NaN)];
+  const t = treeMembers(rows, 10, 100, 501);
+  assert.deepEqual(t.members.map((r) => r.pid), [11, 12], "later starts, the grandchild (parent 11) included");
+  assert.deepEqual(t.unattributed.map((r) => r.pid), [13], "the snapshot's own second is ambiguous");
+  assert.deepEqual(t.unknown.map((r) => r.pid), [17]);
+});
+
+test("units: sameMember differs on any of pid, start, group or args", () => {
+  const a = { uid: 1, pid: 5, ppid: 1, pgid: 5, lstart: "x", started: 1, args: "a" };
+  assert.ok(sameMember(a, { ...a, ppid: 9 }));
+  for (const d of [{ pid: 6 }, { lstart: "y" }, { pgid: 6 }, { args: "b" }]) assert.ok(!sameMember(a, { ...a, ...d }), JSON.stringify(d));
+});
+
+test("units: partitionCount is a power of two leaving about `part` names per partition", () => {
+  assert.deepEqual([0, 1, 16, 17, 33, 100, 65_536].map((n) => partitionCount(n)), [1, 1, 1, 2, 4, 8, 4096]);
+  for (let n = 0; n <= 70_000; n += 7) {
+    const p = partitionCount(n);
+    assert.equal(p & (p - 1), 0, `n=${n}: ${p}`);
+  }
+});
+
+test("units: isHeld reaches every snapshot within 2^K ticks however the count changes in between", () => {
+  let seed = 7;
+  const rnd = () => (seed = (seed * 1103515245 + 12345) % 2 ** 31) / 2 ** 31;
+  const hashes = Array.from({ length: 1000 }, (_, i) => hashOf(`plugin-${i}`));
+  for (let seq = 0; seq < 200; seq++) {
+    const t0 = Math.floor(rnd() * 100_000);
+    const ps = Array.from({ length: 64 }, () => partitionCount(Math.floor(rnd() * 1025)));
+    for (const h of hashes) assert.ok(ps.some((p, i) => isHeld(h, t0 + i, p)), `hash ${h} unreached from tick ${t0}`);
+  }
+  for (const p of [1, 4, 64]) for (const h of hashes.slice(0, 50)) assert.equal(Array.from({ length: p }, (_, i) => isHeld(h, i, p)).filter(Boolean).length, 1);
+});
+
+/**
+ * A dead round's snapshot made by hand in `parent`: owner.json naming an exited pid and, unless `broker` is false, the
+ * fake broker started from it strictly after the snapshot's second (detached, in broker.json).
+ * @param {string} parent @param {{ broker?: boolean, env?: Record<string, string> }} [o]
+ */
+async function deadSnapshot(parent, o = {}) {
+  const root = fs.mkdtempSync(path.join(parent, "plugin-"));
+  fs.mkdirSync(path.join(root, "scripts"));
+  fs.writeFileSync(path.join(root, "scripts", "app-server-broker.mjs"), BROKER);
+  const gone = spawnSync(process.execPath, ["-e", ""]).pid;
+  fs.writeFileSync(path.join(root, "owner.json"), JSON.stringify({ pid: gone, started: "Thu Jan 1 00:00:00 1970" }));
+  if (o.broker === false) return { root, pid: 0 };
+  await afterSnapshotSecond(root);
+  const sessionDir = fs.mkdtempSync(path.join(os.tmpdir(), "cxc-"));
+  const sock = path.join(sessionDir, "broker.sock");
+  const b = spawn(process.execPath, [path.join(root, "scripts", "app-server-broker.mjs"), "serve", "--endpoint", `unix:${sock}`], { detached: true, stdio: "ignore", env: { ...env, ...o.env } });
+  b.unref();
+  const pid = /** @type {number} */ (b.pid);
+  fs.appendFileSync(env.BROKER_PIDS, JSON.stringify({ pid, sessionDir }) + "\n");
+  assert.ok(await until(() => fs.existsSync(sock), 5000));
+  const state = path.join(root, "data", "state", "r-fake");
+  fs.mkdirSync(state, { recursive: true });
+  fs.writeFileSync(path.join(state, "broker.json"), JSON.stringify({ endpoint: `unix:${sock}`, sessionDir, pid }));
+  return { root, pid };
+}
+
+/** Runs `fn` with the engine's test seams set in this process. @param {Record<string, string>} seams @param {() => Promise<unknown>} fn */
+async function withSeams(seams, fn) {
+  const saved = { ...process.env };
+  Object.assign(process.env, { REVIEW_LOOP_TEST_SEAMS: "1", ...seams });
+  try {
+    return await fn();
+  } finally {
+    for (const k of Object.keys(process.env)) if (!(k in saved)) delete process.env[k];
+    Object.assign(process.env, saved);
+  }
+}
+
+test("C: one partition per sweep, and every dead snapshot is reached within 2^K ticks while the directory changes", { timeout: 60_000 }, async () => {
+  const parent = path.join(dir, "ws-part");
+  fs.mkdirSync(parent, { mode: 0o700 });
+  for (let i = 0; i < 40; i++) await deadSnapshot(parent, { broker: false });
+  const live = () => {
+    const root = fs.mkdtempSync(path.join(parent, "plugin-"));
+    fs.writeFileSync(path.join(root, "owner.json"), JSON.stringify({ pid: process.pid, started: startTime(process.pid) }));
+    return root;
+  };
+  /** @type {string[]} */
+  const lives = [];
+  const dead = () => fs.readdirSync(parent).filter((n) => !lives.includes(path.join(parent, n)));
+  for (let t = 0; t < 64 && dead().length > 0; t++) {
+    // Churn: the count moves between ticks, and with it the partition count (8 to 32 at 4 per partition).
+    if (t % 3 === 0) for (let i = 0; i < 20; i++) lives.push(live());
+    else if (t % 3 === 1) for (const r of lives.splice(0, 15)) fs.rmSync(r, { recursive: true });
+    const before = dead();
+    const res = await withSeams({ REVIEW_LOOP_TEST_SWEEP_PART: "4", REVIEW_LOOP_TEST_SWEEP_TICK: String(t) }, () => sweepStaleSnapshots(parent));
+    assert.ok(res.held <= 16, `tick ${t}: held ${res.held}`);
+    assert.equal(res.partition, t % res.partitions);
+    const gone = before.filter((n) => !fs.existsSync(path.join(parent, n)));
+    assert.ok(gone.every((n) => isHeld(hashOf(n), t, res.partitions)), `tick ${t}: only its partition was swept`);
+  }
+  assert.deepEqual(dead(), [], "every dead snapshot was reached within 64 ticks (P never exceeded 64)");
+});
+
+test("C: a sweep stops acting at its deadline; the first act always runs", { timeout: 60_000 }, async () => {
+  const parent = path.join(dir, "ws-deadline");
+  fs.mkdirSync(parent, { mode: 0o700 });
+  const stuck = { FAKE_BROKER_IGNORE_SHUTDOWN: "1", FAKE_BROKER_IGNORE_SIGTERM: "1" };
+  const made = [await deadSnapshot(parent, { env: stuck }), await deadSnapshot(parent, { env: stuck }), await deadSnapshot(parent, { env: stuck })];
+  const t0 = performance.now();
+  const res = await withSeams({ REVIEW_LOOP_TEST_KILL_NOOP: "1", REVIEW_LOOP_TEST_SWEEP_TICK: "0" }, () => sweepStaleSnapshots(parent, { deadlineMs: 1000 }));
+  const took = performance.now() - t0;
+  assert.ok(took < 4500, `bounded by the deadline plus one stop's reads: ${Math.round(took)} ms`);
+  assert.equal(res.incomplete, true);
+  assert.ok(res.stops.length >= 1, "the first act ran");
+  for (const m of made) assert.ok(fs.existsSync(m.root), "an unstopped snapshot is kept");
+});
+
+test("B: a leader whose re-check differs is not signalled, and the stop is unknown", { timeout: 60_000 }, async () => {
+  const parent = path.join(dir, "ws-recheck");
+  fs.mkdirSync(parent, { mode: 0o700 });
+  const s = await deadSnapshot(parent, { env: { FAKE_BROKER_IGNORE_SHUTDOWN: "1", FAKE_BROKER_IGNORE_SIGTERM: "1" } });
+  const r = await withSeams({ REVIEW_LOOP_TEST_LEADER_RECHECK: "changed" }, () => stopCompanionBroker(s.root));
+  assert.deepEqual([r.left, r.reason], [1, "unknown_rows"]);
+  assert.ok(alive(s.pid), "no group signal on a changed identity");
+  const r2 = await stopCompanionBroker(s.root);
+  assert.deepEqual([r2.left, r2.reason], [0, null]);
+  assert.ok(await until(() => !alive(s.pid), 3000));
+});
+
+test("B: companion.json and broker.json are read safely: a link, an oversized or extra-keyed file, or a broken registry signal nothing", { timeout: 60_000 }, async () => {
+  const parent = path.join(dir, "ws-safe");
+  fs.mkdirSync(parent, { mode: 0o700 });
+  const s = await deadSnapshot(parent);
+  const marker = path.join(s.root, "companion.json");
+  const target = path.join(dir, "elsewhere.json");
+  fs.writeFileSync(target, JSON.stringify({ pid: 2 }));
+  for (const make of [
+    () => fs.symlinkSync(target, marker),
+    () => fs.writeFileSync(marker, " ".repeat(5 * 1024 * 1024)),
+    () => fs.writeFileSync(marker, JSON.stringify({ pid: 5, other: 1 }))
+  ]) {
+    fs.rmSync(marker, { force: true });
+    make();
+    const r = await stopCompanionBroker(s.root);
+    assert.deepEqual([r.left, r.reason], [1, "registry_unreadable"]);
+    assert.ok(alive(s.pid));
+  }
+  fs.rmSync(marker, { force: true });
+  const bj = path.join(s.root, "data", "state", "r-fake", "broker.json");
+  const saved = fs.readFileSync(bj, "utf8");
+  fs.writeFileSync(bj, "{");
+  assert.deepEqual((await stopCompanionBroker(s.root)).reason, "registry_unreadable");
+  assert.ok(alive(s.pid));
+  fs.writeFileSync(bj, saved);
+  assert.equal((await stopCompanionBroker(s.root)).left, 0);
+});
+
+test("B: a ps that exits 0 without a real table (empty, header only, garbage) is never read as 'no broker'", { timeout: 90_000 }, async () => {
+  const bin = path.join(dir, "hollow-ps");
+  fs.mkdirSync(bin);
+  for (const [i, body] of ["", "  UID   PID  PPID  PGID STARTED ARGS\n", "x y z\n"].entries()) {
+    fs.writeFileSync(path.join(bin, "ps"), `#!/bin/sh\nfor a in "$@"; do [ "$a" = "-A" ] && { printf '%s' ${JSON.stringify(body)}; exit 0; }; done\nexec /bin/ps "$@"\n`, { mode: 0o755 });
+    const r = round({ PATH: `${bin}:${env.PATH}`, FAKE_BROKER_IGNORE_SHUTDOWN: "1" });
+    assert.equal(r.code, 0, JSON.stringify(r.json));
+    const b = brokers().at(-1);
+    assert.ok(b && alive(b.pid), `case ${i}: the broker was not signalled`);
+    assert.equal(stopDetails().at(-1)?.data.reason, "ps_unavailable", `case ${i}`);
+    assert.equal(snapshots().length, i + 1, `case ${i}: its snapshot is kept`);
+  }
+});
+
+test("A: a round whose start time ps cannot read starts no companion and leaves no snapshot (snapshot_owner_unknown)", { timeout: 60_000 }, async () => {
+  const bin = path.join(dir, "no-ps");
+  fs.mkdirSync(bin);
+  fs.writeFileSync(path.join(bin, "ps"), "#!/bin/sh\nexit 2\n", { mode: 0o755 });
+  const r = round({ PATH: `${bin}:${env.PATH}` });
+  assert.equal(r.code, 30, JSON.stringify(r.json));
+  assert.equal(r.json.error.code, "snapshot_owner_unknown");
+  assert.deepEqual(brokers(), [], "no companion ran");
+  assert.deepEqual(snapshots(), [], "and no snapshot is left that would never read as dead");
+});
