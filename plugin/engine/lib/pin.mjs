@@ -1064,17 +1064,26 @@ export async function sweepStaleSnapshots(parentDir, opts = {}) {
     const p = partitionCount(n, part);
     res.partitions = p;
     const residues = opts.all ? [...Array(p).keys()] : [((tick % p) + p) % p];
+    // One pass holds what every residue needs (see isHeld): one partition for a round, all of them for the manual
+    // sweep. A round's partition holding more than 4 × part names stops collecting (vanishingly rare, and loud).
+    /** @type {Map<number, string[]>} */
+    const buckets = new Map(residues.map((k) => [k, []]));
+    let over = false;
+    const hw = walkSnapshots(parentDir, (name) => {
+      const held = buckets.get(hashOf(name) % p);
+      if (!held) return;
+      if (!opts.all && held.length >= 4 * part) over = true;
+      else held.push(name);
+    }, remaining);
+    if (hw !== "done" && hw !== "absent") {
+      res.failed++;
+      res.incomplete = true;
+      return res;
+    }
+    if (over) res.incomplete = true;
     for (const k of residues) {
       res.partition = k;
-      /** @type {string[]} */
-      const held = [];
-      // A partition holding more than 4 × part names stops collecting (uniform hashing makes it vanishingly rare).
-      let over = false;
-      const hw = walkSnapshots(parentDir, (name) => {
-        if (!isHeld(hashOf(name), k, p)) return;
-        if (held.length >= 4 * part) over = true;
-        else held.push(name);
-      }, remaining);
+      const held = /** @type {string[]} */ (buckets.get(k));
       res.held += held.length;
       // A held snapshot judged without the process table was not examined at all.
       if (held.length > 0 && table.procs() === null) {
@@ -1082,12 +1091,6 @@ export async function sweepStaleSnapshots(parentDir, opts = {}) {
         res.incomplete = true;
         return res;
       }
-      if (hw !== "done" && hw !== "absent") {
-        res.failed++;
-        res.incomplete = true;
-        return res;
-      }
-      if (over) res.incomplete = true;
       held.sort((a, b) => hashOf(a) - hashOf(b) || (a < b ? -1 : 1));
       const start = held.length ? ((tick % held.length) + held.length) % held.length : 0;
       for (const name of [...held.slice(start), ...held.slice(0, start)]) {
@@ -1217,23 +1220,23 @@ export async function stopOrphan(parentDir, o) {
   const first = check();
   if (first === "gone") return "mismatch";
   if (typeof first === "string") return first;
+  // The tree as it is while its verified leader runs, so what SIGTERM leaves behind (a leader that exits without
+  // closing its children) is still known, member by member, once the leader is gone.
+  const table = readProcs();
+  if (table === null) return "unverified";
+  const tree = table.filter((p) => p.pgid === first.pid && p.uid === process.getuid?.());
   signal(-first.pid, "SIGTERM");
-  if (await exitedWithin(first.pid, 5000)) return groupEmpty(first.pid) ? "stopped" : "still_running";
-  const second = check();
-  if (second === "gone") return groupEmpty(first.pid) ? "stopped" : "still_running";
-  if (typeof second === "string") return second;
-  signal(-second.pid, "SIGKILL");
-  await exitedWithin(second.pid, 2000);
-  await sleep(200);
-  return groupEmpty(second.pid) ? "stopped" : "still_running";
-}
-
-/** @param {number} pgid */
-function groupEmpty(pgid) {
-  try {
-    process.kill(-pgid, 0);
-    return false;
-  } catch (e) {
-    return /** @type {NodeJS.ErrnoException} */ (e).code === "ESRCH";
+  await exitedWithin(first.pid, 5000);
+  for (const m of tree) {
+    const now = procRow(m.pid);
+    if (now === null) return "unverified";
+    if (now !== "gone" && sameMember(now, m)) signal(m.pid, "SIGKILL");
   }
+  await sleep(500);
+  for (const m of tree) {
+    const now = procRow(m.pid);
+    if (now === null) return "unverified";
+    if (now !== "gone" && sameMember(now, m)) return "still_running";
+  }
+  return "stopped";
 }
