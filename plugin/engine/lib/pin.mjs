@@ -569,6 +569,8 @@ function readCompanionMarker(root) {
 }
 
 const APP_SERVER_ARGS = /^(?:\S*\/)?codex app-server$/;
+/** The session dir a broker's own args name. */
+const ENDPOINT_ARG = / --endpoint unix:(\/\S+)\/broker\.sock(?: |$)/;
 
 /**
  * `codex app-server` processes whose broker died before anyone recorded it: in a group whose leader is gone, started
@@ -733,14 +735,22 @@ export async function stopCompanionBroker(root, opts = {}) {
     }
     for (const p of table) if (p.uid === uid && brokerArgv(p.args, roots)) leaders.set(p.pid, p);
     const groups = new Set([...reg.sessions.map((s) => s.pid), ...leaders.keys()]);
+    // broker.json is persisted, untrusted input: its socket and session dir are used only when they are the ones a
+    // verified broker's own args name (`--endpoint unix:<dir>/broker.sock`).
+    /** @type {Map<number, string>} */
+    const ownDirs = new Map();
+    for (const b of leaders.values()) {
+      const ep = ENDPOINT_ARG.exec(b.args);
+      if (ep) ownDirs.set(b.pid, ep[1]);
+    }
 
     for (const b of leaders.values()) {
       if (b.pgid !== b.pid) {
         keep("unknown_rows");
         continue;
       }
-      const session = reg.sessions.find((s) => s.pid === b.pid);
-      if (session?.socket) await requestShutdown(session.socket, Math.min(2000, remaining()));
+      const dir = ownDirs.get(b.pid);
+      if (dir) await requestShutdown(path.join(dir, "broker.sock"), Math.min(2000, remaining()));
       if (await exitedWithin(b.pid, Math.min(1000, remaining()))) continue;
       if (remaining() <= 0) {
         keep("deadline");
@@ -781,6 +791,10 @@ export async function stopCompanionBroker(root, opts = {}) {
       const t = treeMembers(again, pgid, snapshotSec, uid);
       if (t.unknown.length) keep("unknown_rows");
       for (const m of t.members) {
+        if (remaining() <= 0) {
+          keep("deadline");
+          return res;
+        }
         const now = procRow(m.pid);
         if (now === null) keep("unknown_rows");
         else if (now !== "gone" && sameMember(now, m)) {
@@ -812,7 +826,7 @@ export async function stopCompanionBroker(root, opts = {}) {
     res.unattributed += leaderlessAppServers(last, snapshotSec, marker, groups);
     if (res.left > 0) res.reason ??= "members_left";
     else if (res.unattributed > 0) res.reason ??= "unattributed";
-    if (res.left === 0) for (const s of reg.sessions) removeSessionDir(s.sessionDir);
+    if (res.left === 0) for (const dir of ownDirs.values()) removeSessionDir(dir);
   } catch {
     keep("unknown_rows");
   } finally {
@@ -1242,7 +1256,9 @@ export async function stopOrphan(parentDir, o) {
   if (!sameMember(now, first)) return "mismatch";
   signal(-first.pid, "SIGTERM");
   await exitedWithin(first.pid, 5000);
+  const until = performance.now() + STOP_DEADLINE_MS;
   for (const m of tree) {
+    if (performance.now() >= until) return "still_running";
     // Still an orphan's tree only while its snapshot is still gone: a restored snapshot makes it a round's again.
     try {
       fs.lstatSync(path.join(parentDir, o.snapshot));

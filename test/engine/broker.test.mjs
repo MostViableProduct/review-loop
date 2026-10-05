@@ -75,7 +75,9 @@ if (args[0] === "help") { console.log("Usage:\\n  ${usage}"); } else {
     fs.writeFileSync(process.env.LOOKALIKE_PID, String(l.pid));
     named = l.pid;
   }
-  if (process.env.FAKE_NO_BROKER_JSON !== "1") fs.writeFileSync(path.join(state, "broker.json"), JSON.stringify({ endpoint: "unix:" + sock, pidFile: path.join(sessionDir, "broker.pid"), logFile: path.join(sessionDir, "broker.log"), sessionDir, pid: named }, null, 2));
+  const decoy = process.env.FAKE_DECOY_SESSION_DIR;
+  if (decoy) fs.writeFileSync(path.join(state, "broker.json"), JSON.stringify({ endpoint: "unix:" + path.join(decoy, "broker.sock"), sessionDir: decoy, pid: named }));
+  else if (process.env.FAKE_NO_BROKER_JSON !== "1") fs.writeFileSync(path.join(state, "broker.json"), JSON.stringify({ endpoint: "unix:" + sock, pidFile: path.join(sessionDir, "broker.pid"), logFile: path.join(sessionDir, "broker.log"), sessionDir, pid: named }, null, 2));
   if (process.env.COMPANION_PID) fs.writeFileSync(process.env.COMPANION_PID, String(process.pid));
   fs.writeFileSync(process.env.BROKER_READY, "1");
   if (process.env.STUB_SLEEP_MS) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Number(process.env.STUB_SLEEP_MS));
@@ -320,12 +322,28 @@ test("H1: a broker.json pid that is not this round's broker is never signalled",
   }
 });
 
+test("H1: a broker.json naming another cxc-* dir neither redirects the shutdown nor deletes that dir", async () => {
+  const decoy = fs.mkdtempSync(path.join(os.tmpdir(), "cxc-"));
+  try {
+    fs.writeFileSync(path.join(decoy, "keep.txt"), "not the broker's");
+    const r = round({ FAKE_DECOY_SESSION_DIR: decoy });
+    assert.equal(r.code, 0, JSON.stringify(r.json));
+    await assertCleanedUp("decoy");
+    assert.ok(fs.existsSync(path.join(decoy, "keep.txt")), "a dir only broker.json names is never removed");
+    assert.deepEqual(brokerLog(), ["shutdown"], "the shutdown went to the socket the broker's own args name");
+  } finally {
+    fs.rmSync(decoy, { recursive: true, force: true });
+  }
+});
+
 /** @param {number} pid */
 function companionWritingPid(pid) {
   const base = env.REVIEW_LOOP_PLUGIN_BASE;
   const version = fs.readdirSync(base)[0];
   const script = path.join(base, version, "scripts", "codex-companion.mjs");
-  fs.writeFileSync(script, fs.readFileSync(script, "utf8").replace("sessionDir, pid: child.pid }", `sessionDir, pid: ${pid} }`));
+  const src = fs.readFileSync(script, "utf8");
+  assert.ok(src.includes("sessionDir, pid: named }"), "the fake companion still writes broker.json the way this helper rewrites it");
+  fs.writeFileSync(script, src.replace("sessionDir, pid: named }", `sessionDir, pid: ${pid} }`));
   const r = spawnSync(process.execPath, [ROUND, "repin"], { env: { ...env, REVIEW_LOOP_PIN_FILE: path.join(dir, "pin2.json") }, encoding: "utf8" });
   assert.equal(r.status, 0, r.stdout);
   env.REVIEW_LOOP_PIN_FILE = path.join(dir, "pin2.json");
@@ -545,7 +563,7 @@ test("B: a broker that died before writing broker.json leaves a codex app-server
 test("B: a live broker with no broker.json is found in the process table and stopped", { timeout: 60_000 }, async () => {
   const r = round({ FAKE_NO_BROKER_JSON: "1", FAKE_BROKER_CHILD: "1" });
   assert.equal(r.code, 0, JSON.stringify(r.json));
-  assert.deepEqual(brokerLog(), ["sigterm"], "no socket was known, so SIGTERM");
+  assert.deepEqual(brokerLog(), ["shutdown"], "its own args name its socket, so it is asked to shut down");
   assert.ok(await until(() => !alive(kids()[0].pid), 5000));
   const [b] = brokers();
   assert.ok(await until(() => !alive(b.pid), 5000));
