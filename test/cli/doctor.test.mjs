@@ -67,8 +67,8 @@ test.after(() => {
 function orphanBroker(h, o = {}) {
   const root = path.join(h, "state", "ws", "plugin-AbC123");
   fs.mkdirSync(path.join(root, "scripts"), { recursive: true, mode: 0o700 });
-  // With termLeavesChild the child ignores SIGTERM too, so only a per-member SIGKILL ends it.
-  const child = o.termLeavesChild ? 'spawn(process.execPath, ["-e", "process.on(\\"SIGTERM\\", () => {}); setInterval(() => {}, 1000)"], { stdio: "ignore" })' : 'spawn("/bin/sleep", ["300"], { stdio: "ignore" })';
+  // When the broker outlasts or dodges SIGTERM, its child ignores SIGTERM too, so only a per-member SIGKILL ends it.
+  const child = o.termLeavesChild || o.ignoreTerm ? 'spawn(process.execPath, ["-e", "process.on(\\"SIGTERM\\", () => {}); setInterval(() => {}, 1000)"], { stdio: "ignore" })' : 'spawn("/bin/sleep", ["300"], { stdio: "ignore" })';
   const src = `const { spawn } = await import("node:child_process"); ${child};${o.ignoreTerm ? ' process.on("SIGTERM", () => {});' : ""}${o.termLeavesChild ? " process.on(\"SIGTERM\", () => process.exit(0));" : ""} setTimeout(() => {}, 120_000);`;
   fs.writeFileSync(path.join(root, "scripts", "app-server-broker.mjs"), src);
   // Started through a parent that exits at once, so it is reparented to launchd like a real leftover (and reaped by
@@ -548,4 +548,25 @@ test("orphaned_brokers: stop-orphan also stops the child a broker leaves behind 
   assert.equal(ok.status, 0, ok.stdout);
   assert.equal(JSON.parse(ok.stdout).status, "stopped");
   assert.equal(spawnSync("/bin/ps", ["-o", "pid=", "-g", String(pid)], { encoding: "utf8" }).stdout.trim(), "", "the child it left is gone too");
+});
+
+test("orphaned_brokers: stop-orphan sends no SIGKILL once the snapshot is back", { timeout: 30_000 }, async () => {
+  const h = healthy();
+  const pid = orphanBroker(h, { ignoreTerm: true });
+  const r = await check("orphaned_brokers").run(ctx());
+  const cmd = /stop-orphan --snapshot (\S+) --pid (\d+) --started (\d+) --args-sha ([0-9a-f]{64})/.exec(r.fix ?? "");
+  assert.ok(cmd, r.fix ?? "");
+  const engine = path.join(process.cwd(), "plugin", "engine", "review-round.mjs");
+  const { spawn } = await import("node:child_process");
+  const child = spawn(process.execPath, [engine, "stop-orphan", "--snapshot", cmd[1], "--pid", cmd[2], "--started", cmd[3], "--args-sha", cmd[4]], { env: process.env, stdio: ["ignore", "pipe", "ignore"] });
+  let out = "";
+  child.stdout.on("data", (d) => { out += d; });
+  const code = new Promise((res) => child.once("close", res));
+  // While it waits out the broker's ignored SIGTERM, the snapshot comes back.
+  await new Promise((res) => setTimeout(res, 1500));
+  fs.mkdirSync(path.join(h, "state", "ws", cmd[1]), { recursive: true });
+  assert.equal(await code, 60, out);
+  assert.equal(JSON.parse(out).status, "mismatch");
+  assert.ok(process.kill(pid, 0), "the broker was not SIGKILLed");
+  assert.equal(spawnSync("/bin/ps", ["-o", "pid=", "-g", String(pid)], { encoding: "utf8" }).stdout.trim().split("\n").length, 2, "nor its child");
 });

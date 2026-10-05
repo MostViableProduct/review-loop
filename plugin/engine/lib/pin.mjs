@@ -1243,6 +1243,13 @@ export async function stopOrphan(parentDir, o) {
   signal(-first.pid, "SIGTERM");
   await exitedWithin(first.pid, 5000);
   for (const m of tree) {
+    // Still an orphan's tree only while its snapshot is still gone: a restored snapshot makes it a round's again.
+    try {
+      fs.lstatSync(path.join(parentDir, o.snapshot));
+      return "mismatch";
+    } catch (e) {
+      if (/** @type {NodeJS.ErrnoException} */ (e).code !== "ENOENT") return "unverified";
+    }
     const now = procRow(m.pid);
     if (now === null) return "unverified";
     if (now !== "gone" && sameMember(now, m)) signal(m.pid, "SIGKILL");
