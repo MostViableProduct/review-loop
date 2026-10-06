@@ -746,6 +746,8 @@ async function deadSnapshot(parent, o = {}) {
   const pid = /** @type {number} */ (b.pid);
   fs.appendFileSync(env.BROKER_PIDS, JSON.stringify({ pid, sessionDir }) + "\n");
   assert.ok(await until(() => fs.existsSync(sock), 5000));
+  // As the real broker does at start (--pid-file).
+  fs.writeFileSync(path.join(sessionDir, "broker.pid"), `${pid}\n`);
   const state = path.join(root, "data", "state", "r-fake");
   fs.mkdirSync(state, { recursive: true });
   fs.writeFileSync(path.join(state, "broker.json"), JSON.stringify({ endpoint: `unix:${sock}`, sessionDir, pid }));
@@ -897,12 +899,13 @@ test("B: a broker gone before its stop: its cxc-* dir goes too, but only when it
   // another broker, one a live process still names as its socket. Both are kept.
   const other = fs.mkdtempSync(path.join(os.tmpdir(), "cxc-"));
   const inUse = fs.mkdtempSync(path.join(os.tmpdir(), "cxc-"));
+  const unbound = fs.mkdtempSync(path.join(os.tmpdir(), "cxc-"));
   const user = spawn(process.execPath, ["-e", "setTimeout(() => {}, 30_000)", "--", "--endpoint", `unix:${path.join(inUse, "broker.sock")}`], { stdio: "ignore" });
   try {
     assert.ok(await until(() => spawnSync("/bin/ps", ["-ww", "-o", "args=", "-p", String(user.pid)], { encoding: "utf8" }).stdout.includes(inUse), 3000), "the in-use dir's user is running");
-    for (const [d, pidText] of [[other, "1"], [inUse, null]]) {
+    for (const [d, pidText] of [[other, "1"], [inUse, null], [unbound, "none"]]) {
       fs.writeFileSync(path.join(d, "broker.log"), "");
-      if (pidText) fs.writeFileSync(path.join(d, "broker.pid"), pidText);
+      if (pidText && pidText !== "none") fs.writeFileSync(path.join(d, "broker.pid"), pidText);
       const u = await deadSnapshot(parent);
       signalPid(u.pid, "SIGKILL");
       assert.ok(await until(() => !alive(u.pid), 3000));
@@ -910,11 +913,33 @@ test("B: a broker gone before its stop: its cxc-* dir goes too, but only when it
       fs.writeFileSync(u.registry, JSON.stringify({ endpoint: `unix:${path.join(d, "broker.sock")}`, sessionDir: d, pid: u.pid }));
       const r3 = await stopCompanionBroker(u.root);
       assert.deepEqual([r3.left, r3.unattributed], [0, 0]);
-      assert.ok(fs.existsSync(path.join(d, "broker.log")), `${pidText ? "another broker's" : "an in-use"} broker-shaped dir is kept`);
+      assert.ok(fs.existsSync(path.join(d, "broker.log")), `${{ 1: "another broker's", none: "an unbound" }[pidText ?? ""] ?? "an in-use"} broker-shaped dir is kept`);
     }
   } finally {
     user.kill("SIGKILL");
     fs.rmSync(other, { recursive: true, force: true });
     fs.rmSync(inUse, { recursive: true, force: true });
+    fs.rmSync(unbound, { recursive: true, force: true });
+  }
+});
+
+test("B: a broker.json pid alive as another process is never a group to empty, even when that process exits mid-stop", { timeout: 60_000 }, async () => {
+  const parent = path.join(dir, "ws-foreign");
+  fs.mkdirSync(parent, { mode: 0o700 });
+  const s = await deadSnapshot(parent, { env: { FAKE_BROKER_IGNORE_SHUTDOWN: "1" } });
+  // Not a broker: a detached leader with a child in its group (started after the snapshot's second), whose leader
+  // exits while the stop is between its two table reads.
+  const src = `const c = require("node:child_process").spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" }); process.stdout.write(String(c.pid) + "\\n"); setTimeout(() => process.exit(0), 700);`;
+  const foreign = spawn(process.execPath, ["-e", src], { detached: true, stdio: ["ignore", "pipe", "ignore"] });
+  const childPid = await new Promise((res) => foreign.stdout.once("data", (d) => res(Number(String(d).trim()))));
+  try {
+    fs.writeFileSync(s.registry, JSON.stringify({ endpoint: `unix:${path.join(s.sessionDir, "broker.sock")}`, sessionDir: s.sessionDir, pid: foreign.pid }));
+    const r = await stopCompanionBroker(s.root);
+    assert.ok(!alive(/** @type {number} */ (foreign.pid)) || foreign.exitCode !== null, "the foreign leader exited during the stop");
+    assert.ok(alive(childPid), "its group's member was not SIGKILLed");
+    assert.deepEqual([r.left, r.unattributed], [0, 0]);
+    assert.ok(await until(() => !alive(s.pid), 3000), "the real broker was still stopped");
+  } finally {
+    signalPid(childPid, "SIGKILL");
   }
 });

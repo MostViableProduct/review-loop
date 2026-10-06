@@ -727,14 +727,19 @@ export async function stopCompanionBroker(root, opts = {}) {
     }
     /** @type {Map<number, Proc>} */
     const leaders = new Map();
+    /** @type {number[]} */
+    const goneRegistered = [];
     for (const s of reg.sessions) {
       const row = table.find((p) => p.pid === s.pid);
       if (row) {
         if (row.uid === uid && brokerArgv(row.args, roots)) leaders.set(row.pid, row);
       } else if (isAlive(s.pid)) keep("unknown_rows");
+      else goneRegistered.push(s.pid);
     }
     for (const p of table) if (p.uid === uid && brokerArgv(p.args, roots)) leaders.set(p.pid, p);
-    const groups = new Set([...reg.sessions.map((s) => s.pid), ...leaders.keys()]);
+    // A registry pid is a group only as a verified broker or as one already gone (its group's later members are its
+    // tree). Alive as anything else it is not this round's: its group is never emptied, even if its leader exits later.
+    const groups = new Set([...goneRegistered, ...leaders.keys()]);
     // broker.json is persisted, untrusted input: its socket and session dir are used only when they are the ones a
     // verified broker's own args name (`--endpoint unix:<dir>/broker.sock`).
     /** @type {Map<number, string>} */
@@ -1186,21 +1191,22 @@ function runsFrom(root) {
 const BROKER_FILES = new Set(["broker.sock", "broker.pid", "broker.log"]);
 
 /**
- * Whether broker.json's session dir is that dead broker's own and unused: nothing in it but a broker's files, its
- * broker.pid (when there is one) naming that broker, and no live process of this user naming its socket. Anything
- * unreadable says no, so the dir is kept.
+ * Whether broker.json's session dir is that dead broker's own and unused: a real directory of ours (never a link)
+ * holding nothing but a broker's files, its broker.pid naming exactly that broker, and no live process of this user
+ * naming its socket. Anything unreadable says no, so the dir is kept.
  * @param {string | null} dir @param {number} pid
  */
 function deadBrokersOwnDir(dir, pid) {
   if (!dir) return false;
   try {
+    const ds = fs.lstatSync(dir);
+    if (!ds.isDirectory() || ds.uid !== process.getuid?.()) return false;
     const names = fs.readdirSync(dir);
     if (!names.every((n) => BROKER_FILES.has(n))) return false;
-    if (names.includes("broker.pid")) {
-      const pidFile = path.join(dir, "broker.pid");
-      const st = fs.lstatSync(pidFile);
-      if (!st.isFile() || st.size > 32 || fs.readFileSync(pidFile, "utf8").trim() !== String(pid)) return false;
-    }
+    // The broker writes its own pid here at start (--pid-file); without it nothing binds the dir to this broker.
+    const pidFile = path.join(dir, "broker.pid");
+    const st = fs.lstatSync(pidFile);
+    if (!st.isFile() || st.size > 32 || fs.readFileSync(pidFile, "utf8").trim() !== String(pid)) return false;
   } catch {
     return false;
   }
@@ -1305,14 +1311,16 @@ export async function stopOrphan(parentDir, o) {
   // group emptied (the pid was reused) and so it is stopped.
   const uid = process.getuid?.();
   const until = performance.now() + STOP_DEADLINE_MS;
-  for (;;) {
-    // Still an orphan's tree only while its snapshot is still gone: a restored snapshot makes it a round's again.
+  /** @returns {"absent" | "mismatch" | "unverified"} */
+  const snapshotPresent = () => {
     try {
       fs.lstatSync(path.join(parentDir, o.snapshot));
       return "mismatch";
     } catch (e) {
-      if (/** @type {NodeJS.ErrnoException} */ (e).code !== "ENOENT") return "unverified";
+      return /** @type {NodeJS.ErrnoException} */ (e).code === "ENOENT" ? "absent" : "unverified";
     }
+  };
+  for (;;) {
     const table = readProcs();
     if (table === null) return "unverified";
     const lead = table.find((p) => p.pid === first.pid);
@@ -1323,7 +1331,13 @@ export async function stopOrphan(parentDir, o) {
     for (const m of members) {
       const now = procRow(m.pid);
       if (now === null) return "unverified";
-      if (now !== "gone" && sameMember(now, m)) signal(m.pid, "SIGKILL");
+      if (now === "gone" || !sameMember(now, m)) continue;
+      if (process.env.REVIEW_LOOP_TEST_SEAMS === "1" && process.env.REVIEW_LOOP_TEST_RESTORE_SNAPSHOT === "1") fs.mkdirSync(path.join(parentDir, o.snapshot), { recursive: true });
+      // Still an orphan's tree only while its snapshot is still gone, checked right at each signal: a restored
+      // snapshot makes the tree a round's again.
+      const back = snapshotPresent();
+      if (back !== "absent") return back;
+      signal(m.pid, "SIGKILL");
     }
     await sleep(500);
   }
