@@ -560,6 +560,27 @@ export async function afterSnapshotSecond(root) {
 }
 
 /**
+ * A directory's names, streamed and abandoned past `max`, so an untrusted directory is never buffered whole:
+ * "too_large" past the cap; an open or read error is thrown.
+ * @param {string} dir @param {number} max
+ * @returns {string[] | "too_large"}
+ */
+export function namesUpTo(dir, max) {
+  const d = fs.opendirSync(dir);
+  try {
+    /** @type {string[]} */
+    const names = [];
+    for (let ent = d.readSync(); ent !== null; ent = d.readSync()) {
+      if (names.length >= max) return "too_large";
+      names.push(ent.name);
+    }
+    return names;
+  } finally {
+    d.closeSync();
+  }
+}
+
+/**
  * The brokers the companion recorded in this snapshot's data dir (companion 1.0.6 layout:
  * `<data>/state/<slug>-<hash>/broker.json` = { endpoint: "unix:<sock>", pidFile, logFile, sessionDir, pid }).
  * `ok` is false when the registry exists but cannot be read whole: a stop then signals nothing.
@@ -568,13 +589,13 @@ export async function afterSnapshotSecond(root) {
  */
 function brokerRegistry(root) {
   const stateDir = path.join(companionDataDir(root), "state");
-  let names = [];
+  let names;
   try {
-    names = fs.readdirSync(stateDir);
+    names = namesUpTo(stateDir, REGISTRY_MAX_ENTRIES);
   } catch (e) {
     return { ok: /** @type {NodeJS.ErrnoException} */ (e).code === "ENOENT", sessions: [] };
   }
-  if (names.length > REGISTRY_MAX_ENTRIES) return { ok: false, sessions: [] };
+  if (names === "too_large") return { ok: false, sessions: [] };
   const sessions = [];
   for (const name of names) {
     const file = path.join(stateDir, name, "broker.json");
@@ -1290,8 +1311,8 @@ function deadBrokersOwnDir(dir, pid) {
   try {
     const ds = fs.lstatSync(dir);
     if (!ds.isDirectory() || ds.uid !== process.getuid?.()) return false;
-    const names = fs.readdirSync(dir);
-    if (!names.every((n) => BROKER_FILES.has(n))) return false;
+    const names = namesUpTo(dir, BROKER_FILES.size);
+    if (names === "too_large" || !names.every((n) => BROKER_FILES.has(n))) return false;
     // The broker writes its own pid here at start (--pid-file); without it nothing binds the dir to this broker.
     const pidFile = path.join(dir, "broker.pid");
     const st = fs.lstatSync(pidFile);

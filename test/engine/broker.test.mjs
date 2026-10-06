@@ -13,7 +13,7 @@ import { makeRepo, commitFile, writeFile, tmpDir, GIT_ENV } from "./helpers.mjs"
 import { isRealPid, signalPid } from "../fakes/signal.mjs";
 import { validateLine } from "../../plugin/engine/lib/events.mjs";
 import {
-  afterSnapshotSecond, brokerArgv, deadGroupTargets, hashOf, isHeld, parseProcRow, partitionCount, sameMember, stopCompanionBroker, sweepStaleSnapshots, treeMembers
+  afterSnapshotSecond, brokerArgv, deadGroupTargets, namesUpTo, hashOf, isHeld, parseProcRow, partitionCount, sameMember, stopCompanionBroker, sweepStaleSnapshots, treeMembers
 } from "../../plugin/engine/lib/pin.mjs";
 
 const HERE = path.dirname(new URL(import.meta.url).pathname);
@@ -1023,4 +1023,14 @@ test("B: a dead round's companion that exits on SIGTERM and leaves a child keeps
   } finally {
     signalPid(childPid, "SIGKILL");
   }
+});
+
+test("units: namesUpTo stops reading past its cap instead of listing the whole directory", () => {
+  const d = path.join(dir, "many");
+  fs.mkdirSync(d);
+  for (let i = 0; i < 200; i++) fs.writeFileSync(path.join(d, `f${i}`), "");
+  assert.equal(namesUpTo(d, 5), "too_large");
+  assert.equal(namesUpTo(d, 200).length, 200);
+  assert.equal(namesUpTo(d, 199), "too_large");
+  assert.throws(() => namesUpTo(path.join(d, "absent"), 5), { code: "ENOENT" });
 });
