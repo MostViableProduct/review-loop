@@ -64,14 +64,23 @@ const STUBBORN_CHILD = 'spawn(process.execPath, ["-e", "process.on(\\"SIGTERM\\"
  * A broker running from a ws/ snapshot that has since been removed (an inherited leak): its args name the snapshot's
  * broker script, it leads its own group, and it has a child in that group. `ignoreTerm`: the broker ignores SIGTERM;
  * `termLeavesChild`: on SIGTERM it exits without closing its child; `termSpawnsChild`: on SIGTERM it first starts a
- * new child (in its group, ignoring SIGTERM), then exits.
- * @param {string} h @param {{ ignoreTerm?: boolean, termLeavesChild?: boolean, termSpawnsChild?: boolean }} [o]
+ * new child (in its group, ignoring SIGTERM), then exits. `appServer`: the child is a `codex app-server` (by its
+ * command line) that ignores SIGTERM.
+ * @param {string} h @param {{ ignoreTerm?: boolean, termLeavesChild?: boolean, termSpawnsChild?: boolean, appServer?: boolean }} [o]
  */
 function orphanBroker(h, o = {}) {
   const root = path.join(h, "state", "ws", "plugin-AbC123");
   fs.mkdirSync(path.join(root, "scripts"), { recursive: true, mode: 0o700 });
   // When the broker outlasts or dodges SIGTERM, its child ignores SIGTERM too, so only a per-member SIGKILL ends it.
-  const child = o.termLeavesChild || o.ignoreTerm ? STUBBORN_CHILD : 'spawn("/bin/sleep", ["300"], { stdio: "ignore" })';
+  let child = o.termLeavesChild || o.ignoreTerm ? STUBBORN_CHILD : 'spawn("/bin/sleep", ["300"], { stdio: "ignore" })';
+  if (o.appServer) {
+    // `<dir>/codex app-server`: node, run through a link named codex, with the script `app-server` in its cwd.
+    const fake = path.join(h, "fake-codex");
+    fs.mkdirSync(fake, { recursive: true });
+    fs.symlinkSync(process.execPath, path.join(fake, "codex"));
+    fs.writeFileSync(path.join(fake, "app-server"), 'process.on("SIGTERM", () => {}); setInterval(() => {}, 1000);');
+    child = `spawn(${JSON.stringify(path.join(fake, "codex"))}, ["app-server"], { cwd: ${JSON.stringify(fake)}, stdio: "ignore" })`;
+  }
   const src = `const { spawn } = await import("node:child_process"); ${child};${o.ignoreTerm ? ' process.on("SIGTERM", () => {});' : ""}${o.termLeavesChild ? " process.on(\"SIGTERM\", () => process.exit(0));" : ""}${o.termSpawnsChild ? ` process.on("SIGTERM", () => { ${STUBBORN_CHILD}; setTimeout(() => process.exit(0), 200); });` : ""} setTimeout(() => {}, 120_000);`;
   fs.writeFileSync(path.join(root, "scripts", "app-server-broker.mjs"), src);
   // Started through a parent that exits at once, so it is reparented to launchd like a real leftover (and reaped by
@@ -614,4 +623,27 @@ test("orphaned_brokers: a snapshot restored between a member's check and its SIG
   assert.equal(out.status, 60, out.stdout);
   assert.equal(JSON.parse(out.stdout).status, "mismatch");
   assert.ok(process.kill(pid, 0), "the broker was not SIGKILLed");
+});
+
+test("orphaned_brokers: a broker that exits after doctor listed it leaves its app-server reported, never signalled", { timeout: 40_000 }, async () => {
+  const h = healthy();
+  const pid = orphanBroker(h, { termLeavesChild: true, appServer: true });
+  const r = await check("orphaned_brokers").run(ctx());
+  const cmd = /stop-orphan --snapshot (\S+) --pid (\d+) --started (\d+) --args-sha ([0-9a-f]{64})/.exec(r.fix ?? "");
+  assert.ok(cmd, r.fix ?? "");
+  const member = Number(spawnSync("/bin/ps", ["-o", "pid=", "-g", String(pid)], { encoding: "utf8" }).stdout.trim().split(/\s+/).find((p) => Number(p) !== pid));
+  signalPid(pid, "SIGTERM");
+  const end = Date.now() + 5000;
+  while (Date.now() < end && spawnSync("/bin/ps", ["-o", "pid=", "-p", String(pid)], { encoding: "utf8" }).stdout.trim() !== "") spawnSync("/bin/sleep", ["0.05"]);
+  const engine = path.join(process.cwd(), "plugin", "engine", "review-round.mjs");
+  const out = spawnSync(process.execPath, [engine, "stop-orphan", "--snapshot", cmd[1], "--pid", cmd[2], "--started", cmd[3], "--args-sha", cmd[4]], { env: process.env, encoding: "utf8", timeout: 20_000 });
+  assert.equal(out.status, 60, out.stdout);
+  assert.equal(JSON.parse(out.stdout).status, "leader_gone");
+  assert.ok(process.kill(member, 0), "the app-server was not signalled");
+  const again = await check("orphaned_brokers").run(ctx());
+  assert.equal(again.status, "warn");
+  assert.match(again.fix ?? "", new RegExp(`codex app-server ${member} has no broker`), "and it stays visible");
+  assert.doesNotMatch(again.fix ?? "", new RegExp(`stop-orphan[^\\n]*--pid ${member}\\b`), "with no command that would signal it");
+  assert.deepEqual(events(h).filter((e) => e.event === "round.stop_orphan").map((e) => [e.code, e.data.status]), [["orphaned_brokers", "leader_gone"]]);
+  signalPid(member, "SIGKILL");
 });

@@ -268,7 +268,7 @@ export const DOCTOR_CHECKS = [
     const o = countOrphanBrokers(path.join(stateRoot(), "ws"));
     if (!o.verified) return fail("orphaned_brokers", "check that `ps -A` runs in a terminal and that the state dir's ws/ folder is readable, then re-run doctor", { warn: true, note: "unverified: the process table or ws/ could not be read" });
     if (o.count === 0 && o.kept === 0) return pass();
-    return fail("orphaned_brokers", orphanFix(o), { warn: true, note: `${o.count} Codex broker(s) running from a removed snapshot; ${o.kept} snapshot(s) of an ended round still to clean` });
+    return fail("orphaned_brokers", orphanFix(o), { warn: true, note: `${o.count} leftover Codex process tree(s) (a broker whose snapshot is gone, or an app-server whose broker is); ${o.kept} snapshot(s) of an ended round still to clean` });
   } },
   { id: "live", async run(ctx) {
     if (!ctx.live) return fail("setup_complete_unverified", "review-loop doctor --live", { warn: true, note: "not run: it is one billed Codex review" });
@@ -289,6 +289,11 @@ function orphanFix(o) {
   const engine = 'node "$(review-loop engine-path)/review-round.mjs"';
   const lines = [`${engine} sweep`];
   for (const b of o.orphans.slice(0, 10)) {
+    if (b.kind === "leaderless_app_server") {
+      // Its broker is gone, so nothing proves whose it is: inspect only; ending it is the operator's call.
+      lines.push(`      codex app-server ${b.pid} has no broker (one died): ps -o pid,pgid,lstart,args -g ${b.pgid}`);
+      continue;
+    }
     lines.push(
       `      then, if broker ${b.pid} is still listed: ps -o pid,pgid,args -g ${b.pgid}`,
       `      and if that tree is a leftover (no review running): ${engine} stop-orphan --snapshot ${b.snapshot} --pid ${b.pid} --started ${b.started} --args-sha ${b.argsSha}`

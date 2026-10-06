@@ -235,6 +235,8 @@ export const KINDS = Object.freeze(["spec", "plan", "impl", "pr"]);
 export const DECISION_OPTIONS = Object.freeze(["continue", "more", "accept", "stop", "accept-finding", "waive", "repin", "override", "merge", "pull"]);
 /** Why a broker stop left a snapshot in place (see stopCompanionBroker). */
 export const BROKER_STOP_REASONS = Object.freeze(["ps_unavailable", "registry_unreadable", "deadline", "unknown_rows", "members_left", "unattributed"]);
+/** `review-round.mjs stop-orphan`'s outcomes (only "stopped" is a success). */
+export const STOP_ORPHAN_STATUSES = Object.freeze(["stopped", "mismatch", "still_running", "unverified", "leader_gone"]);
 export const PAUSE_REASONS = Object.freeze(["checkpoint", "stall", "dispute_deadlock", "criss_cross", "push_rejected", "head_diverged", "plugin_pin"]);
 
 /** @param {unknown} v */
@@ -272,6 +274,8 @@ export const EVENT_CATALOG = Object.freeze({
       held: int(0, 10_000), partition: int(0, 4095), partitions: int(1, 4096)
     }
   },
+  "round.stop_orphan": { sources: ["round"], data: { status: oneOf(STOP_ORPHAN_STATUSES) } },
+  "round.orphans": { sources: ["round"], data: { verified: int(0, 1), count: int(0, 10_000) } },
   "round.broker_stop": { sources: ["round"], data: { reason: oneOf(BROKER_STOP_REASONS), left: int(0, 10_000), unattributed: int(0, 10_000), snapshot: snapshotName } },
   "hook.error": { sources: ["hook", "round", "cli"], data: { stage: oneOf(STAGES), mode: oneOf(STAGES) } },
   "config.invalid": { sources: ["hook", "cli", "round"], data: {} },

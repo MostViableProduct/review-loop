@@ -655,6 +655,11 @@ test("D: `sweep` clears a dead round's snapshot and prints the documented result
   assert.deepEqual(Object.keys(o), ["exit", "status", "swept", "brokers_left", "unattributed", "failed", "incomplete", "orphans_detected"]);
   assert.deepEqual(o, { exit: 0, status: "clean", swept: 1, brokers_left: 0, unattributed: 0, failed: 0, incomplete: false, orphans_detected: 0 });
   assert.deepEqual(snapshots(), []);
+  // Its orphan check is an event either way: verified and clean, then (no process table) unverified.
+  const r2 = spawnSync(process.execPath, [ROUND, "sweep"], { env: { ...env, ...psSeam(tablePsFails()) }, encoding: "utf8" });
+  assert.equal(r2.status, 60, r2.stdout);
+  const orphanEvents = fs.readFileSync(path.join(env.REVIEW_LOOP_STATE_DIR, "events.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l)).filter((e) => e.event === "round.orphans");
+  assert.deepEqual(orphanEvents.map((e) => [e.code, e.data.verified, e.data.count]), [["ok", 1, 0], ["orphaned_brokers", 0, 0]]);
 });
 
 test("D: `sweep` exits 60 when a broker will not stop, and when ws/ cannot be listed", { timeout: 90_000 }, async () => {

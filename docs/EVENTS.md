@@ -47,6 +47,8 @@ that does not pass its check is written as `null`.
 | `round.dispute` | round | `kind` |
 | `round.push` | round | — |
 | `round.sweep` | round | `swept`, `brokers_left`, `failed`, `unattributed`, `incomplete`, `held`, `partition`, `partitions` |
+| `round.stop_orphan` | round | `status` |
+| `round.orphans` | round | `verified`, `count` |
 | `round.broker_stop` | round | `reason`, `left`, `unattributed`, `snapshot` |
 | `hook.error` | hook, round, cli | `stage`, `mode` |
 | `config.invalid` | hook, cli, round | — |

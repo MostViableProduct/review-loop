@@ -373,9 +373,20 @@ async function sweepSnapshots(key, opts = {}) {
  * `sweep`: every partition of ws/, now, without a lock (it acts only on snapshots whose owner is gone). Exit 0 only
  * when everything was examined, nothing is left, and no broker runs from a snapshot that is gone.
  */
+/**
+ * An operator command's outcome as an event; a line that cannot be written is said on stderr instead.
+ * @param {string} event @param {string} code @param {Record<string, unknown>} data
+ */
+function report(event, code, data) {
+  if (!emitEvent({ source: "round", event, code, session_id: SESSION, artifact_key: null, data })) {
+    process.stderr.write(`review-loop: event_write_failed ${JSON.stringify({ event, code, ...data })}\n`);
+  }
+}
+
 async function cmdSweep() {
   const s = await sweepSnapshots(null, { all: true, deadlineMs: SWEEP_MANUAL_DEADLINE_MS });
   const o = countOrphanBrokers(stateSubdir("ws"));
+  report("round.orphans", o.verified && o.count === 0 ? "ok" : "orphaned_brokers", { verified: o.verified ? 1 : 0, count: o.count });
   const clean = s.brokersLeft + s.unattributed + s.failed === 0 && !s.incomplete && o.verified && o.count === 0;
   out(
     {
@@ -401,6 +412,7 @@ async function cmdStopOrphan(v) {
     throw new ReviewLoopError("bad_args", "stop-orphan needs --snapshot plugin-XXXXXX --pid <n> --started <epoch-seconds> --args-sha <64 hex>, as `review-loop doctor` prints them");
   }
   const status = await stopOrphan(stateSubdir("ws"), { snapshot, pid, started, argsSha });
+  report("round.stop_orphan", status === "stopped" ? "ok" : "orphaned_brokers", { status });
   out({ status }, status === "stopped" ? EXIT.PASS : EXIT.SWEEP_INCOMPLETE);
 }
 

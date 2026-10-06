@@ -1345,7 +1345,10 @@ function ownedRealDirectory(p) {
   }
 }
 
-/** @typedef {{ kind: "missing_snapshot", pid: number, pgid: number, snapshot: string, started: number, argsSha: string }} Orphan */
+/**
+ * @typedef {{ kind: "missing_snapshot", pid: number, pgid: number, snapshot: string, started: number, argsSha: string }
+ *   | { kind: "leaderless_app_server", pid: number, pgid: number }} Orphan
+ */
 
 /**
  * Read-only, for doctor: brokers this user runs from a `ws/plugin-*` snapshot that is gone (nothing can attribute
@@ -1374,6 +1377,11 @@ export function countOrphanBrokers(parentDir) {
     }
     res.orphans.push({ kind: "missing_snapshot", pid: p.pid, pgid: p.pgid, snapshot: m[1], started: p.started, argsSha: sha256hex(p.args) });
   }
+  // A `codex app-server` whose group has no leader: a Codex broker died and left it. Nothing ties it to one snapshot
+  // (its pid number proves nothing once the broker is gone), so it is only reported, for the operator to inspect.
+  for (const p of procs) {
+    if (p.uid === uid && APP_SERVER_ARGS.test(p.args) && !procs.some((l) => l.pid === p.pgid)) res.orphans.push({ kind: "leaderless_app_server", pid: p.pid, pgid: p.pgid });
+  }
   const w = walkSnapshots(parentDir, (name) => {
     const root = path.join(parentDir, name);
     if (ownedRealDirectory(root) && ownerState(root, table) === "dead") res.kept++;
@@ -1389,7 +1397,7 @@ export function countOrphanBrokers(parentDir) {
  * signal and acting only while it is still the very process doctor listed (pid, start second, args hash), still leads
  * its group, still runs `<parentDir>/<snapshot>`'s broker script, and that snapshot is still missing.
  * @param {string} parentDir @param {{ snapshot: string, pid: number, started: number, argsSha: string }} o
- * @returns {Promise<"stopped" | "mismatch" | "still_running" | "unverified">}
+ * @returns {Promise<"stopped" | "mismatch" | "still_running" | "unverified" | "leader_gone">} see STOP_ORPHAN_STATUSES
  */
 export async function stopOrphan(parentDir, o) {
   const check = () => {
@@ -1406,7 +1414,13 @@ export async function stopOrphan(parentDir, o) {
     return ok ? now : "mismatch";
   };
   const first = check();
-  if (first === "gone") return "mismatch";
+  // A broker gone before this command leaves no identity for its group (its pid may have been reissued): what still
+  // runs there is reported, never signalled (doctor lists it as a leaderless app-server).
+  if (first === "gone") {
+    const table = readProcs();
+    if (table === null) return "unverified";
+    return table.some((p) => p.pgid === o.pid && p.uid === process.getuid?.()) ? "leader_gone" : "mismatch";
+  }
   if (typeof first === "string") return first;
   // The whole identity again, right at the signal.
   const now = check();
