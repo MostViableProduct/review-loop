@@ -58,18 +58,21 @@ test.after(() => {
   for (const pid of orphans) signalPid(pid, "SIGKILL", { group: true });
 });
 
+const STUBBORN_CHILD = 'spawn(process.execPath, ["-e", "process.on(\\"SIGTERM\\", () => {}); setInterval(() => {}, 1000)"], { stdio: "ignore" })';
+
 /**
  * A broker running from a ws/ snapshot that has since been removed (an inherited leak): its args name the snapshot's
  * broker script, it leads its own group, and it has a child in that group. `ignoreTerm`: the broker ignores SIGTERM;
- * `termLeavesChild`: on SIGTERM it exits without closing its child.
- * @param {string} h @param {{ ignoreTerm?: boolean, termLeavesChild?: boolean }} [o]
+ * `termLeavesChild`: on SIGTERM it exits without closing its child; `termSpawnsChild`: on SIGTERM it first starts a
+ * new child (in its group, ignoring SIGTERM), then exits.
+ * @param {string} h @param {{ ignoreTerm?: boolean, termLeavesChild?: boolean, termSpawnsChild?: boolean }} [o]
  */
 function orphanBroker(h, o = {}) {
   const root = path.join(h, "state", "ws", "plugin-AbC123");
   fs.mkdirSync(path.join(root, "scripts"), { recursive: true, mode: 0o700 });
   // When the broker outlasts or dodges SIGTERM, its child ignores SIGTERM too, so only a per-member SIGKILL ends it.
-  const child = o.termLeavesChild || o.ignoreTerm ? 'spawn(process.execPath, ["-e", "process.on(\\"SIGTERM\\", () => {}); setInterval(() => {}, 1000)"], { stdio: "ignore" })' : 'spawn("/bin/sleep", ["300"], { stdio: "ignore" })';
-  const src = `const { spawn } = await import("node:child_process"); ${child};${o.ignoreTerm ? ' process.on("SIGTERM", () => {});' : ""}${o.termLeavesChild ? " process.on(\"SIGTERM\", () => process.exit(0));" : ""} setTimeout(() => {}, 120_000);`;
+  const child = o.termLeavesChild || o.ignoreTerm ? STUBBORN_CHILD : 'spawn("/bin/sleep", ["300"], { stdio: "ignore" })';
+  const src = `const { spawn } = await import("node:child_process"); ${child};${o.ignoreTerm ? ' process.on("SIGTERM", () => {});' : ""}${o.termLeavesChild ? " process.on(\"SIGTERM\", () => process.exit(0));" : ""}${o.termSpawnsChild ? ` process.on("SIGTERM", () => { ${STUBBORN_CHILD}; setTimeout(() => process.exit(0), 200); });` : ""} setTimeout(() => {}, 120_000);`;
   fs.writeFileSync(path.join(root, "scripts", "app-server-broker.mjs"), src);
   // Started through a parent that exits at once, so it is reparented to launchd like a real leftover (and reaped by
   // it, not left a zombie of this test process).
@@ -569,4 +572,17 @@ test("orphaned_brokers: stop-orphan sends no SIGKILL once the snapshot is back",
   assert.equal(JSON.parse(out).status, "mismatch");
   assert.ok(process.kill(pid, 0), "the broker was not SIGKILLed");
   assert.equal(spawnSync("/bin/ps", ["-o", "pid=", "-g", String(pid)], { encoding: "utf8" }).stdout.trim().split("\n").length, 2, "nor its child");
+});
+
+test("orphaned_brokers: stop-orphan also stops a child spawned on SIGTERM, after any one read of the group", { timeout: 40_000 }, async () => {
+  const h = healthy();
+  const pid = orphanBroker(h, { termSpawnsChild: true });
+  const r = await check("orphaned_brokers").run(ctx());
+  const cmd = /stop-orphan --snapshot (\S+) --pid (\d+) --started (\d+) --args-sha ([0-9a-f]{64})/.exec(r.fix ?? "");
+  assert.ok(cmd, r.fix ?? "");
+  const engine = path.join(process.cwd(), "plugin", "engine", "review-round.mjs");
+  const ok = spawnSync(process.execPath, [engine, "stop-orphan", "--snapshot", cmd[1], "--pid", cmd[2], "--started", cmd[3], "--args-sha", cmd[4]], { env: process.env, encoding: "utf8", timeout: 30_000 });
+  assert.equal(ok.status, 0, ok.stdout);
+  assert.equal(JSON.parse(ok.stdout).status, "stopped");
+  assert.equal(spawnSync("/bin/ps", ["-o", "pid=", "-g", String(pid)], { encoding: "utf8" }).stdout.trim(), "", "the late child is gone too");
 });

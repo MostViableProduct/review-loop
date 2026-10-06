@@ -826,7 +826,12 @@ export async function stopCompanionBroker(root, opts = {}) {
     res.unattributed += leaderlessAppServers(last, snapshotSec, marker, groups);
     if (res.left > 0) res.reason ??= "members_left";
     else if (res.unattributed > 0) res.reason ??= "unattributed";
-    if (res.left === 0) for (const dir of ownDirs.values()) removeSessionDir(dir);
+    if (res.left === 0) {
+      for (const dir of ownDirs.values()) removeSessionDir(dir);
+      // A broker gone before this stop has no args left to name its dir: broker.json's is used, and only when it
+      // holds nothing but a broker's own files, so an untrusted path can never take anything else with it.
+      for (const s of reg.sessions) if (!ownDirs.has(s.pid) && holdsOnlyBrokerFiles(s.sessionDir)) removeSessionDir(s.sessionDir);
+    }
   } catch {
     keep("unknown_rows");
   } finally {
@@ -839,9 +844,13 @@ export async function stopCompanionBroker(root, opts = {}) {
 /** The signal-path twin of stopCompanionBroker: synchronous, SIGTERM only, same identity checks. @param {string} root */
 function reapCompanionBroker(root) {
   const roots = rootsOf(root);
-  for (const s of brokerRegistry(root).sessions) {
-    const now = procRow(s.pid);
-    if (now !== null && now !== "gone" && now.uid === process.getuid?.() && brokerArgv(now.args, roots)) signal(s.pid, "SIGTERM");
+  const uid = process.getuid?.();
+  const pids = new Set(brokerRegistry(root).sessions.map((s) => s.pid));
+  // A broker started before the companion wrote broker.json is only in the process table.
+  for (const p of readProcs() ?? []) if (p.uid === uid && p.pgid === p.pid && brokerArgv(p.args, roots)) pids.add(p.pid);
+  for (const pid of pids) {
+    const now = procRow(pid);
+    if (now !== null && now !== "gone" && now.uid === uid && brokerArgv(now.args, roots)) signal(pid, "SIGTERM");
   }
 }
 
@@ -1172,6 +1181,18 @@ function runsFrom(root) {
   return procs.some((p) => p.uid === process.getuid?.() && (brokerArgv(p.args, roots) !== null || brokerArgv(p.args, roots, COMPANION_SCRIPT) !== null));
 }
 
+const BROKER_FILES = new Set(["broker.sock", "broker.pid", "broker.log"]);
+
+/** @param {string | null} dir */
+function holdsOnlyBrokerFiles(dir) {
+  if (!dir) return false;
+  try {
+    return fs.readdirSync(dir).every((n) => BROKER_FILES.has(n));
+  } catch {
+    return false;
+  }
+}
+
 /** @param {string} p */
 function ownedRealDirectory(p) {
   try {
@@ -1245,20 +1266,19 @@ export async function stopOrphan(parentDir, o) {
   const first = check();
   if (first === "gone") return "mismatch";
   if (typeof first === "string") return first;
-  // The tree as it is while its verified leader runs, so what SIGTERM leaves behind (a leader that exits without
-  // closing its children) is still known, member by member, once the leader is gone.
-  const table = readProcs();
-  if (table === null) return "unverified";
-  const tree = table.filter((p) => p.pgid === first.pid && p.uid === process.getuid?.());
-  // The whole identity again, right at the signal: the table read above took time.
+  // The whole identity again, right at the signal.
   const now = check();
   if (typeof now === "string") return now === "gone" ? "mismatch" : now;
   if (!sameMember(now, first)) return "mismatch";
   signal(-first.pid, "SIGTERM");
   await exitedWithin(first.pid, 5000);
+  // Then the group as it is now, read afresh each pass until it is empty: a member started after any one read (one
+  // the broker spawns on its way out) is still found. While a group has members its id cannot be reused, so a member
+  // is the orphan's while the leader is this broker or gone; a different process holding the leader's pid means the
+  // group emptied (the pid was reused) and so it is stopped.
+  const uid = process.getuid?.();
   const until = performance.now() + STOP_DEADLINE_MS;
-  for (const m of tree) {
-    if (performance.now() >= until) return "still_running";
+  for (;;) {
     // Still an orphan's tree only while its snapshot is still gone: a restored snapshot makes it a round's again.
     try {
       fs.lstatSync(path.join(parentDir, o.snapshot));
@@ -1266,15 +1286,18 @@ export async function stopOrphan(parentDir, o) {
     } catch (e) {
       if (/** @type {NodeJS.ErrnoException} */ (e).code !== "ENOENT") return "unverified";
     }
-    const now = procRow(m.pid);
-    if (now === null) return "unverified";
-    if (now !== "gone" && sameMember(now, m)) signal(m.pid, "SIGKILL");
+    const table = readProcs();
+    if (table === null) return "unverified";
+    const lead = table.find((p) => p.pid === first.pid);
+    if (lead && !sameMember(lead, first)) return "stopped";
+    const members = table.filter((p) => p.pgid === first.pid && p.uid === uid);
+    if (members.length === 0) return "stopped";
+    if (performance.now() >= until) return "still_running";
+    for (const m of members) {
+      const now = procRow(m.pid);
+      if (now === null) return "unverified";
+      if (now !== "gone" && sameMember(now, m)) signal(m.pid, "SIGKILL");
+    }
+    await sleep(500);
   }
-  await sleep(500);
-  for (const m of tree) {
-    const now = procRow(m.pid);
-    if (now === null) return "unverified";
-    if (now !== "gone" && sameMember(now, m)) return "still_running";
-  }
-  return "stopped";
 }

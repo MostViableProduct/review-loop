@@ -306,6 +306,21 @@ test("H1: SIGTERM mid-round reaps the broker from the signal path", { timeout: 6
   }
 });
 
+test("H1: SIGTERM before broker.json exists still reaps the broker, found in the process table", { timeout: 60_000 }, async () => {
+  const child = spawn(process.execPath, [ROUND, "run", "--kind", "spec", "--path", specRepo()], { env: { ...env, STUB_SLEEP_MS: "30000", FAKE_NO_BROKER_JSON: "1" }, stdio: "ignore" });
+  try {
+    assert.ok(await until(() => fs.existsSync(env.BROKER_READY), 20_000), "the companion started its broker");
+    const exited = new Promise((r) => child.once("exit", (_code, sig) => r(sig)));
+    child.kill("SIGTERM");
+    assert.equal(await exited, "SIGTERM");
+    const [b] = brokers();
+    assert.ok(await until(() => !alive(b.pid), 5000), "the broker no registry names was reaped, not orphaned");
+    assert.deepEqual(brokerLog(), ["sigterm"]);
+  } finally {
+    if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+  }
+});
+
 test("H1: a broker.json pid that is not this round's broker is never signalled", async () => {
   const bystander = spawn(process.execPath, ["-e", "setTimeout(() => {}, 30_000)"], { stdio: "ignore" });
   try {
@@ -734,7 +749,7 @@ async function deadSnapshot(parent, o = {}) {
   const state = path.join(root, "data", "state", "r-fake");
   fs.mkdirSync(state, { recursive: true });
   fs.writeFileSync(path.join(state, "broker.json"), JSON.stringify({ endpoint: `unix:${sock}`, sessionDir, pid }));
-  return { root, pid };
+  return { root, pid, sessionDir, registry: path.join(state, "broker.json") };
 }
 
 /** Runs `fn` with the engine's test seams set in this process. @param {Record<string, string>} seams @param {() => Promise<unknown>} fn */
@@ -852,4 +867,29 @@ test("A: a round whose start time ps cannot read starts no companion and leaves 
   assert.equal(r.json.error.code, "snapshot_owner_unknown");
   assert.deepEqual(brokers(), [], "no companion ran");
   assert.deepEqual(snapshots(), [], "and no snapshot is left that would never read as dead");
+});
+
+test("B: a broker gone before its stop: its cxc-* dir goes too, but only when it holds nothing but a broker's files", { timeout: 60_000 }, async () => {
+  const parent = path.join(dir, "ws-deaddir");
+  fs.mkdirSync(parent, { mode: 0o700 });
+  const s = await deadSnapshot(parent);
+  signalPid(s.pid, "SIGKILL");
+  assert.ok(await until(() => !alive(s.pid), 3000));
+  const r = await stopCompanionBroker(s.root);
+  assert.deepEqual([r.left, r.unattributed], [0, 0]);
+  assert.ok(!fs.existsSync(s.sessionDir), "the dead broker's session dir is removed");
+
+  const t = await deadSnapshot(parent);
+  signalPid(t.pid, "SIGKILL");
+  assert.ok(await until(() => !alive(t.pid), 3000));
+  const decoy = fs.mkdtempSync(path.join(os.tmpdir(), "cxc-"));
+  try {
+    fs.writeFileSync(path.join(decoy, "keep.txt"), "not a broker's");
+    fs.writeFileSync(t.registry, JSON.stringify({ endpoint: `unix:${path.join(decoy, "broker.sock")}`, sessionDir: decoy, pid: t.pid }));
+    const r2 = await stopCompanionBroker(t.root);
+    assert.deepEqual([r2.left, r2.unattributed], [0, 0]);
+    assert.ok(fs.existsSync(path.join(decoy, "keep.txt")), "a dir holding anything else is never removed");
+  } finally {
+    fs.rmSync(decoy, { recursive: true, force: true });
+  }
 });
