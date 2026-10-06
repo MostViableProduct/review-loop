@@ -828,9 +828,9 @@ export async function stopCompanionBroker(root, opts = {}) {
     else if (res.unattributed > 0) res.reason ??= "unattributed";
     if (res.left === 0) {
       for (const dir of ownDirs.values()) removeSessionDir(dir);
-      // A broker gone before this stop has no args left to name its dir: broker.json's is used, and only when it
-      // holds nothing but a broker's own files, so an untrusted path can never take anything else with it.
-      for (const s of reg.sessions) if (!ownDirs.has(s.pid) && holdsOnlyBrokerFiles(s.sessionDir)) removeSessionDir(s.sessionDir);
+      // A broker gone before this stop has no args left to name its dir: broker.json's is used only when it is
+      // provably that broker's and unused (deadBrokersOwnDir), so an untrusted path takes nothing else with it.
+      for (const s of reg.sessions) if (!ownDirs.has(s.pid) && deadBrokersOwnDir(s.sessionDir, s.pid)) removeSessionDir(s.sessionDir);
     }
   } catch {
     keep("unknown_rows");
@@ -1022,6 +1022,8 @@ function sweepPart() {
  * @returns {"done" | "absent" | "failed" | "too_large" | "deadline"}
  */
 function walkSnapshots(parentDir, onName, remaining) {
+  const ws = wsState(parentDir);
+  if (ws !== "ok") return ws;
   let dir;
   try {
     dir = fs.opendirSync(parentDir);
@@ -1183,13 +1185,38 @@ function runsFrom(root) {
 
 const BROKER_FILES = new Set(["broker.sock", "broker.pid", "broker.log"]);
 
-/** @param {string | null} dir */
-function holdsOnlyBrokerFiles(dir) {
+/**
+ * Whether broker.json's session dir is that dead broker's own and unused: nothing in it but a broker's files, its
+ * broker.pid (when there is one) naming that broker, and no live process of this user naming its socket. Anything
+ * unreadable says no, so the dir is kept.
+ * @param {string | null} dir @param {number} pid
+ */
+function deadBrokersOwnDir(dir, pid) {
   if (!dir) return false;
   try {
-    return fs.readdirSync(dir).every((n) => BROKER_FILES.has(n));
+    const names = fs.readdirSync(dir);
+    if (!names.every((n) => BROKER_FILES.has(n))) return false;
+    if (names.includes("broker.pid")) {
+      const pidFile = path.join(dir, "broker.pid");
+      const st = fs.lstatSync(pidFile);
+      if (!st.isFile() || st.size > 32 || fs.readFileSync(pidFile, "utf8").trim() !== String(pid)) return false;
+    }
   } catch {
     return false;
+  }
+  const procs = readProcs();
+  if (procs === null) return false;
+  const sock = `unix:${path.join(dir, "broker.sock")}`;
+  return !procs.some((p) => p.uid === process.getuid?.() && p.args.split(" ").includes(sock));
+}
+
+/** The snapshot parent as it is (never followed): a real directory of ours, absent, or anything else ("failed"). @param {string} p */
+function wsState(p) {
+  try {
+    const ls = fs.lstatSync(p);
+    return ls.isDirectory() && ls.uid === process.getuid?.() ? "ok" : "failed";
+  } catch (e) {
+    return /** @type {NodeJS.ErrnoException} */ (e).code === "ENOENT" ? "absent" : "failed";
   }
 }
 

@@ -892,4 +892,29 @@ test("B: a broker gone before its stop: its cxc-* dir goes too, but only when it
   } finally {
     fs.rmSync(decoy, { recursive: true, force: true });
   }
+
+  // Broker-shaped dirs (nothing but a broker's files) that are not this dead broker's: one whose broker.pid names
+  // another broker, one a live process still names as its socket. Both are kept.
+  const other = fs.mkdtempSync(path.join(os.tmpdir(), "cxc-"));
+  const inUse = fs.mkdtempSync(path.join(os.tmpdir(), "cxc-"));
+  const user = spawn(process.execPath, ["-e", "setTimeout(() => {}, 30_000)", "--", "--endpoint", `unix:${path.join(inUse, "broker.sock")}`], { stdio: "ignore" });
+  try {
+    assert.ok(await until(() => spawnSync("/bin/ps", ["-ww", "-o", "args=", "-p", String(user.pid)], { encoding: "utf8" }).stdout.includes(inUse), 3000), "the in-use dir's user is running");
+    for (const [d, pidText] of [[other, "1"], [inUse, null]]) {
+      fs.writeFileSync(path.join(d, "broker.log"), "");
+      if (pidText) fs.writeFileSync(path.join(d, "broker.pid"), pidText);
+      const u = await deadSnapshot(parent);
+      signalPid(u.pid, "SIGKILL");
+      assert.ok(await until(() => !alive(u.pid), 3000));
+      if (!pidText) fs.writeFileSync(path.join(d, "broker.pid"), String(u.pid));
+      fs.writeFileSync(u.registry, JSON.stringify({ endpoint: `unix:${path.join(d, "broker.sock")}`, sessionDir: d, pid: u.pid }));
+      const r3 = await stopCompanionBroker(u.root);
+      assert.deepEqual([r3.left, r3.unattributed], [0, 0]);
+      assert.ok(fs.existsSync(path.join(d, "broker.log")), `${pidText ? "another broker's" : "an in-use"} broker-shaped dir is kept`);
+    }
+  } finally {
+    user.kill("SIGKILL");
+    fs.rmSync(other, { recursive: true, force: true });
+    fs.rmSync(inUse, { recursive: true, force: true });
+  }
 });

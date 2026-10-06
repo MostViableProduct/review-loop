@@ -586,3 +586,14 @@ test("orphaned_brokers: stop-orphan also stops a child spawned on SIGTERM, after
   assert.equal(JSON.parse(ok.stdout).status, "stopped");
   assert.equal(spawnSync("/bin/ps", ["-o", "pid=", "-g", String(pid)], { encoding: "utf8" }).stdout.trim(), "", "the late child is gone too");
 });
+
+test("orphaned_brokers: a linked ws/ is never followed; the check is unverified", async () => {
+  const h = healthy();
+  const elsewhere = path.join(h, "elsewhere");
+  fs.mkdirSync(elsewhere);
+  fs.rmSync(path.join(h, "state", "ws"), { recursive: true, force: true });
+  fs.symlinkSync(elsewhere, path.join(h, "state", "ws"));
+  const r = await check("orphaned_brokers").run(ctx());
+  assert.equal(r.status, "warn");
+  assert.match(r.note ?? "", /unverified/);
+});
