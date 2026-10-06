@@ -184,6 +184,59 @@ export function verifyPin(opts = {}) {
 }
 
 /**
+ * The companion's private temp dir: `<snapshot>/tmp`, or, when a socket path there would pass the unix socket limit (a
+ * long state dir), a short `rl-XXXXXX` under the OS temp dir recorded in the snapshot's tmp.json and removed with it
+ * (removeSnapshot). null only when even that is too long: the companion then keeps the inherited temp dir.
+ * @param {string} root
+ */
+function companionTmp(root) {
+  const fits = (/** @type {string} */ d) => Buffer.byteLength(path.join(d, "cxc-XXXXXX", "broker.sock")) <= SOCKET_PATH_MAX;
+  const inside = path.join(root, "tmp");
+  if (fits(inside)) {
+    fs.mkdirSync(inside, { recursive: true, mode: 0o700 });
+    return inside;
+  }
+  if (!fits(path.join(os.tmpdir(), "rl-XXXXXX"))) return null;
+  const short = fs.mkdtempSync(path.join(os.tmpdir(), "rl-"));
+  try {
+    atomicWriteJson(path.join(root, TMP_FILE), { dir: short }, root);
+  } catch (err) {
+    fs.rmSync(short, { recursive: true, force: true });
+    throw err;
+  }
+  return short;
+}
+
+/** @param {unknown} v @returns {v is { dir: string }} */
+function isTmpMarker(v) {
+  return isObject(v) && Object.keys(v).length === 1 && typeof v.dir === "string";
+}
+
+/**
+ * Removes a snapshot and the short temp dir its tmp.json records. That dir is removed only when it is what
+ * companionTmp makes: a real `rl-XXXXXX` directory of ours directly in the OS temp dir, never a link.
+ * @param {string} root
+ */
+export function removeSnapshot(root) {
+  try {
+    const v = readJsonValidated(path.join(root, TMP_FILE), isTmpMarker, root, 4096, { readOnly: true });
+    const tmps = new Set([os.tmpdir()]);
+    try {
+      tmps.add(fs.realpathSync(os.tmpdir()));
+    } catch {
+      // Compared as given.
+    }
+    if (v && /^rl-[A-Za-z0-9]{6}$/.test(path.basename(v.dir)) && tmps.has(path.dirname(v.dir))) {
+      const st = fs.lstatSync(v.dir);
+      if (st.isDirectory() && st.uid === process.getuid?.()) fs.rmSync(v.dir, { recursive: true, force: true });
+    }
+  } catch {
+    // No record, or not one companionTmp made: nothing outside the snapshot to remove.
+  }
+  fs.rmSync(root, { recursive: true, force: true });
+}
+
+/**
  * verifyPin checks the cache path, but executing that path later is a check/use gap (a plugin auto-update in between
  * would run unverified code). So copy the pinned files into a fresh private directory through the symlink-safe reader,
  * re-hash the COPIED bytes against the pin, and execute only from there. plugin.json (client name/version metadata,
@@ -198,7 +251,7 @@ export function snapshotVerified(parentDir) {
   if (isLink(src)) throw new ReviewLoopError("plugin_pin_mismatch", `plugin root ${src} is a symlink`);
   fs.mkdirSync(parentDir, { recursive: true, mode: 0o700 });
   const root = fs.mkdtempSync(path.join(parentDir, "plugin-"));
-  const cleanup = () => fs.rmSync(root, { recursive: true, force: true });
+  const cleanup = () => removeSnapshot(root);
   try {
     const copy = (/** @type {string} */ rel, /** @type {Record<string, string>} */ codes) => {
       const bytes = safeReadFile(path.join(src, rel), 8 * MiB, codes, { within: src });
@@ -345,12 +398,10 @@ export async function runCompanion(root, p) {
   // review's job files and broker.json there, and cleanup removes them (so these rounds no longer show in /codex:status).
   const dataDir = companionDataDir(root);
   fs.mkdirSync(dataDir, { recursive: true, mode: 0o700 });
-  // The companion's temp dir inside the snapshot too: the broker's cxc-* session dir then goes with the snapshot,
-  // even when the broker dies before broker.json names it. Not when its socket path would pass the platform's unix
-  // socket limit (104 bytes on macOS; the broker would not start, and the companion would run without one).
-  const tmp = path.join(root, "tmp");
-  const tmpEnv = Buffer.byteLength(path.join(tmp, "cxc-XXXXXX", "broker.sock")) <= SOCKET_PATH_MAX ? { TMPDIR: tmp } : {};
-  if (tmpEnv.TMPDIR) fs.mkdirSync(tmp, { recursive: true, mode: 0o700 });
+  // The companion's temp dir goes with the snapshot, so the broker's cxc-* session dir does too, even when the broker
+  // dies before broker.json names it.
+  const tmp = companionTmp(root);
+  const tmpEnv = tmp ? { TMPDIR: tmp } : {};
   // The broker outlives the companion (detached, own session), so a signal must reap it from its broker.json.
   if (!reapers.has(root)) reapers.set(root, onReap(() => reapCompanionBroker(root)));
   /** @type {number | null} */
@@ -393,6 +444,7 @@ const BROKER_JSON_MAX_BYTES = 64 * 1024;
 const BROKER_SCRIPT = path.join("scripts", "app-server-broker.mjs");
 const COMPANION_SCRIPT = path.join("scripts", "codex-companion.mjs");
 const COMPANION_FILE = "companion.json";
+const TMP_FILE = "tmp.json";
 const COMPANION_MAX_BYTES = 4096;
 /** A snapshot's companion data holds one state dir per workspace; more than this is not a companion's doing. */
 const REGISTRY_MAX_ENTRIES = 32;
@@ -743,9 +795,10 @@ export async function stopCompanionBroker(root, opts = {}) {
       else goneRegistered.push(s.pid);
     }
     for (const p of table) if (p.uid === uid && brokerArgv(p.args, roots)) leaders.set(p.pid, p);
-    // A registry pid is a group only as a verified broker or as one already gone (its group's later members are its
-    // tree). Alive as anything else it is not this round's: its group is never emptied, even if its leader exits later.
-    const groups = new Set([...goneRegistered, ...leaders.keys()]);
+    // Only verified brokers are stopped. A registry pid already gone at the first read has no identity left (its number
+    // may have been reissued), so its group is never signalled: what still runs there is counted unattributed (the
+    // snapshot is kept and reported), the author's choice over killing on a pid number alone.
+    const groups = new Set(leaders.keys());
     // broker.json is persisted, untrusted input: its socket and session dir are used only when they are the ones a
     // verified broker's own args name (`--endpoint unix:<dir>/broker.sock`).
     /** @type {Map<number, string>} */
@@ -834,7 +887,12 @@ export async function stopCompanionBroker(root, opts = {}) {
       if (t.members.length || t.unknown.length) res.left++;
       res.unattributed += t.unattributed.length;
     }
-    res.unattributed += leaderlessAppServers(last, snapshotSec, marker, groups);
+    for (const pgid of goneRegistered) {
+      if (last.some((p) => p.pid === pgid)) continue;
+      const t = treeMembers(last, pgid, snapshotSec, uid);
+      res.unattributed += t.members.length + t.unattributed.length + t.unknown.length;
+    }
+    res.unattributed += leaderlessAppServers(last, snapshotSec, marker, new Set([...groups, ...goneRegistered]));
     if (res.left > 0) res.reason ??= "members_left";
     else if (res.unattributed > 0) res.reason ??= "unattributed";
     if (res.left === 0) {
@@ -894,6 +952,12 @@ async function stopSnapshotCompanion(root, table, remaining) {
   if (marker.state === "ok") {
     const row = table.find((p) => p.pid === marker.pid);
     if (row && row.uid === uid && brokerArgv(row.args, roots, COMPANION_SCRIPT) && !found.includes(row)) found.push(row);
+  }
+  // A companion gone before this stop leaves no identity for its group (its pid may have been reissued): members still
+  // there keep the snapshot, and are never signalled.
+  if (marker.state === "ok" && !table.some((p) => p.pid === marker.pid)) {
+    const t = treeMembers(table, marker.pid, snapshotSecond(root), uid);
+    if (t.members.length || t.unattributed.length || t.unknown.length) return false;
   }
   if (found.length === 0) return true;
   if (found.some((c) => c.pgid !== c.pid)) return false;
@@ -1192,7 +1256,7 @@ async function sweepOne(root, name, table, remaining) {
     // from it now (a fresh read; an unreadable table keeps it).
     if (!ownedRealDirectory(root)) return "skip";
     if (runsFrom(root)) return { left: 1, unattributed: 0, reason: "members_left" };
-    fs.rmSync(root, { recursive: true, force: true });
+    removeSnapshot(root);
     return "swept";
   } catch {
     return "failed";

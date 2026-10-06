@@ -538,15 +538,19 @@ function startRound(extra = {}, spec = specRepo()) {
   return { child, done: /** @type {Promise<{ code: number | null, json: { [k: string]: unknown } | null }>} */ (done) };
 }
 
-test("B: a broker killed mid-round leaves its child and grandchild; the round's finally kills both before removing the snapshot", { timeout: 60_000 }, async () => {
+test("B: a broker killed mid-round leaves its child and grandchild: never signalled (a gone pid proves nothing), the snapshot is kept and reported until they are gone", { timeout: 90_000 }, async () => {
   const r = startRound({ STUB_SLEEP_MS: "4000", FAKE_BROKER_CHILD: "2" });
   assert.ok(await until(() => fs.existsSync(env.BROKER_READY) && kids().length === 2, 20_000), "broker, child and grandchild started");
   signalPid(brokers()[0].pid, "SIGKILL");
   const res = await r.done;
   assert.equal(res.code, 0, JSON.stringify(res.json));
-  for (const k of kids()) assert.ok(await until(() => !alive(k.pid), 5000), `${k.grand ? "grandchild" : "child"} ${k.pid} was stopped`);
-  assert.deepEqual(snapshots(), [], "removed only once the tree is empty");
-  assert.deepEqual(brokerStopEvents(), []);
+  for (const k of kids()) assert.ok(alive(k.pid), `${k.grand ? "grandchild" : "child"} ${k.pid} was not signalled`);
+  assert.equal(snapshots().length, 1, "the snapshot is kept while they run");
+  assert.deepEqual(stopDetails().map((e) => [e.data.reason, e.data.left, e.data.unattributed]), [["unattributed", 0, 2]]);
+  for (const k of kids()) signalPid(k.pid, "SIGKILL");
+  for (const k of kids()) assert.ok(await until(() => !alive(k.pid), 5000));
+  assert.equal(round().code, 0);
+  assert.deepEqual(snapshots(), [], "the next sweep removes it once they are gone");
 });
 
 test("B: a broker that exits on SIGTERM without closing its child still leaves nothing running", { timeout: 60_000 }, async () => {
@@ -958,4 +962,38 @@ test("B: a broker.json pid alive as another process is never a group to empty, e
   } finally {
     signalPid(childPid, "SIGKILL");
   }
+});
+
+test("B: a dead companion whose group still has a member keeps its snapshot; the member is never signalled", { timeout: 60_000 }, async () => {
+  const parent = path.join(dir, "ws-companion-group");
+  fs.mkdirSync(parent, { mode: 0o700 });
+  const s = await deadSnapshot(parent, { broker: false });
+  await afterSnapshotSecond(s.root);
+  // A detached leader (standing in for the companion) that leaves a child in its group and exits.
+  const src = `const c = require("node:child_process").spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" }); process.stdout.write(String(c.pid) + "\\n"); setTimeout(() => process.exit(0), 100);`;
+  const leader = spawn(process.execPath, ["-e", src], { detached: true, stdio: ["ignore", "pipe", "ignore"] });
+  const childPid = await new Promise((res) => leader.stdout.once("data", (d) => res(Number(String(d).trim()))));
+  try {
+    await new Promise((res) => leader.once("exit", res));
+    fs.writeFileSync(path.join(s.root, "companion.json"), JSON.stringify({ pid: leader.pid }));
+    const res = await withSeams({ REVIEW_LOOP_TEST_SWEEP_TICK: "0" }, () => sweepStaleSnapshots(parent, { all: true }));
+    assert.deepEqual([res.swept, res.brokersLeft], [0, 1], JSON.stringify(res));
+    assert.ok(fs.existsSync(s.root), "the snapshot is kept");
+    assert.ok(alive(childPid), "the member was not signalled");
+  } finally {
+    signalPid(childPid, "SIGKILL");
+  }
+});
+
+test("B: a state dir too long for a socket path gets a short private temp dir, removed with the snapshot", { timeout: 60_000 }, async () => {
+  const long = path.join(path.dirname(env.REVIEW_LOOP_STATE_DIR), "x".repeat(60), "state");
+  env.REVIEW_LOOP_STATE_DIR = long;
+  const r = round();
+  assert.equal(r.code, 0, JSON.stringify(r.json));
+  const [b] = brokers();
+  const tmpRoot = path.dirname(b.sessionDir);
+  assert.match(path.basename(tmpRoot), /^rl-[A-Za-z0-9]{6}$/, `the broker's session dir was in a short private temp dir: ${b.sessionDir}`);
+  assert.ok(!fs.existsSync(tmpRoot), "which went with the snapshot");
+  assert.deepEqual(snapshots(), []);
+  fs.rmSync(path.dirname(path.dirname(long)), { recursive: true, force: true });
 });

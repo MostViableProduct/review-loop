@@ -165,14 +165,21 @@ These are copied from the spec, and every task implicitly includes them.
     counts only when every line parses and it holds this process's own row; an exit-0 empty/garbage answer is a
     failure, never "no broker".
   - **The stop.** `broker/shutdown`, SIGTERM to the broker, then, on a fresh table, SIGKILL to the whole group
-    after `signalGroupIfSame` re-reads the leader (`sameMember`: pid, lstart, pgid, args). A dead leader's group
-    is emptied member by member: `treeMembers` takes the group's members started strictly after the snapshot's
-    creation second (PPID ignored: grandchildren), each re-checked just before its SIGKILL. `cmdRun` waits past the
+    after `signalGroupIfSame` re-reads the leader (`sameMember`: pid, lstart, pgid, args). A verified broker that
+    dies during the stop has its group emptied member by member (`deadGroupTargets`): the group's members started
+    strictly after the snapshot's creation second (PPID ignored: grandchildren) AND already there, unchanged, at the
+    stop's first read, each re-checked just before its SIGKILL. A broker.json pid already gone at the first read is
+    never a group to signal (author's decision, 2026-10-06: its number may have been reissued): what still runs in
+    it is `unattributed`, the snapshot kept and reported. The same holds for a dead companion's group (sweep).
+    `cmdRun` waits past the
     snapshot's second before the companion starts (`afterSnapshotSecond`), so a same-second member is never the
     round's own: `unattributed`, never signalled. A `codex app-server` in a leaderless group inside the companion's
     pid window (`companion.json` = `{pid, after}`, written through `run`'s `onSpawn` and right after the companion
     exits) is `unattributed` too. Known limit: a broker that dies before broker.json AND whose app-server dies too
     leaves its grandchildren unattributed and unreported (no evidence names them).
+  - **Temp dir.** The companion runs with `TMPDIR` inside the snapshot (`companionTmp`), so a broker's `cxc-*` dir
+    goes with the snapshot even when no broker.json names it; when that socket path would pass 103 bytes (a long
+    state dir), a short `rl-XXXXXX` under the OS temp dir recorded in `tmp.json` instead, removed by `removeSnapshot`.
   - **Fail closed.** Anything unverifiable (`ps_unavailable`, `registry_unreadable`, `deadline`, `unknown_rows`,
     `members_left`, `unattributed`: `BROKER_STOP_REASONS`) signals nothing more and keeps the snapshot; the round
     logs `round.broker_stop` (reason, counts, the `plugin-XXXXXX` name), and a lost line is said on stderr
