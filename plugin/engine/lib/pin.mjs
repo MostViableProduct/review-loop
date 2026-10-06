@@ -345,6 +345,12 @@ export async function runCompanion(root, p) {
   // review's job files and broker.json there, and cleanup removes them (so these rounds no longer show in /codex:status).
   const dataDir = companionDataDir(root);
   fs.mkdirSync(dataDir, { recursive: true, mode: 0o700 });
+  // The companion's temp dir inside the snapshot too: the broker's cxc-* session dir then goes with the snapshot,
+  // even when the broker dies before broker.json names it. Not when its socket path would pass the platform's unix
+  // socket limit (104 bytes on macOS; the broker would not start, and the companion would run without one).
+  const tmp = path.join(root, "tmp");
+  const tmpEnv = Buffer.byteLength(path.join(tmp, "cxc-XXXXXX", "broker.sock")) <= SOCKET_PATH_MAX ? { TMPDIR: tmp } : {};
+  if (tmpEnv.TMPDIR) fs.mkdirSync(tmp, { recursive: true, mode: 0o700 });
   // The broker outlives the companion (detached, own session), so a signal must reap it from its broker.json.
   if (!reapers.has(root)) reapers.set(root, onReap(() => reapCompanionBroker(root)));
   /** @type {number | null} */
@@ -358,7 +364,7 @@ export async function runCompanion(root, p) {
   };
   let r;
   try {
-    r = await run(process.execPath, args, { cwd: p.cwd, env: { ...process.env, CLAUDE_PLUGIN_DATA: dataDir }, timeoutMs: p.timeoutMs ?? 15 * 60_000, maxBuffer: 32 * MiB, onSpawn });
+    r = await run(process.execPath, args, { cwd: p.cwd, env: { ...process.env, CLAUDE_PLUGIN_DATA: dataDir, ...tmpEnv }, timeoutMs: p.timeoutMs ?? 15 * 60_000, maxBuffer: 32 * MiB, onSpawn });
   } catch (err) {
     if (companionPid === null && !(err instanceof ReviewLoopError)) throw new ReviewLoopError("snapshot_owner_unknown", `could not record the companion's pid: ${/** @type {Error} */ (err).message}`);
     throw err;
@@ -793,7 +799,7 @@ export async function stopCompanionBroker(root, opts = {}) {
         }
         continue;
       }
-      const t = treeMembers(again, pgid, snapshotSec, uid);
+      const t = deadGroupTargets(table, again, pgid, snapshotSec, uid);
       if (t.unknown.length) keep("unknown_rows");
       for (const m of t.members) {
         if (remaining() <= 0) {
@@ -824,7 +830,7 @@ export async function stopCompanionBroker(root, opts = {}) {
         if (leaderThen && sameMember(leaderNow, leaderThen)) res.left++;
         continue;
       }
-      const t = treeMembers(last, pgid, snapshotSec, uid);
+      const t = deadGroupTargets(table, last, pgid, snapshotSec, uid);
       if (t.members.length || t.unknown.length) res.left++;
       res.unattributed += t.unattributed.length;
     }
@@ -844,6 +850,19 @@ export async function stopCompanionBroker(root, opts = {}) {
     reapers.delete(root);
   }
   return res;
+}
+
+/**
+ * The members of a group whose leader is gone that a stop may SIGKILL: treeMembers of the group now, kept only when
+ * already in the group, unchanged, at the stop's first read. A member that joined since could belong to a new group
+ * that reused the pid after the broker's own group emptied, so it is unattributed (kept, reported), never signalled.
+ * @param {Proc[]} first the stop's first table @param {Proc[]} now @param {number} pgid @param {number} snapshotSec
+ * @param {number | undefined} uid
+ */
+export function deadGroupTargets(first, now, pgid, snapshotSec, uid) {
+  const t = treeMembers(now, pgid, snapshotSec, uid);
+  const seen = (/** @type {Proc} */ m) => first.some((p) => sameMember(p, m));
+  return { members: t.members.filter(seen), unattributed: [...t.unattributed, ...t.members.filter((m) => !seen(m))], unknown: t.unknown };
 }
 
 /** The signal-path twin of stopCompanionBroker: synchronous, SIGTERM only, same identity checks. @param {string} root */
@@ -1189,6 +1208,8 @@ function runsFrom(root) {
 }
 
 const BROKER_FILES = new Set(["broker.sock", "broker.pid", "broker.log"]);
+/** Below every supported platform's sun_path size (macOS 104, Linux 108), less a terminating byte. */
+const SOCKET_PATH_MAX = 103;
 
 /**
  * Whether broker.json's session dir is that dead broker's own and unused: a real directory of ours (never a link)

@@ -13,7 +13,7 @@ import { makeRepo, commitFile, writeFile, tmpDir, GIT_ENV } from "./helpers.mjs"
 import { isRealPid, signalPid } from "../fakes/signal.mjs";
 import { validateLine } from "../../plugin/engine/lib/events.mjs";
 import {
-  afterSnapshotSecond, brokerArgv, hashOf, isHeld, parseProcRow, partitionCount, sameMember, stopCompanionBroker, sweepStaleSnapshots, treeMembers
+  afterSnapshotSecond, brokerArgv, deadGroupTargets, hashOf, isHeld, parseProcRow, partitionCount, sameMember, stopCompanionBroker, sweepStaleSnapshots, treeMembers
 } from "../../plugin/engine/lib/pin.mjs";
 
 const HERE = path.dirname(new URL(import.meta.url).pathname);
@@ -144,7 +144,9 @@ beforeEach(() => {
   env = {
     ...GIT_ENV,
     PATH: process.env.PATH ?? "/usr/bin:/bin",
-    REVIEW_LOOP_STATE_DIR: path.join(dir, "state"),
+    // Short, as a home dir's is: under the OS temp dir the companion's socket path would pass the unix socket limit,
+    // and the round would (rightly) leave the companion's temp dir where it is.
+    REVIEW_LOOP_STATE_DIR: path.join(fs.realpathSync(fs.mkdtempSync("/tmp/rlb-")), "state"),
     REVIEW_LOOP_PLUGIN_BASE: stubPlugin(),
     REVIEW_LOOP_PIN_FILE: path.join(dir, "pin.json"),
     REVIEW_LOOP_CONFIG: path.join(dir, "cfg.json"),
@@ -173,6 +175,7 @@ afterEach(() => {
   }
   for (const k of kids()) if (alive(k.pid)) signalPid(k.pid, "SIGKILL");
   for (const pid of reapAfter.splice(0)) if (alive(pid)) signalPid(pid, "SIGKILL", { group: true });
+  fs.rmSync(path.dirname(env.REVIEW_LOOP_STATE_DIR), { recursive: true, force: true });
 });
 
 /** The fake broker's children and grandchildren, as each recorded itself. @returns {Array<{ pid: number, grand?: boolean }>} */
@@ -573,6 +576,7 @@ test("B: a broker that died before writing broker.json leaves a codex app-server
   assert.ok(await until(() => !alive(k.pid), 5000));
   assert.equal(round().code, 0);
   assert.deepEqual(snapshots(), [], "the next sweep removes it once the process is gone");
+  assert.ok(!fs.existsSync(brokers()[0].sessionDir), "and its cxc-* dir, which no broker.json named, went with it");
 });
 
 test("B: a live broker with no broker.json is found in the process table and stopped", { timeout: 60_000 }, async () => {
@@ -583,6 +587,7 @@ test("B: a live broker with no broker.json is found in the process table and sto
   const [b] = brokers();
   assert.ok(await until(() => !alive(b.pid), 5000));
   assert.deepEqual(snapshots(), []);
+  assert.ok(!fs.existsSync(b.sessionDir), "its cxc-* dir went with the snapshot");
 });
 
 test("B: a broker.json pid whose args merely contain the broker path is never signalled", { timeout: 60_000 }, async () => {
@@ -698,6 +703,17 @@ test("units: treeMembers keeps the group's later starts whatever their parent, s
   assert.deepEqual(t.members.map((r) => r.pid), [11, 12], "later starts, the grandchild (parent 11) included");
   assert.deepEqual(t.unattributed.map((r) => r.pid), [13], "the snapshot's own second is ambiguous");
   assert.deepEqual(t.unknown.map((r) => r.pid), [17]);
+});
+
+test("units: deadGroupTargets kills only members already in the group at the first read; a pid reused since is never signalled", () => {
+  const p = (/** @type {number} */ pid, /** @type {number} */ started, args = "a") => ({ uid: 501, pid, ppid: 1, pgid: 10, lstart: String(started), started, args });
+  const first = [p(11, 101), p(12, 102)];
+  // 11 is unchanged; 12 exited and its pid was reissued (other start); 13 joined the group after the first read.
+  const now = [p(11, 101), p(12, 104, "b"), p(13, 105)];
+  const t = deadGroupTargets(first, now, 10, 100, 501);
+  assert.deepEqual(t.members.map((r) => r.pid), [11]);
+  assert.deepEqual(t.unattributed.map((r) => r.pid).sort(), [12, 13]);
+  assert.deepEqual(deadGroupTargets([], now, 10, 100, 501).members, [], "a group first seen after the first read: nothing");
 });
 
 test("units: sameMember differs on any of pid, start, group or args", () => {
