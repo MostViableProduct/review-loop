@@ -965,7 +965,11 @@ async function stopSnapshotCompanion(root, table, remaining) {
   for (const c of found) await exitedWithin(c.pid, Math.min(2000, remaining()));
   for (const c of found) if (isAlive(c.pid) && !signalGroupIfSame(c, "SIGKILL")) return false;
   for (const c of found) await exitedWithin(c.pid, Math.min(1000, remaining()));
-  return found.every((c) => !isAlive(c.pid));
+  // A companion that exits on SIGTERM can leave a child in its group, and with the leader gone that group is not
+  // signalled again (see above): the snapshot is kept while anything of it remains.
+  const after = readProcs();
+  if (after === null) return false;
+  return found.every((c) => !after.some((p) => p.pid === c.pid || (p.pgid === c.pid && p.uid === uid)));
 }
 
 const OWNER_FILE = "owner.json";

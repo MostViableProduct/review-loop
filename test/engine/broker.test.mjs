@@ -997,3 +997,30 @@ test("B: a state dir too long for a socket path gets a short private temp dir, r
   assert.deepEqual(snapshots(), []);
   fs.rmSync(path.dirname(path.dirname(long)), { recursive: true, force: true });
 });
+
+test("B: a dead round's companion that exits on SIGTERM and leaves a child keeps its snapshot", { timeout: 60_000 }, async () => {
+  const parent = path.join(dir, "ws-companion-child");
+  fs.mkdirSync(parent, { mode: 0o700 });
+  const s = await deadSnapshot(parent, { broker: false });
+  await afterSnapshotSecond(s.root);
+  const script = path.join(s.root, "scripts", "codex-companion.mjs");
+  const kidFile = path.join(dir, "companion-kid.pid");
+  // The child names itself only once its SIGTERM handler is in place.
+  fs.writeFileSync(script, `import { spawn } from "node:child_process"; spawn(process.execPath, ["-e", "process.on('SIGTERM', () => {}); require('fs').writeFileSync(process.env.KID_FILE, String(process.pid)); setInterval(() => {}, 1000)"], { stdio: "ignore" }); process.on("SIGTERM", () => process.exit(0)); setInterval(() => {}, 1000);`);
+  // Started through a parent that exits at once, so it is reparented like a dead round's companion (never a zombie
+  // of this test process, which a stop would still see as running).
+  const launch = `const c = require("node:child_process").spawn(process.execPath, [${JSON.stringify(script)}], { detached: true, stdio: "ignore", env: { ...process.env, KID_FILE: ${JSON.stringify(kidFile)} } }); c.unref(); process.stdout.write(String(c.pid));`;
+  const companionPid = Number(spawnSync(process.execPath, ["-e", launch], { encoding: "utf8" }).stdout);
+  reapAfter.push(companionPid);
+  assert.ok(await until(() => fs.existsSync(kidFile) && fs.readFileSync(kidFile, "utf8").length > 0, 5000));
+  const childPid = Number(fs.readFileSync(kidFile, "utf8"));
+  try {
+    const res = await withSeams({ REVIEW_LOOP_TEST_SWEEP_TICK: "0" }, () => sweepStaleSnapshots(parent, { all: true }));
+    assert.ok(await until(() => !alive(companionPid), 3000), "the companion was stopped");
+    assert.deepEqual([res.swept, res.brokersLeft], [0, 1], JSON.stringify(res));
+    assert.ok(fs.existsSync(s.root), "the snapshot is kept while its child runs");
+    assert.ok(alive(childPid));
+  } finally {
+    signalPid(childPid, "SIGKILL");
+  }
+});
