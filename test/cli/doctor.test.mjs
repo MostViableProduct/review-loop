@@ -531,11 +531,16 @@ test("orphaned_brokers: never signals; the stop-orphan command it prints stops t
 test("orphaned_brokers: a process table that cannot be read is a warning, never a pass", async () => {
   healthy();
   makeFakeBin(bin, "ps", { "*": { code: 2 } });
+  // Through the engine's seam: it runs /bin/ps, never the PATH one.
+  process.env.REVIEW_LOOP_TEST_SEAMS = "1";
+  process.env.REVIEW_LOOP_TEST_PS_PATH = path.join(bin, "ps");
   try {
     const r = await check("orphaned_brokers").run(ctx());
     assert.equal(r.status, "warn");
     assert.match(r.note ?? "", /unverified/);
   } finally {
+    delete process.env.REVIEW_LOOP_TEST_SEAMS;
+    delete process.env.REVIEW_LOOP_TEST_PS_PATH;
     fs.rmSync(path.join(bin, "ps"), { force: true });
   }
 });

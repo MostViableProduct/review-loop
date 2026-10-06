@@ -122,9 +122,11 @@ These are copied from the spec, and every task implicitly includes them.
     way, removing the lock only while it still carries that token.
   - Pinned by the `lock section:` tests in `state-policy.test.mjs`, the e2e "fenced before paying" test, and sabotage
     rows `lock-section-exclusive`, `lock-marker-no-expiry`, `lock-ident-fixed-env`, `lock-release-own-only`.
-  - **Known follow-up (Coherence):** the other engine `ps` calls (`pin.mjs` broker verification and snapshot sweep,
-    `settings.mjs` writer check) still resolve `ps` through PATH. Moving them onto `/bin/ps` with a fixed env is a
-    separate change; their tests stub `ps` on PATH and would switch to `REVIEW_LOOP_TEST_PS_PATH`.
+  - Every engine `ps` whose answer decides identity (this lock, and `pin.mjs`'s broker verification and sweep since
+    1.0.4) runs `trustedPs()` (`proc.mjs`: `/bin/ps`, or `REVIEW_LOOP_TEST_PS_PATH` behind `REVIEW_LOOP_TEST_SEAMS`)
+    under a fixed env; pinned by "B: a ps on PATH is never consulted" and sabotage row `trusted-ps`. **Known
+    follow-up (Coherence):** `cli/lib/settings.mjs`'s writer check still resolves `ps` through PATH (it only reports
+    a running Claude, never signals); its tests stub `ps` on PATH.
 - **Symlinks** are rejected on config, rubric, events path, the Codex config read and the state dir.
 - **The literal string of the GitHub CLI PR-create command** must not appear in any shell command you
   run in Claude Code: the author's live PR gate denies it. Build it from parts in scripts

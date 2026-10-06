@@ -869,7 +869,8 @@ test("lock section: identity comes from /bin/ps alone — a PATH ps can't fake a
   assert.deepEqual(fs.readdirSync(locksDir()).filter((n) => n.startsWith(`${fresh}.lock.reclaim.`)), [], "no identity, no marker");
 
   const src = fs.readFileSync(new URL(STATE_MJS), "utf8");
-  assert.match(src, /: "\/bin\/ps";/);
+  assert.match(src, /execFileSync\(trustedPs\(\), /, "the lock reads identity through the shared trusted ps");
+  assert.match(fs.readFileSync(new URL("proc.mjs", new URL(STATE_MJS)), "utf8"), /: "\/bin\/ps";/);
   assert.match(src, /env: \{ PATH: "\/usr\/bin:\/bin", LC_ALL: "C", TZ: "UTC" \}/);
   assert.doesNotMatch(src, /execFileSync\("ps"/);
   const root = new URL("../../", import.meta.url).pathname;

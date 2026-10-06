@@ -6,7 +6,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { ReviewLoopError } from "./errors.mjs";
 import { safeReadFile, sha256hex, atomicWriteJson, readJsonValidated, isObject, MiB } from "./fsutil.mjs";
-import { run, onReap } from "./proc.mjs";
+import { run, onReap, trustedPs } from "./proc.mjs";
 import { claudeConfigDir as claudeDir, stateRoot } from "./paths.mjs";
 import { SEVERITIES } from "./scoring.mjs";
 import { companionArgs } from "./codexcfg.mjs";
@@ -514,7 +514,7 @@ function readProcs() {
 
 /** One process now: its row, "gone", or null when ps could not answer. @param {number} pid @returns {Proc | "gone" | null} */
 function procRow(pid) {
-  const r = spawnSync("ps", ["-ww", "-o", PROC_FIELDS, "-p", String(pid)], { encoding: "utf8", timeout: 2000, env: psEnv() });
+  const r = spawnSync(trustedPs(), ["-ww", "-o", PROC_FIELDS, "-p", String(pid)], { encoding: "utf8", timeout: 2000, env: psEnv() });
   if (r.error || r.signal) return null;
   const lines = r.stdout.split("\n").filter((l) => l.trim());
   if (r.status === 1 && lines.length === 0) return "gone";
@@ -1014,12 +1014,12 @@ export const LEGACY_SNAPSHOT_AGE_MS = 24 * 60 * 60_000;
  * @returns {{ out: string, pid: number } | null}
  */
 function ps(args) {
-  const r = spawnSync("ps", args, { encoding: "utf8", timeout: 2000, maxBuffer: 16 * MiB, env: psEnv() });
+  const r = spawnSync(trustedPs(), args, { encoding: "utf8", timeout: 2000, maxBuffer: 16 * MiB, env: psEnv() });
   return r.error || r.signal || r.status !== 0 ? null : { out: r.stdout, pid: r.pid };
 }
 
 /** Every `ps` here runs in the C locale and UTC (see ps). */
-const psEnv = () => ({ ...process.env, LC_ALL: "C", TZ: "UTC" });
+const psEnv = () => ({ PATH: "/usr/bin:/bin", LC_ALL: "C", TZ: "UTC" });
 
 /** @param {string} s */
 const squash = (s) => s.trim().replace(/\s+/g, " ");

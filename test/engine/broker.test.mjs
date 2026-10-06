@@ -261,6 +261,9 @@ function stopDetails() {
 }
 
 /** A `ps` on PATH whose whole-table reads (-A) fail and whose one-process reads work: the table cannot be read. */
+/** The engine's ps swapped for `<bin>/ps`, through the test seam (never PATH: the engine runs /bin/ps). @param {string} bin */
+const psSeam = (bin) => ({ REVIEW_LOOP_TEST_SEAMS: "1", REVIEW_LOOP_TEST_PS_PATH: path.join(bin, "ps") });
+
 function tablePsFails() {
   const bin = path.join(dir, "table-ps-fails");
   fs.mkdirSync(bin, { recursive: true });
@@ -269,7 +272,7 @@ function tablePsFails() {
 }
 
 test("A: when the process table cannot be read, nothing is signalled and the snapshot is kept; the next round clears it", { timeout: 60_000 }, async () => {
-  const r = round({ FAKE_BROKER_IGNORE_SHUTDOWN: "1", PATH: `${tablePsFails()}:${env.PATH}` });
+  const r = round({ FAKE_BROKER_IGNORE_SHUTDOWN: "1", ...psSeam(tablePsFails()) });
   assert.equal(r.code, 0, JSON.stringify(r.json));
   const [b] = brokers();
   assert.ok(alive(b.pid), "an unverified broker is left running");
@@ -484,7 +487,7 @@ test("R2: when ps cannot answer, a live-owner snapshot and an old legacy snapsho
   fs.mkdirSync(legacy, { mode: 0o700 });
   const old = new Date(Date.now() - 25 * 60 * 60_000);
   fs.utimesSync(legacy, old, old);
-  assert.equal(round({ PATH: `${tablePsFails()}:${env.PATH}` }).code, 0);
+  assert.equal(round(psSeam(tablePsFails())).code, 0);
   assert.ok(alive(left.broker.pid));
   for (const kept of [path.basename(left.root), "plugin-legacy-old"]) assert.ok(snapshots().includes(kept), `${kept} is left alone`);
   assert.deepEqual(sweepEvents().map((e) => [e.code, e.data.swept, e.data.incomplete]), [["snapshot_sweep_incomplete", 0, 1]], "nothing swept, and the sweep says it could not verify");
@@ -675,7 +678,7 @@ test("C: a lost round.broker_stop line is said on stderr, never silent", { timeo
   const events = path.join(env.REVIEW_LOOP_STATE_DIR, "events.jsonl");
   fs.writeFileSync(events, "", { mode: 0o400 });
   try {
-    const r = spawnSync(process.execPath, [ROUND, "run", "--kind", "spec", "--path", specRepo()], { env: { ...env, PATH: `${tablePsFails()}:${env.PATH}` }, encoding: "utf8" });
+    const r = spawnSync(process.execPath, [ROUND, "run", "--kind", "spec", "--path", specRepo()], { env: { ...env, ...psSeam(tablePsFails()) }, encoding: "utf8" });
     assert.equal(r.status, 0, r.stdout);
     assert.match(r.stderr, /review-loop: event_write_failed \{"event":"round\.broker_stop","code":"broker_stop_failed"/);
   } finally {
@@ -871,7 +874,7 @@ test("B: a ps that exits 0 without a real table (empty, header only, garbage) is
   fs.mkdirSync(bin);
   for (const [i, body] of ["", "  UID   PID  PPID  PGID STARTED ARGS\n", "x y z\n"].entries()) {
     fs.writeFileSync(path.join(bin, "ps"), `#!/bin/sh\nfor a in "$@"; do [ "$a" = "-A" ] && { printf '%s' ${JSON.stringify(body)}; exit 0; }; done\nexec /bin/ps "$@"\n`, { mode: 0o755 });
-    const r = round({ PATH: `${bin}:${env.PATH}`, FAKE_BROKER_IGNORE_SHUTDOWN: "1" });
+    const r = round({ ...psSeam(bin), FAKE_BROKER_IGNORE_SHUTDOWN: "1" });
     assert.equal(r.code, 0, JSON.stringify(r.json));
     const b = brokers().at(-1);
     assert.ok(b && alive(b.pid), `case ${i}: the broker was not signalled`);
@@ -883,8 +886,9 @@ test("B: a ps that exits 0 without a real table (empty, header only, garbage) is
 test("A: a round whose start time ps cannot read starts no companion and leaves no snapshot (snapshot_owner_unknown)", { timeout: 60_000 }, async () => {
   const bin = path.join(dir, "no-ps");
   fs.mkdirSync(bin);
-  fs.writeFileSync(path.join(bin, "ps"), "#!/bin/sh\nexit 2\n", { mode: 0o755 });
-  const r = round({ PATH: `${bin}:${env.PATH}` });
+  // Fails every read but the lock's own identity read (which this test is not about).
+  fs.writeFileSync(path.join(bin, "ps"), '#!/bin/sh\ncase "$*" in *"lstart=,command="*) exec /bin/ps "$@" ;; esac\nexit 2\n', { mode: 0o755 });
+  const r = round(psSeam(bin));
   assert.equal(r.code, 30, JSON.stringify(r.json));
   assert.equal(r.json.error.code, "snapshot_owner_unknown");
   assert.deepEqual(brokers(), [], "no companion ran");
@@ -1048,4 +1052,14 @@ test("B: a dead broker's broker.pid that is a link is never followed: its dir is
   const r = await stopCompanionBroker(s.root);
   assert.deepEqual([r.left, r.unattributed], [0, 0]);
   assert.ok(fs.existsSync(s.sessionDir), "a pid file that is a link binds nothing");
+});
+
+test("B: a ps on PATH is never consulted for broker identity: a shim that fails every read changes nothing", { timeout: 60_000 }, async () => {
+  const bin = path.join(dir, "path-ps");
+  fs.mkdirSync(bin);
+  fs.writeFileSync(path.join(bin, "ps"), "#!/bin/sh\nexit 2\n", { mode: 0o755 });
+  const r = round({ PATH: `${bin}:${env.PATH}`, FAKE_BROKER_IGNORE_SHUTDOWN: "1" });
+  assert.equal(r.code, 0, JSON.stringify(r.json));
+  await assertCleanedUp("PATH ps");
+  assert.deepEqual(brokerLog(), ["sigterm"], "identity came from /bin/ps, so the broker was matched and stopped");
 });

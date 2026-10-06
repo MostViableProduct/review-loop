@@ -17,6 +17,14 @@ let signalMode = "reap-and-reraise";
  * stop the CLI.
  * @param {"reap-and-reraise" | "reap-only"} mode
  */
+/**
+ * The ps whose answers decide identity (a lock holder, a broker to signal): /bin/ps, never a PATH lookup, so a shim on
+ * PATH cannot forge a process table. Tests swap it only behind REVIEW_LOOP_TEST_SEAMS.
+ */
+export function trustedPs() {
+  return process.env.REVIEW_LOOP_TEST_SEAMS === "1" && process.env.REVIEW_LOOP_TEST_PS_PATH ? process.env.REVIEW_LOOP_TEST_PS_PATH : "/bin/ps";
+}
+
 export function setSignalMode(mode) {
   signalMode = mode;
 }

@@ -8,6 +8,7 @@ import { stateRoot, stateSubdir } from "./paths.mjs";
 import { emitEvent } from "./events.mjs";
 import { OPTIONS } from "./policy.mjs";
 import { isTreeRef } from "./pin.mjs";
+import { trustedPs } from "./proc.mjs";
 
 export { stateRoot, stateSubdir };
 
@@ -509,9 +510,8 @@ function sleepSync(ms) {
  * @param {number} pid @returns {string | null} null on any failure or empty output
  */
 export function processIdent(pid) {
-  const ps = process.env.REVIEW_LOOP_TEST_SEAMS === "1" && process.env.REVIEW_LOOP_TEST_PS_PATH ? process.env.REVIEW_LOOP_TEST_PS_PATH : "/bin/ps";
   try {
-    const out = execFileSync(ps, ["-ww", "-o", "lstart=,command=", "-p", String(pid)], {
+    const out = execFileSync(trustedPs(), ["-ww", "-o", "lstart=,command=", "-p", String(pid)], {
       timeout: 2000,
       maxBuffer: 256 * 1024,
       stdio: ["ignore", "pipe", "ignore"],
