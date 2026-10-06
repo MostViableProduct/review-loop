@@ -1314,9 +1314,8 @@ function deadBrokersOwnDir(dir, pid) {
     const names = namesUpTo(dir, BROKER_FILES.size);
     if (names === "too_large" || !names.every((n) => BROKER_FILES.has(n))) return false;
     // The broker writes its own pid here at start (--pid-file); without it nothing binds the dir to this broker.
-    const pidFile = path.join(dir, "broker.pid");
-    const st = fs.lstatSync(pidFile);
-    if (!st.isFile() || st.size > 32 || fs.readFileSync(pidFile, "utf8").trim() !== String(pid)) return false;
+    // Bounded, never through a link, its parents checked from the session dir (safeReadFile throws otherwise).
+    if (safeReadFile(path.join(dir, "broker.pid"), 32, {}, { within: dir }).toString("utf8").trim() !== String(pid)) return false;
   } catch {
     return false;
   }

@@ -1034,3 +1034,18 @@ test("units: namesUpTo stops reading past its cap instead of listing the whole d
   assert.equal(namesUpTo(d, 199), "too_large");
   assert.throws(() => namesUpTo(path.join(d, "absent"), 5), { code: "ENOENT" });
 });
+
+test("B: a dead broker's broker.pid that is a link is never followed: its dir is kept", { timeout: 60_000 }, async () => {
+  const parent = path.join(dir, "ws-pidlink");
+  fs.mkdirSync(parent, { mode: 0o700 });
+  const s = await deadSnapshot(parent);
+  signalPid(s.pid, "SIGKILL");
+  assert.ok(await until(() => !alive(s.pid), 3000));
+  const outside = path.join(dir, "outside.pid");
+  fs.writeFileSync(outside, `${s.pid}\n`);
+  fs.rmSync(path.join(s.sessionDir, "broker.pid"));
+  fs.symlinkSync(outside, path.join(s.sessionDir, "broker.pid"));
+  const r = await stopCompanionBroker(s.root);
+  assert.deepEqual([r.left, r.unattributed], [0, 0]);
+  assert.ok(fs.existsSync(s.sessionDir), "a pid file that is a link binds nothing");
+});
