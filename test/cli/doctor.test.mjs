@@ -625,7 +625,7 @@ test("orphaned_brokers: a snapshot restored between a member's check and its SIG
   assert.ok(process.kill(pid, 0), "the broker was not SIGKILLed");
 });
 
-test("orphaned_brokers: a broker that exits after doctor listed it leaves its app-server reported, never signalled", { timeout: 40_000 }, async () => {
+test("orphaned_brokers: a broker that exits after doctor listed it: stop-orphan names its group (leader_gone) and signals nothing", { timeout: 40_000 }, async () => {
   const h = healthy();
   const pid = orphanBroker(h, { termLeavesChild: true, appServer: true });
   const r = await check("orphaned_brokers").run(ctx());
@@ -638,12 +638,10 @@ test("orphaned_brokers: a broker that exits after doctor listed it leaves its ap
   const engine = path.join(process.cwd(), "plugin", "engine", "review-round.mjs");
   const out = spawnSync(process.execPath, [engine, "stop-orphan", "--snapshot", cmd[1], "--pid", cmd[2], "--started", cmd[3], "--args-sha", cmd[4]], { env: process.env, encoding: "utf8", timeout: 20_000 });
   assert.equal(out.status, 60, out.stdout);
-  assert.equal(JSON.parse(out.stdout).status, "leader_gone");
+  assert.deepEqual(JSON.parse(out.stdout), { exit: 60, status: "leader_gone", pgid: pid });
   assert.ok(process.kill(member, 0), "the app-server was not signalled");
-  const again = await check("orphaned_brokers").run(ctx());
-  assert.equal(again.status, "warn");
-  assert.match(again.fix ?? "", new RegExp(`codex app-server ${member} has no broker`), "and it stays visible");
-  assert.doesNotMatch(again.fix ?? "", new RegExp(`stop-orphan[^\\n]*--pid ${member}\\b`), "with no command that would signal it");
   assert.deepEqual(events(h).filter((e) => e.event === "round.stop_orphan").map((e) => [e.code, e.data.status]), [["orphaned_brokers", "leader_gone"]]);
+  // Nothing ties a leaderless app-server to review-loop rather than another Codex client: doctor does not count it.
+  assert.equal((await check("orphaned_brokers").run(ctx())).status, "pass");
   signalPid(member, "SIGKILL");
 });

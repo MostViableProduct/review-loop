@@ -413,7 +413,8 @@ async function cmdStopOrphan(v) {
   }
   const status = await stopOrphan(stateSubdir("ws"), { snapshot, pid, started, argsSha });
   report("round.stop_orphan", status === "stopped" ? "ok" : "orphaned_brokers", { status });
-  out({ status }, status === "stopped" ? EXIT.PASS : EXIT.SWEEP_INCOMPLETE);
+  // pgid: the group the command acted on, for `ps -o pid,pgid,lstart,args -g <pgid>` (with leader_gone: what is left).
+  out({ status, pgid: pid }, status === "stopped" ? EXIT.PASS : EXIT.SWEEP_INCOMPLETE);
 }
 
 /** @param {{ kind: string }} identity */

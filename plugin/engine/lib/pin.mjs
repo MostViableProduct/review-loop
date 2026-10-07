@@ -1345,10 +1345,7 @@ function ownedRealDirectory(p) {
   }
 }
 
-/**
- * @typedef {{ kind: "missing_snapshot", pid: number, pgid: number, snapshot: string, started: number, argsSha: string }
- *   | { kind: "leaderless_app_server", pid: number, pgid: number }} Orphan
- */
+/** @typedef {{ kind: "missing_snapshot", pid: number, pgid: number, snapshot: string, started: number, argsSha: string }} Orphan */
 
 /**
  * Read-only, for doctor: brokers this user runs from a `ws/plugin-*` snapshot that is gone (nothing can attribute
@@ -1376,11 +1373,6 @@ export function countOrphanBrokers(parentDir) {
       if (/** @type {NodeJS.ErrnoException} */ (e).code !== "ENOENT") return res;
     }
     res.orphans.push({ kind: "missing_snapshot", pid: p.pid, pgid: p.pgid, snapshot: m[1], started: p.started, argsSha: sha256hex(p.args) });
-  }
-  // A `codex app-server` whose group has no leader: a Codex broker died and left it. Nothing ties it to one snapshot
-  // (its pid number proves nothing once the broker is gone), so it is only reported, for the operator to inspect.
-  for (const p of procs) {
-    if (p.uid === uid && APP_SERVER_ARGS.test(p.args) && !procs.some((l) => l.pid === p.pgid)) res.orphans.push({ kind: "leaderless_app_server", pid: p.pid, pgid: p.pgid });
   }
   const w = walkSnapshots(parentDir, (name) => {
     const root = path.join(parentDir, name);
@@ -1415,7 +1407,8 @@ export async function stopOrphan(parentDir, o) {
   };
   const first = check();
   // A broker gone before this command leaves no identity for its group (its pid may have been reissued): what still
-  // runs there is reported, never signalled (doctor lists it as a leaderless app-server).
+  // runs there is reported (`leader_gone`, with the group to inspect), never signalled. Doctor does not list it: a
+  // leaderless app-server has nothing tying it to review-loop rather than another Codex client.
   if (first === "gone") {
     const table = readProcs();
     if (table === null) return "unverified";
