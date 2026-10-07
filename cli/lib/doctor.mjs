@@ -289,6 +289,11 @@ function orphanFix(o) {
   const engine = 'node "$(review-loop engine-path)/review-round.mjs"';
   const lines = [`${engine} sweep`];
   for (const b of o.orphans.slice(0, 10)) {
+    if (b.kind === "not_leader") {
+      // stop-orphan signals only a broker that leads its own group; this one shares its launcher's group.
+      lines.push(`      broker ${b.pid} (snapshot ${b.snapshot} removed) does not lead its process group, so stop-orphan will not act on it; inspect: ps -o pid,pgid,lstart,args -g ${b.pgid}`);
+      continue;
+    }
     lines.push(
       `      then, if broker ${b.pid} is still listed: ps -o pid,pgid,args -g ${b.pgid}`,
       `      and if that tree is a leftover (no review running): ${engine} stop-orphan --snapshot ${b.snapshot} --pid ${b.pid} --started ${b.started} --args-sha ${b.argsSha}`

@@ -1404,7 +1404,12 @@ function ownedRealDirectory(p) {
   }
 }
 
-/** @typedef {{ kind: "missing_snapshot", pid: number, pgid: number, snapshot: string, started: number, argsSha: string }} Orphan */
+/**
+ * missing_snapshot: a group-leading broker whose snapshot is gone (stop-orphan can act on it). not_leader: the same,
+ * but in a group it does not lead (its launcher's), which stop-orphan never signals: listed for the operator only.
+ * @typedef {{ kind: "missing_snapshot", pid: number, pgid: number, snapshot: string, started: number, argsSha: string }
+ *   | { kind: "not_leader", pid: number, pgid: number, snapshot: string }} Orphan
+ */
 
 /**
  * Read-only, for doctor: brokers this user runs from a `ws/plugin-*` snapshot that is gone (nothing can attribute
@@ -1430,7 +1435,8 @@ export function countOrphanBrokers(parentDir) {
     const st = wsState(path.join(parentDir, m[1]));
     if (st === "ok") continue;
     if (st === "failed") return res;
-    res.orphans.push({ kind: "missing_snapshot", pid: p.pid, pgid: p.pgid, snapshot: m[1], started: p.started, argsSha: sha256hex(p.args) });
+    if (p.pgid !== p.pid) res.orphans.push({ kind: "not_leader", pid: p.pid, pgid: p.pgid, snapshot: m[1] });
+    else res.orphans.push({ kind: "missing_snapshot", pid: p.pid, pgid: p.pgid, snapshot: m[1], started: p.started, argsSha: sha256hex(p.args) });
   }
   let odd = 0;
   const w = walkSnapshots(parentDir, (name) => {

@@ -65,8 +65,8 @@ const STUBBORN_CHILD = 'spawn(process.execPath, ["-e", "process.on(\\"SIGTERM\\"
  * broker script, it leads its own group, and it has a child in that group. `ignoreTerm`: the broker ignores SIGTERM;
  * `termLeavesChild`: on SIGTERM it exits without closing its child; `termSpawnsChild`: on SIGTERM it first starts a
  * new child (in its group, ignoring SIGTERM), then exits. `appServer`: the child is a `codex app-server` (by its
- * command line) that ignores SIGTERM.
- * @param {string} h @param {{ ignoreTerm?: boolean, termLeavesChild?: boolean, termSpawnsChild?: boolean, appServer?: boolean }} [o]
+ * command line) that ignores SIGTERM. `nonLeader`: the broker runs in its (exited) launcher's group, not its own.
+ * @param {string} h @param {{ ignoreTerm?: boolean, termLeavesChild?: boolean, termSpawnsChild?: boolean, appServer?: boolean, nonLeader?: boolean }} [o]
  */
 function orphanBroker(h, o = {}) {
   const root = path.join(h, "state", "ws", "plugin-AbC123");
@@ -85,12 +85,28 @@ function orphanBroker(h, o = {}) {
   fs.writeFileSync(path.join(root, "scripts", "app-server-broker.mjs"), src);
   // Started through a parent that exits at once, so it is reparented to launchd like a real leftover (and reaped by
   // it, not left a zombie of this test process).
-  const launch = `const c = require("node:child_process").spawn(process.execPath, [${JSON.stringify(path.join(root, "scripts", "app-server-broker.mjs"))}, "serve"], { detached: true, stdio: "ignore" }); c.unref(); process.stdout.write(String(c.pid));`;
-  const c = { pid: Number(spawnSync(process.execPath, ["-e", launch], { encoding: "utf8" }).stdout) };
-  orphans.push(c.pid);
+  const broker = JSON.stringify(path.join(root, "scripts", "app-server-broker.mjs"));
+  let c;
+  let group;
+  if (o.nonLeader) {
+    // A detached launcher (its own group) starts the broker in that group and exits: the broker leads nothing.
+    const pidFile = path.join(h, "non-leader.pid");
+    const launcher = path.join(h, "launcher.mjs");
+    fs.writeFileSync(launcher, `import { spawn } from "node:child_process"; import fs from "node:fs"; const b = spawn(process.execPath, [${broker}, "serve"], { stdio: "ignore" }); b.unref(); fs.writeFileSync(${JSON.stringify(pidFile)}, String(b.pid)); setTimeout(() => process.exit(0), 300);`);
+    const launch = `const c = require("node:child_process").spawn(process.execPath, [${JSON.stringify(launcher)}], { detached: true, stdio: "ignore" }); c.unref(); process.stdout.write(String(c.pid));`;
+    group = Number(spawnSync(process.execPath, ["-e", launch], { encoding: "utf8" }).stdout);
+    const until = Date.now() + 5000;
+    while (Date.now() < until && !(fs.existsSync(pidFile) && fs.readFileSync(pidFile, "utf8"))) spawnSync("/bin/sleep", ["0.05"]);
+    c = { pid: Number(fs.readFileSync(pidFile, "utf8")) };
+  } else {
+    const launch = `const c = require("node:child_process").spawn(process.execPath, [${broker}, "serve"], { detached: true, stdio: "ignore" }); c.unref(); process.stdout.write(String(c.pid));`;
+    c = { pid: Number(spawnSync(process.execPath, ["-e", launch], { encoding: "utf8" }).stdout) };
+    group = c.pid;
+  }
+  orphans.push(group);
   // The broker has read its script by the time its child exists; then the snapshot can go.
   const end = Date.now() + 5000;
-  while (Date.now() < end && spawnSync("/bin/ps", ["-o", "pid=", "-g", String(c.pid)], { encoding: "utf8" }).stdout.trim().split("\n").length < 2) spawnSync("/bin/sleep", ["0.05"]);
+  while (Date.now() < end && spawnSync("/bin/ps", ["-o", "pid=", "-g", String(group)], { encoding: "utf8" }).stdout.trim().split("\n").length < 2 + (o.nonLeader ? 1 : 0)) spawnSync("/bin/sleep", ["0.05"]);
   fs.rmSync(root, { recursive: true });
   return /** @type {number} */ (c.pid);
 }
@@ -689,6 +705,18 @@ test("orphaned_brokers: a ws/plugin-* entry that is a link or a file, with no br
     fs.rmSync(entry, { force: true });
   }
   assert.equal((await check("orphaned_brokers").run(ctx())).status, "pass", "and with it gone, a pass");
+});
+
+test("orphaned_brokers: a leftover broker that does not lead its group is listed to inspect, with no stop-orphan command", { timeout: 30_000 }, async () => {
+  const h = healthy();
+  const pid = orphanBroker(h, { nonLeader: true });
+  const pgid = Number(spawnSync("/bin/ps", ["-o", "pgid=", "-p", String(pid)], { encoding: "utf8" }).stdout.trim());
+  assert.notEqual(pgid, pid, "the fixture's broker leads no group");
+  const r = await check("orphaned_brokers").run(ctx());
+  assert.equal(r.status, "warn");
+  assert.match(r.fix ?? "", new RegExp(`broker ${pid} \\(snapshot plugin-AbC123 removed\\) does not lead its process group[^\\n]*-g ${pgid}`));
+  assert.doesNotMatch(r.fix ?? "", /stop-orphan --snapshot/, "stop-orphan refuses a non-leader, so no command is offered");
+  assert.ok(process.kill(pid, 0), "and nothing was signalled");
 });
 
 test("orphaned_brokers: a snapshot restored between a member's check and its SIGKILL stops stop-orphan before the signal", { timeout: 30_000 }, async () => {
