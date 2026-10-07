@@ -846,11 +846,13 @@ function removeSessionDir(dir) {
  * id that changed hands is never signalled. Returns false when that could not be confirmed.
  * @param {Proc} p @param {NodeJS.Signals} sig
  */
-function signalGroupIfSame(p, sig) {
+function signalGroupIfSame(p, sig, guard = () => true) {
   const seam = process.env.REVIEW_LOOP_TEST_SEAMS === "1" && process.env.REVIEW_LOOP_TEST_LEADER_RECHECK === "changed";
   const now = seam ? { ...p, lstart: "Thu Jan 1 00:00:00 1970" } : procRow(p.pid);
   if (now === "gone") return true;
   if (now === null || !sameMember(now, p)) return false;
+  // The caller's own precondition, last of all, right before the signal.
+  if (!guard()) return false;
   signal(-p.pid, sig);
   return true;
 }
@@ -1521,6 +1523,20 @@ export async function stopOrphan(parentDir, o) {
     const ok = now.uid === process.getuid?.() && now.pgid === now.pid && now.started === o.started && sha256hex(now.args) === o.argsSha && brokerArgv(now.args, rootsOf(parentDir).map((r) => path.join(r, o.snapshot))) !== null;
     return ok ? now : "mismatch";
   };
+  /** @returns {"absent" | "mismatch" | "unverified"} */
+  const snapshotPresent = () => {
+    try {
+      fs.lstatSync(path.join(parentDir, o.snapshot));
+      return "mismatch";
+    } catch (e) {
+      return /** @type {NodeJS.ErrnoException} */ (e).code === "ENOENT" ? "absent" : "unverified";
+    }
+  };
+  /** Test seam: the snapshot comes back at a chosen signal ("term" or "kill"), just before its last check. @param {string} at */
+  const restoreSeam = (at) => {
+    const v = process.env.REVIEW_LOOP_TEST_SEAMS === "1" ? process.env.REVIEW_LOOP_TEST_RESTORE_SNAPSHOT : undefined;
+    if (v === at || (at === "kill" && v === "1")) fs.mkdirSync(path.join(parentDir, o.snapshot), { recursive: true });
+  };
   const first = check();
   // A broker gone before this command leaves no identity for its group (its pid may have been reissued): what still
   // runs there is reported (`leader_gone`, with the group to inspect), never signalled. Doctor does not list it: a
@@ -1531,27 +1547,25 @@ export async function stopOrphan(parentDir, o) {
     return table.some((p) => p.pgid === o.pid && p.uid === process.getuid?.()) ? "leader_gone" : "mismatch";
   }
   if (typeof first === "string") return first;
-  // The whole identity again (snapshot still gone included), then the leader once more inside signalGroupIfSame,
-  // right at the signal: a group whose leader changed is never signalled.
+  // The whole identity again, then inside signalGroupIfSame the leader once more and, last, the snapshot still gone,
+  // right at the signal: a changed leader or a restored snapshot is never signalled.
   const now = check();
   if (typeof now === "string") return now === "gone" ? "mismatch" : now;
   if (!sameMember(now, first)) return "mismatch";
-  if (!signalGroupIfSame(first, "SIGTERM")) return "mismatch";
+  /** @type {"absent" | "mismatch" | "unverified"} */
+  let atTerm = "absent";
+  const stillGone = () => {
+    restoreSeam("term");
+    atTerm = snapshotPresent();
+    return atTerm === "absent";
+  };
+  if (!signalGroupIfSame(first, "SIGTERM", stillGone)) return atTerm === "absent" ? "mismatch" : atTerm;
   await exitedWithin(first.pid, 5000);
   // Then the group as it is now, read afresh each pass until it is empty: a member started after any one read (one
   // the broker spawns on its way out) is still found. Whoever holds the leader's pid now (a reissue proves nothing),
   // the group is stopped only once it has no members.
   const uid = process.getuid?.();
   const until = performance.now() + STOP_DEADLINE_MS;
-  /** @returns {"absent" | "mismatch" | "unverified"} */
-  const snapshotPresent = () => {
-    try {
-      fs.lstatSync(path.join(parentDir, o.snapshot));
-      return "mismatch";
-    } catch (e) {
-      return /** @type {NodeJS.ErrnoException} */ (e).code === "ENOENT" ? "absent" : "unverified";
-    }
-  };
   // "stopped" only while the snapshot is still gone: a restored one makes the tree a round's again.
   const stoppedIfStillGone = () => {
     const back = snapshotPresent();
@@ -1571,14 +1585,14 @@ export async function stopOrphan(parentDir, o) {
       const now = procRow(m.pid);
       if (now === null) return "unverified";
       if (now === "gone" || !sameMember(now, m)) continue;
-      if (process.env.REVIEW_LOOP_TEST_SEAMS === "1" && process.env.REVIEW_LOOP_TEST_RESTORE_SNAPSHOT === "1") fs.mkdirSync(path.join(parentDir, o.snapshot), { recursive: true });
-      // Still an orphan's tree only while its snapshot is still gone, checked right at each signal: a restored
-      // snapshot makes the tree a round's again.
-      const back = snapshotPresent();
-      if (back !== "absent") return back;
       const lead = procRow(first.pid);
       if (lead === null) return "unverified";
       if (leaderReissued(lead, first)) return stoppedIfStillGone();
+      // Still an orphan's tree only while its snapshot is still gone, checked last, right at each signal: a restored
+      // snapshot makes the tree a round's again.
+      restoreSeam("kill");
+      const back = snapshotPresent();
+      if (back !== "absent") return back;
       signal(m.pid, "SIGKILL");
     }
     await sleep(500);

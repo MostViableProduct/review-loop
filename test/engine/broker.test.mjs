@@ -449,8 +449,9 @@ test("R2: a SIGKILLed round's snapshot, broker and cxc-* dir are swept by the ne
   assert.equal(r.code, 0, JSON.stringify(r.json));
   assert.ok(await until(() => !alive(left.broker.pid), 5000), "the dead round's broker is stopped");
   assert.equal(brokerLog().filter((l) => l === "shutdown").length, 2, "both brokers were asked to shut down, neither signalled");
-  assert.ok(!fs.existsSync(left.broker.sessionDir), "its cxc-* session dir is removed");
-  assert.deepEqual(snapshots(), [], "its snapshot (and the job files in it) is removed");
+  const why = () => JSON.stringify({ sweep: sweepEvents().map((e) => [e.code, e.data]), stops: stopDetails().map((e) => e.data), log: brokerLog() });
+  assert.ok(!fs.existsSync(left.broker.sessionDir), `its cxc-* session dir is removed: ${why()}`);
+  assert.deepEqual(snapshots(), [], `its snapshot (and the job files in it) is removed: ${why()}`);
   assert.deepEqual(sweepEvents().map(outcome), [["ok", { ...OK0, swept: 1 }]]);
 });
 

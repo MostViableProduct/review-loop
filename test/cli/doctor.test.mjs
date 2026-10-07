@@ -802,6 +802,19 @@ test("orphaned_brokers: a snapshot restored between a member's check and its SIG
   assert.ok(process.kill(pid, 0), "the broker was not SIGKILLed");
 });
 
+test("orphaned_brokers: a snapshot restored right before stop-orphan's SIGTERM gets no signal at all", { timeout: 30_000 }, async () => {
+  const h = healthy();
+  const pid = orphanBroker(h);
+  const r = await check("orphaned_brokers").run(ctx());
+  const cmd = /stop-orphan --snapshot (\S+) --pid (\d+) --started (\d+) --args-sha ([0-9a-f]{64})/.exec(r.fix ?? "");
+  assert.ok(cmd, r.fix ?? "");
+  const engine = path.join(process.cwd(), "plugin", "engine", "review-round.mjs");
+  const out = spawnSync(process.execPath, [engine, "stop-orphan", "--snapshot", cmd[1], "--pid", cmd[2], "--started", cmd[3], "--args-sha", cmd[4]], { env: { ...process.env, REVIEW_LOOP_TEST_SEAMS: "1", REVIEW_LOOP_TEST_RESTORE_SNAPSHOT: "term" }, encoding: "utf8", timeout: 20_000 });
+  assert.equal(out.status, 60, out.stdout);
+  assert.equal(JSON.parse(out.stdout).status, "mismatch");
+  assert.ok(process.kill(pid, 0), "the broker (which exits on SIGTERM) was not signalled");
+});
+
 test("orphaned_brokers: a broker that exits after doctor listed it: stop-orphan names its group (leader_gone) and signals nothing", { timeout: 40_000 }, async () => {
   const h = healthy();
   const pid = orphanBroker(h, { termLeavesChild: true, appServer: true });
