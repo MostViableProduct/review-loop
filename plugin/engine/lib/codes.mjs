@@ -234,7 +234,11 @@ export const COMMANDS_ENUM = Object.freeze(["setup", "config", "doctor", "update
 export const KINDS = Object.freeze(["spec", "plan", "impl", "pr"]);
 export const DECISION_OPTIONS = Object.freeze(["continue", "more", "accept", "stop", "accept-finding", "waive", "repin", "override", "merge", "pull"]);
 /** Why a broker stop left a snapshot in place (see stopCompanionBroker). */
-export const BROKER_STOP_REASONS = Object.freeze(["ps_unavailable", "registry_unreadable", "deadline", "unknown_rows", "members_left", "unattributed", "temp_unremoved"]);
+export const BROKER_STOP_REASONS = Object.freeze([
+  "ps_unavailable", "registry_unreadable", "deadline", "unknown_rows", "members_left", "unattributed", "temp_unremoved",
+  // A sweep step that threw (pin.mjs sweepOne): which step, never the error's text.
+  "failed_judge", "failed_companion", "failed_broker", "failed_remove"
+]);
 /** The most snapshots a sweep looks at (pin.mjs SWEEP_LIST_MAX, pinned equal by a test): every count fits. */
 const SWEEP_COUNT_MAX = 65_536;
 /** `review-round.mjs stop-orphan`'s outcomes (only "stopped" is a success). */

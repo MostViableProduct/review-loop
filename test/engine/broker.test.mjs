@@ -1148,6 +1148,37 @@ test("B: a snapshot whose data/state is a link to an empty dir is an unreadable 
   }
 });
 
+test("D: a live owner whose start time is corrupt is unverified, never taken for dead: its snapshot is untouched", { timeout: 60_000 }, async () => {
+  const snap = path.join(ws(), "plugin-Garb01");
+  fs.mkdirSync(snap, { recursive: true, mode: 0o700 });
+  for (const started of ["garbage", "Thu Jan 1 00:00:00", "Xyz Jan 1 00:00:00 2026", "Mon Feb 30 10:00:00 2026", "Fri Jan 1 00:00:00 2026"]) {
+    fs.writeFileSync(path.join(snap, "owner.json"), JSON.stringify({ pid: process.pid, started }));
+    const r = spawnSync(process.execPath, [ROUND, "sweep"], { env, encoding: "utf8" });
+    assert.equal(r.status, 60, r.stdout);
+    assert.deepEqual([JSON.parse(r.stdout).swept, JSON.parse(r.stdout).unverified], [0, 1], `${started}: ${r.stdout}`);
+    assert.ok(fs.existsSync(path.join(snap, "owner.json")), `${started}: the live round's snapshot is left alone`);
+  }
+});
+
+test("C: a sweep step that throws is reported on its snapshot, by step (failed_remove), and keeps it", { timeout: 60_000 }, async (t) => {
+  const parent = path.join(dir, "ws-step-fail");
+  fs.mkdirSync(parent, { mode: 0o700 });
+  const s = await deadSnapshot(parent, { broker: false });
+  const rm = fs.rmSync;
+  t.mock.method(fs, "rmSync", (/** @type {Parameters<typeof fs.rmSync>} */ ...a) => {
+    if (a[0] === s.root) throw Object.assign(new Error("EBUSY"), { code: "EBUSY" });
+    return rm(...a);
+  });
+  try {
+    const res = await withSeams({ REVIEW_LOOP_TEST_SWEEP_TICK: "0" }, () => sweepStaleSnapshots(parent, { all: true }));
+    assert.deepEqual(res.stops.map((st) => [st.snapshot, st.reason]), [[path.basename(s.root), "failed_remove"]], JSON.stringify(res));
+    assert.equal(res.failed, 1);
+    assert.ok(fs.existsSync(s.root), "the snapshot is kept for the next sweep");
+  } finally {
+    t.mock.restoreAll();
+  }
+});
+
 test("units: namesUpTo stops reading past its cap instead of listing the whole directory", () => {
   const d = path.join(dir, "many");
   fs.mkdirSync(d);

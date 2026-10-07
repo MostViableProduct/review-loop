@@ -204,7 +204,10 @@ These are copied from the spec, and every task implicitly includes them.
   - **The sweep.** A snapshot it leaves alone is `in_use` (owner alive, fresh, or referenced) or `unverified` (not a
     real dir of ours, an owner that cannot be read); the manual `sweep` is `clean` only with no `unverified` left, and
     both counts go in its output and in `round.sweep`. Doctor's `orphaned_brokers` judges each snapshot with the same
-    `judgeSnapshot`, so it is unverified exactly where the sweep is. A companion stop signals nothing once the budget is spent
+    `judgeSnapshot`, so it is unverified exactly where the sweep is. An owner's `started` is compared only when it is a
+    real `ps` lstart (`isLstart`: every field read back from the parsed date); anything else is unknown, never a
+    mismatch, so a corrupt owner.json never makes a live round read as dead. A sweep step that throws is reported on
+    its snapshot as `failed_<judge|companion|broker|remove>` (`BROKER_STOP_REASONS`), never the error's text. A companion stop signals nothing once the budget is spent
     (`deadline`, snapshot kept). Two streaming passes over `ws/` (count, then hold one partition: `partitionCount(n)` is a power
     of two leaving ~16 per partition, `isHeld(hashOf(name), tick, P)` with `tick` = the minute). Powers of two nest,
     so every snapshot is examined within 2^K minutes however `n` changes. A round's sweep has a 10 s deadline (the

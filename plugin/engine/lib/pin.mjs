@@ -1127,6 +1127,21 @@ const psEnv = () => ({ PATH: "/usr/bin:/bin", LC_ALL: "C", TZ: "UTC" });
 /** @param {string} s */
 const squash = (s) => s.trim().replace(/\s+/g, " ");
 
+const DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+/**
+ * `ps -o lstart=` in the C locale, squashed (`Wed Oct 7 09:51:14 2026`), and a real moment: every field read back from
+ * the parsed date matches, so a weekday or day that Date.parse would quietly ignore or roll over is refused.
+ * @param {string} s
+ */
+const isLstart = (s) => {
+  const m = /^([A-Z][a-z]{2}) ([A-Z][a-z]{2}) (\d{1,2}) (\d{2}):(\d{2}):(\d{2}) (\d{4})$/.exec(s);
+  const t = m ? Date.parse(`${s} UTC`) : NaN;
+  if (!m || !Number.isFinite(t)) return false;
+  const d = new Date(t);
+  return DAYS[d.getUTCDay()] === m[1] && MONTHS[d.getUTCMonth()] === m[2] && d.getUTCDate() === Number(m[3]) && d.getUTCHours() === Number(m[4]) && d.getUTCMinutes() === Number(m[5]) && d.getUTCSeconds() === Number(m[6]) && d.getUTCFullYear() === Number(m[7]);
+};
+
 /** A process's start time as `ps -o lstart=` prints it: with the pid, a reuse-safe identity. @param {number} pid */
 function startTimeOf(pid) {
   const r = ps(["-o", "lstart=", "-p", String(pid)]);
@@ -1177,7 +1192,9 @@ function ownerState(root, table) {
   if (!isObject(v) || !Number.isInteger(v.pid) || /** @type {number} */ (v.pid) <= 1) return damaged();
   const pid = /** @type {number} */ (v.pid);
   if (!isAlive(pid)) return "dead";
-  if (typeof v.started !== "string") return "unknown";
+  // Only a start time in ps's own shape can be compared: anything else (corrupt, hand-edited) is unknown, never a
+  // mismatch, so it can never make a live owner read as dead.
+  if (typeof v.started !== "string" || !isLstart(squash(v.started))) return "unknown";
   const starts = table.starts();
   if (starts === null) return "unknown";
   const now = starts.get(pid);
@@ -1349,8 +1366,7 @@ export async function sweepStaleSnapshots(parentDir, opts = {}) {
         }
         res.skipped.delete(name);
         acted++;
-        if (r === "failed") res.failed++;
-        else if (r === "swept") res.swept++;
+        if (r === "swept") res.swept++;
         else {
           res.brokersLeft += r.left;
           res.unattributed += r.unattributed;
@@ -1392,27 +1408,32 @@ function judgeSnapshot(root, table) {
 
 /**
  * One snapshot: left alone ("in_use" or "unverified", see SweepResult.skipped), removed ("swept"), kept with what is
- * still running, or "failed".
+ * still running (an unexpected error: reason `failed_<step>`, one of BROKER_STOP_REASONS).
  * @param {string} root @param {string} name @param {ReturnType<typeof processTable>} table @param {() => number} remaining
- * @returns {Promise<"in_use" | "unverified" | "swept" | "failed" | StopResult>}
+ * @returns {Promise<"in_use" | "unverified" | "swept" | StopResult>}
  */
 async function sweepOne(root, name, table, remaining) {
+  // The step an unexpected error interrupts, so the snapshot's event says where (a bounded reason, never a message).
+  let step = "judge";
   try {
     const j = judgeSnapshot(root, table);
     if (j !== "stale") return j;
     // Fresh, not the sweep's cached table: a decision to signal or to delete rests on what runs now.
     const procs = readProcs();
     if (procs === null) return { left: 1, unattributed: 0, reason: "ps_unavailable" };
+    step = "companion";
     if (!(await stopSnapshotCompanion(root, procs, remaining))) return { left: 1, unattributed: 0, reason: remaining() <= 0 ? "deadline" : "unknown_rows" };
+    step = "broker";
     const stop = await stopCompanionBroker(root, { deadline: performance.now() + Math.max(0, remaining()) });
     if (stop.left > 0 || stop.unattributed > 0) return stop;
+    step = "remove";
     // Re-checked just before the remove: still a real directory of ours, never a link swapped in, and nothing runs
     // from it now (a fresh read; an unreadable table keeps it).
     if (!ownedRealDirectory(root)) return "unverified";
     if (runsFrom(root)) return { left: 1, unattributed: 0, reason: "members_left" };
     return removeSnapshot(root) ? "swept" : { left: 0, unattributed: 0, reason: "temp_unremoved" };
   } catch {
-    return "failed";
+    return { left: 0, unattributed: 0, reason: `failed_${step}` };
   }
 }
 
