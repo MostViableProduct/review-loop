@@ -1408,19 +1408,37 @@ function judgeSnapshot(root, table) {
   if (owner === "alive") return "in_use";
   if (owner === "dead") return "stale";
   if (owner !== "none") return "unverified";
-  // With no owner to name it, only a snapshot's own layout (its companion, copied in by snapshotVerified) tells a
-  // pre-1.0.4 snapshot from a same-named dir of anyone else's: one without it is never taken for stale.
-  if (!hasSnapshotLayout(root)) return "unverified";
   if (Date.now() - fs.lstatSync(root).mtimeMs < LEGACY_SNAPSHOT_AGE_MS) return "in_use";
   const ref = referenced(root, table);
   if (ref === null) return "unverified";
-  return ref ? "in_use" : "stale";
+  if (ref) return "in_use";
+  // With no owner to name it, a dir is taken for a pre-1.0.4 snapshot only when all it holds is what snapshotVerified
+  // copies in: removing it can then only ever remove copies of plugin files, never anything of anyone's.
+  return onlySnapshotFiles(root) ? "stale" : "unverified";
 }
 
-/** `scripts/` a real directory and `scripts/codex-companion.mjs` a regular file in it, neither a link. @param {string} root */
-function hasSnapshotLayout(root) {
+/**
+ * Whether every entry under `root` is a directory or a regular file at a pinned path (or the unpinned
+ * .claude-plugin/plugin.json), the companion among them: no other file, no link. Read without following links, and
+ * bounded by the pin's size. False when the pin cannot be read.
+ * @param {string} root
+ */
+function onlySnapshotFiles(root) {
+  const pin = readPin({ readOnly: true });
+  if (!pin) return false;
+  const allowed = new Set([...Object.keys(pin.files), path.join(".claude-plugin", "plugin.json")]);
+  let entries = 0;
+  /** @param {string} rel @returns {boolean} */
+  const walk = (rel) => {
+    for (const ent of fs.readdirSync(path.join(root, rel), { withFileTypes: true })) {
+      if (++entries > 2 * allowed.size) return false;
+      const r = rel ? path.join(rel, ent.name) : ent.name;
+      if (ent.isDirectory() ? !walk(r) : !(ent.isFile() && allowed.has(r))) return false;
+    }
+    return true;
+  };
   try {
-    return fs.lstatSync(path.join(root, "scripts")).isDirectory() && fs.lstatSync(path.join(root, COMPANION_SCRIPT)).isFile();
+    return walk("") && fs.lstatSync(path.join(root, COMPANION_SCRIPT)).isFile();
   } catch {
     return false;
   }

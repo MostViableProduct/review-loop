@@ -395,10 +395,13 @@ test("M2: the companion's job files live only inside the round's 0700 snapshot, 
 const ws = () => path.join(env.REVIEW_LOOP_STATE_DIR, "ws");
 const snapshots = () => fs.readdirSync(ws()).filter((n) => n.startsWith("plugin-")).sort();
 
-/** A pre-1.0.4 snapshot as snapshotVerified left it: no owner.json, its companion copied in. @param {string} d */
+/** A pre-1.0.4 snapshot as snapshotVerified left it: no owner.json, the pinned files and plugin.json copied in. @param {string} d */
 function legacySnapshot(d) {
-  fs.mkdirSync(path.join(d, "scripts"), { recursive: true, mode: 0o700 });
-  fs.writeFileSync(path.join(d, "scripts", "codex-companion.mjs"), "");
+  const pin = JSON.parse(fs.readFileSync(env.REVIEW_LOOP_PIN_FILE, "utf8"));
+  for (const rel of [...Object.keys(pin.files), path.join(".claude-plugin", "plugin.json")]) {
+    fs.mkdirSync(path.join(d, path.dirname(rel)), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(path.join(d, rel), "");
+  }
 }
 /** @param {number} pid a process's start time as the engine records it (ps lstart, C locale, UTC) */
 const startTime = (pid) => spawnSync("ps", ["-o", "lstart=", "-p", String(pid)], { encoding: "utf8", env: { ...process.env, LC_ALL: "C", TZ: "UTC" } }).stdout.trim().replace(/\s+/g, " ");
@@ -1224,9 +1227,9 @@ test("R2: a ws/plugin-* directory not shaped like a snapshot (plugin-old, plugin
 test("R2: a sweep step that throws on a real error (EACCES) emits hook.error as well as its round.broker_stop", { timeout: 60_000 }, async () => {
   const snap = path.join(ws(), "plugin-Lock01");
   legacySnapshot(snap);
-  const locked = path.join(snap, "locked");
-  fs.mkdirSync(locked, { recursive: true, mode: 0o700 });
-  fs.writeFileSync(path.join(locked, "f"), "x");
+  // A pinned dir made read-only: still all snapshot files, but its entries cannot be unlinked.
+  const locked = path.join(snap, "scripts", "lib");
+  assert.ok(fs.readdirSync(locked).length > 0, "the pin has files under scripts/lib");
   fs.chmodSync(locked, 0o500);
   const old = new Date(Date.now() - 25 * 60 * 60_000);
   fs.utimesSync(snap, old, old);
@@ -1241,21 +1244,31 @@ test("R2: a sweep step that throws on a real error (EACCES) emits hook.error as 
   }
 });
 
-test("R2: an old owner-less dir named exactly like a snapshot but without a snapshot's layout is unverified, never swept", { timeout: 60_000 }, async () => {
+test("R2: an old owner-less dir named exactly like a snapshot is swept only when it holds nothing but a snapshot's files", { timeout: 60_000 }, async () => {
   const old = new Date(Date.now() - 25 * 60 * 60_000);
-  const decoys = ["plugin-Decoy1", "plugin-Decoy2"].map((name) => path.join(ws(), name));
-  fs.mkdirSync(decoys[0], { recursive: true, mode: 0o700 });
-  fs.writeFileSync(path.join(decoys[0], "keep.txt"), "the user's");
-  // The companion's place taken by a link: not a snapshot's layout either.
-  fs.mkdirSync(path.join(decoys[1], "scripts"), { recursive: true, mode: 0o700 });
+  const at = (/** @type {string} */ name) => path.join(ws(), name);
+  const userFile = (/** @type {string} */ d) => fs.writeFileSync(path.join(d, "keep.txt"), "the user's");
+  fs.mkdirSync(at("plugin-Decoy1"), { recursive: true, mode: 0o700 });
+  userFile(at("plugin-Decoy1"));
+  // The two files a layout check would look for, around a user file.
+  fs.mkdirSync(path.join(at("plugin-Decoy2"), "scripts"), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(path.join(at("plugin-Decoy2"), "scripts", "codex-companion.mjs"), "");
+  userFile(at("plugin-Decoy2"));
+  // Every pinned file, plus one more.
+  legacySnapshot(at("plugin-Decoy3"));
+  userFile(at("plugin-Decoy3"));
+  // Every pinned file, the companion a link to a real file.
+  legacySnapshot(at("plugin-Decoy4"));
   fs.writeFileSync(path.join(dir, "elsewhere.mjs"), "");
-  fs.symlinkSync(path.join(dir, "elsewhere.mjs"), path.join(decoys[1], "scripts", "codex-companion.mjs"));
+  fs.rmSync(path.join(at("plugin-Decoy4"), "scripts", "codex-companion.mjs"));
+  fs.symlinkSync(path.join(dir, "elsewhere.mjs"), path.join(at("plugin-Decoy4"), "scripts", "codex-companion.mjs"));
+  const decoys = ["plugin-Decoy1", "plugin-Decoy2", "plugin-Decoy3", "plugin-Decoy4"].map(at);
   for (const d of decoys) fs.utimesSync(d, old, old);
   const r = spawnSync(process.execPath, [ROUND, "sweep"], { env, encoding: "utf8" });
   assert.equal(r.status, 60, r.stdout);
-  assert.deepEqual([JSON.parse(r.stdout).swept, JSON.parse(r.stdout).unverified], [0, 2], r.stdout);
-  assert.ok(fs.existsSync(path.join(decoys[0], "keep.txt")), "the user's dir is left as it is");
-  assert.ok(fs.lstatSync(path.join(decoys[1], "scripts", "codex-companion.mjs")).isSymbolicLink());
+  assert.deepEqual([JSON.parse(r.stdout).swept, JSON.parse(r.stdout).unverified], [0, 4], r.stdout);
+  for (const d of decoys.slice(0, 3)) assert.ok(fs.existsSync(path.join(d, "keep.txt")), `${path.basename(d)}: the user's file is left`);
+  assert.ok(fs.lstatSync(path.join(decoys[3], "scripts", "codex-companion.mjs")).isSymbolicLink());
 });
 
 test("units: namesUpTo stops reading past its cap instead of listing the whole directory", () => {
