@@ -606,6 +606,28 @@ test("B: a broker that died before writing broker.json leaves a codex app-server
   assert.ok(!fs.existsSync(brokers()[0].sessionDir), "and its cxc-* dir, which no broker.json named, went with it");
 });
 
+test("B: a broker that died before writing broker.json, its pid then held by another process: its app-server still keeps the snapshot, and the sweep says so", { timeout: 90_000 }, async () => {
+  const seam = psSeam(reusedLeaderPs());
+  const r = startRound({ STUB_SLEEP_MS: "4000", FAKE_BROKER_CHILD: "1", FAKE_NO_BROKER_JSON: "1", ...seam });
+  assert.ok(await until(() => fs.existsSync(env.BROKER_READY) && kids().length === 1, 20_000));
+  signalPid(brokers()[0].pid, "SIGKILL");
+  const res = await r.done;
+  const [k] = kids();
+  try {
+    assert.equal(res.code, 0, JSON.stringify(res.json));
+    assert.ok(alive(k.pid), "never signalled");
+    assert.equal(snapshots().length, 1, "a reissued leader pid did not make its group look led: the snapshot is kept");
+    assert.deepEqual(stopDetails().map((e) => [e.code, e.data.reason, e.data.left, e.data.unattributed]), [["broker_stop_failed", "unattributed", 0, 1]]);
+    const sweep = spawnSync(process.execPath, [ROUND, "sweep"], { env: { ...env, ...seam }, encoding: "utf8" });
+    assert.equal(sweep.status, 60, sweep.stdout);
+    assert.deepEqual([JSON.parse(sweep.stdout).status, JSON.parse(sweep.stdout).unattributed], ["incomplete", 1]);
+    const lines = fs.readFileSync(path.join(env.REVIEW_LOOP_STATE_DIR, "events.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l));
+    assert.deepEqual(lines.filter((e) => e.event === "round.sweep").slice(-1).map((e) => [e.code, e.data.unattributed]), [["snapshot_sweep_incomplete", 1]]);
+  } finally {
+    signalPid(k.pid, "SIGKILL");
+  }
+});
+
 test("B: a live broker with no broker.json is found in the process table and stopped", { timeout: 60_000 }, async () => {
   const r = round({ FAKE_NO_BROKER_JSON: "1", FAKE_BROKER_CHILD: "1" });
   assert.equal(r.code, 0, JSON.stringify(r.json));

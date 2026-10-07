@@ -694,7 +694,9 @@ const ENDPOINT_ARG = / --endpoint unix:(\/\S+)\/broker\.sock(?: |$)/;
  */
 function leaderlessAppServers(rows, snapshotSec, marker, known) {
   const uid = process.getuid?.();
-  const pids = new Set(rows.map((p) => p.pid));
+  // A group's leader is the process that leads it: a row merely holding the number (a reissued pid, in another group)
+  // does not make the group led.
+  const led = new Set(rows.filter((p) => p.pid === p.pgid).map((p) => p.pid));
   const inWindow = (/** @type {number} */ pgid) => {
     if (marker.state !== "ok") return true;
     if (marker.after === undefined) return pgid > marker.pid;
@@ -702,7 +704,7 @@ function leaderlessAppServers(rows, snapshotSec, marker, known) {
     if (marker.after < marker.pid) return true;
     return pgid > marker.pid && pgid < marker.after;
   };
-  return rows.filter((p) => p.uid === uid && !known.has(p.pgid) && !pids.has(p.pgid) && p.started > snapshotSec && APP_SERVER_ARGS.test(p.args) && inWindow(p.pgid)).length;
+  return rows.filter((p) => p.uid === uid && !known.has(p.pgid) && !led.has(p.pgid) && p.started > snapshotSec && APP_SERVER_ARGS.test(p.args) && inWindow(p.pgid)).length;
 }
 
 /** @param {number} pid */
