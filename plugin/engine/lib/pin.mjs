@@ -642,6 +642,12 @@ export function namesUpTo(dir, max) {
  */
 function brokerRegistry(root) {
   const stateDir = path.join(companionDataDir(root), "state");
+  // Never followed: data/ and data/state must each be a real directory of ours (or absent: no registry yet).
+  for (const d of [companionDataDir(root), stateDir]) {
+    const st = wsState(d);
+    if (st === "absent") return { ok: true, sessions: [] };
+    if (st === "failed") return { ok: false, sessions: [] };
+  }
   let names;
   try {
     names = namesUpTo(stateDir, REGISTRY_MAX_ENTRIES);
@@ -1426,11 +1432,14 @@ export function countOrphanBrokers(parentDir) {
     if (st === "failed") return res;
     res.orphans.push({ kind: "missing_snapshot", pid: p.pid, pgid: p.pgid, snapshot: m[1], started: p.started, argsSha: sha256hex(p.args) });
   }
+  let odd = 0;
   const w = walkSnapshots(parentDir, (name) => {
     const root = path.join(parentDir, name);
-    if (ownedRealDirectory(root) && ownerState(root, table) === "dead") res.kept++;
+    if (!ownedRealDirectory(root)) odd++;
+    else if (ownerState(root, table) === "dead") res.kept++;
   }, () => Infinity);
-  if (w !== "done" && w !== "absent") return res;
+  // An entry that is not a real directory of ours is one the sweep cannot judge (unverified there too).
+  if ((w !== "done" && w !== "absent") || odd > 0) return res;
   res.count = res.orphans.length;
   res.verified = true;
   return res;

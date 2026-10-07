@@ -674,6 +674,23 @@ test("orphaned_brokers: stop-orphan re-reads the leader right at its SIGTERM; a 
   }
 });
 
+test("orphaned_brokers: a ws/plugin-* entry that is a link or a file, with no broker, is unverified, never a pass", async () => {
+  const h = healthy();
+  const entry = path.join(h, "state", "ws", "plugin-Odd001");
+  fs.mkdirSync(path.dirname(entry), { recursive: true, mode: 0o700 });
+  const elsewhere = path.join(h, "elsewhere-entry");
+  fs.mkdirSync(elsewhere);
+  for (const make of [() => fs.symlinkSync(elsewhere, entry), () => fs.writeFileSync(entry, "")]) {
+    make();
+    const r = await check("orphaned_brokers").run(ctx());
+    assert.equal(r.status, "warn");
+    assert.match(r.note ?? "", /unverified/);
+    assert.match(r.fix ?? "", /ls -la/);
+    fs.rmSync(entry, { force: true });
+  }
+  assert.equal((await check("orphaned_brokers").run(ctx())).status, "pass", "and with it gone, a pass");
+});
+
 test("orphaned_brokers: a snapshot restored between a member's check and its SIGKILL stops stop-orphan before the signal", { timeout: 30_000 }, async () => {
   const h = healthy();
   const pid = orphanBroker(h, { ignoreTerm: true });

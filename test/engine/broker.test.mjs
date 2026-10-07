@@ -1126,6 +1126,24 @@ test("B: a dead round's companion that ignores SIGTERM is not SIGKILLed once the
   }
 });
 
+test("B: a snapshot whose data/state is a link to an empty dir is an unreadable registry: nothing is signalled", { timeout: 60_000 }, async () => {
+  const parent = path.join(dir, "ws-state-link");
+  fs.mkdirSync(parent, { mode: 0o700 });
+  const s = await deadSnapshot(parent);
+  const state = path.dirname(path.dirname(s.registry));
+  const empty = path.join(dir, "empty-state");
+  fs.mkdirSync(empty);
+  fs.renameSync(state, path.join(dir, "real-state"));
+  fs.symlinkSync(empty, state);
+  try {
+    const r = await stopCompanionBroker(s.root);
+    assert.equal(r.reason, "registry_unreadable", JSON.stringify(r));
+    assert.ok(alive(s.pid), "its broker was not signalled on the say-so of a linked registry");
+  } finally {
+    signalPid(s.pid, "SIGKILL", { group: true });
+  }
+});
+
 test("units: namesUpTo stops reading past its cap instead of listing the whole directory", () => {
   const d = path.join(dir, "many");
   fs.mkdirSync(d);
