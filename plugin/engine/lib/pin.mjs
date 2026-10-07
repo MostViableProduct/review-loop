@@ -1031,8 +1031,11 @@ async function stopSnapshotCompanion(root, table, remaining) {
   }
   if (found.length === 0) return true;
   if (found.some((c) => c.pgid !== c.pid)) return false;
+  // No signal once the sweep's budget is spent: the snapshot is kept (reason "deadline") for the next sweep.
+  if (remaining() <= 0) return false;
   for (const c of found) if (!signalGroupIfSame(c, "SIGTERM")) return false;
   for (const c of found) await exitedWithin(c.pid, Math.min(2000, remaining()));
+  if (remaining() <= 0) return false;
   for (const c of found) if (isAlive(c.pid) && !signalGroupIfSame(c, "SIGKILL")) return false;
   for (const c of found) await exitedWithin(c.pid, Math.min(1000, remaining()));
   // A companion that exits on SIGTERM can leave a child in its group, and with the leader gone that group is not
@@ -1225,7 +1228,10 @@ function walkSnapshots(parentDir, onName, remaining) {
 /**
  * @typedef {{ swept: number, brokersLeft: number, unattributed: number, failed: number, incomplete: boolean,
  *   held: number, partition: number, partitions: number, counted: number,
- *   stops: Array<{ snapshot: string, origin: string | null, reason: string, left: number, unattributed: number }> }} SweepResult
+ *   stops: Array<{ snapshot: string, origin: string | null, reason: string, left: number, unattributed: number }>,
+ *   skipped: Map<string, "in_use" | "unverified"> }} SweepResult
+ * skipped: the snapshots left alone, by name (a full sweep can visit one more than once): "in_use" (its round is
+ * alive, or it is fresh or referenced), "unverified" (not a real directory of ours, or an owner that cannot be read).
  */
 
 /**
@@ -1246,7 +1252,7 @@ export async function sweepStaleSnapshots(parentDir, opts = {}) {
   const tick = sweepTick();
   const part = sweepPart();
   /** @type {SweepResult} */
-  const res = { swept: 0, brokersLeft: 0, unattributed: 0, failed: 0, incomplete: false, held: 0, partition: 0, partitions: 1, counted: 0, stops: [] };
+  const res = { swept: 0, brokersLeft: 0, unattributed: 0, failed: 0, incomplete: false, held: 0, partition: 0, partitions: 1, counted: 0, stops: [], skipped: new Map() };
   const table = processTable();
   let acted = 0;
   const count = () => {
@@ -1301,7 +1307,11 @@ export async function sweepStaleSnapshots(parentDir, opts = {}) {
           break;
         }
         const r = await sweepOne(path.join(parentDir, name), name, table, remaining);
-        if (r === "skip") continue;
+        if (r === "in_use" || r === "unverified") {
+          res.skipped.set(name, r);
+          continue;
+        }
+        res.skipped.delete(name);
         acted++;
         if (r === "failed") res.failed++;
         else if (r === "swept") res.swept++;
@@ -1326,26 +1336,30 @@ export async function sweepStaleSnapshots(parentDir, opts = {}) {
 }
 
 /**
- * One snapshot: left alone ("skip"), removed ("swept"), kept with what is still running, or "failed".
+ * One snapshot: left alone ("in_use" or "unverified", see SweepResult.skipped), removed ("swept"), kept with what is
+ * still running, or "failed".
  * @param {string} root @param {string} name @param {ReturnType<typeof processTable>} table @param {() => number} remaining
- * @returns {Promise<"skip" | "swept" | "failed" | StopResult>}
+ * @returns {Promise<"in_use" | "unverified" | "swept" | "failed" | StopResult>}
  */
 async function sweepOne(root, name, table, remaining) {
   try {
-    if (!ownedRealDirectory(root)) return "skip";
+    if (!ownedRealDirectory(root)) return "unverified";
     const owner = ownerState(root, table);
     if (owner === "none") {
-      if (Date.now() - fs.lstatSync(root).mtimeMs < LEGACY_SNAPSHOT_AGE_MS || referenced(root, table) !== false) return "skip";
-    } else if (owner !== "dead") return "skip";
+      if (Date.now() - fs.lstatSync(root).mtimeMs < LEGACY_SNAPSHOT_AGE_MS) return "in_use";
+      const ref = referenced(root, table);
+      if (ref !== false) return ref === true ? "in_use" : "unverified";
+    } else if (owner === "alive") return "in_use";
+    else if (owner !== "dead") return "unverified";
     // Fresh, not the sweep's cached table: a decision to signal or to delete rests on what runs now.
     const procs = readProcs();
     if (procs === null) return { left: 1, unattributed: 0, reason: "ps_unavailable" };
-    if (!(await stopSnapshotCompanion(root, procs, remaining))) return { left: 1, unattributed: 0, reason: "unknown_rows" };
+    if (!(await stopSnapshotCompanion(root, procs, remaining))) return { left: 1, unattributed: 0, reason: remaining() <= 0 ? "deadline" : "unknown_rows" };
     const stop = await stopCompanionBroker(root, { deadline: performance.now() + Math.max(0, remaining()) });
     if (stop.left > 0 || stop.unattributed > 0) return stop;
     // Re-checked just before the remove: still a real directory of ours, never a link swapped in, and nothing runs
     // from it now (a fresh read; an unreadable table keeps it).
-    if (!ownedRealDirectory(root)) return "skip";
+    if (!ownedRealDirectory(root)) return "unverified";
     if (runsFrom(root)) return { left: 1, unattributed: 0, reason: "members_left" };
     return removeSnapshot(root) ? "swept" : { left: 0, unattributed: 0, reason: "temp_unremoved" };
   } catch {

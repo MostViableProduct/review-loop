@@ -196,7 +196,10 @@ These are copied from the spec, and every task implicitly includes them.
     (`event_write_failed`). The owner marker is written whole before the companion can start; when ps cannot name
     the round, `snapshot_owner_unknown` (exit 30) and no companion. A damaged owner.json in a snapshot older than
     24 h goes by the legacy rule.
-  - **The sweep.** Two streaming passes over `ws/` (count, then hold one partition: `partitionCount(n)` is a power
+  - **The sweep.** A snapshot it leaves alone is `in_use` (owner alive, fresh, or referenced) or `unverified` (not a
+    real dir of ours, an owner that cannot be read); the manual `sweep` is `clean` only with no `unverified` left, and
+    both counts go in its output and in `round.sweep`. A companion stop signals nothing once the budget is spent
+    (`deadline`, snapshot kept). Two streaming passes over `ws/` (count, then hold one partition: `partitionCount(n)` is a power
     of two leaving ~16 per partition, `isHeld(hashOf(name), tick, P)` with `tick` = the minute). Powers of two nest,
     so every snapshot is examined within 2^K minutes however `n` changes. A round's sweep has a 10 s deadline (the
     first act always runs; each stop gets the time left; a round's own stop gets 15 s). A dead owner's companion is

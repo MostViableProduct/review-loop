@@ -273,7 +273,8 @@ export const EVENT_CATALOG = Object.freeze({
     sources: ["round"],
     data: {
       swept: int(0, SWEEP_COUNT_MAX), brokers_left: int(0, SWEEP_COUNT_MAX), failed: int(0, SWEEP_COUNT_MAX), unattributed: int(0, SWEEP_COUNT_MAX),
-      incomplete: int(0, 1), held: int(0, SWEEP_COUNT_MAX), partition: int(0, 4095), partitions: int(1, 4096)
+      incomplete: int(0, 1), held: int(0, SWEEP_COUNT_MAX), partition: int(0, 4095), partitions: int(1, 4096),
+      in_use: int(0, SWEEP_COUNT_MAX), unverified: int(0, SWEEP_COUNT_MAX)
     }
   },
   "round.stop_orphan": { sources: ["round"], data: { status: oneOf(STOP_ORPHAN_STATUSES) } },

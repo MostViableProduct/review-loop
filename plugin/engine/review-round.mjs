@@ -355,11 +355,14 @@ function reportStop(key, snapshot, s) {
 async function sweepSnapshots(key, opts = {}) {
   const s = await sweepStaleSnapshots(stateSubdir("ws"), opts);
   for (const st of s.stops) reportStop(st.origin, st.snapshot, st);
-  const bad = s.brokersLeft + s.unattributed + s.failed > 0 || s.incomplete;
+  const skipped = [...s.skipped.values()];
+  const inUse = skipped.filter((k) => k === "in_use").length;
+  const unverified = skipped.length - inUse;
+  const bad = s.brokersLeft + s.unattributed + s.failed + unverified > 0 || s.incomplete;
   // counted is the last count (a full sweep re-counts after acting, down to 0), so held says whether it acted.
   if (s.counted === 0 && s.held === 0 && !bad) return s;
   const data = {
-    swept: s.swept, brokers_left: s.brokersLeft, failed: s.failed, unattributed: s.unattributed, incomplete: s.incomplete ? 1 : 0,
+    swept: s.swept, brokers_left: s.brokersLeft, failed: s.failed, unattributed: s.unattributed, incomplete: s.incomplete ? 1 : 0, in_use: inUse, unverified,
     held: s.held, partition: s.partition, partitions: s.partitions
   };
   // Two literal sites, so scripts/list-codes.mjs (and T-OBS-3) sees the code.
@@ -388,11 +391,15 @@ async function cmdSweep() {
   const s = await sweepSnapshots(null, { all: true, deadlineMs: SWEEP_MANUAL_DEADLINE_MS });
   const o = countOrphanBrokers(stateSubdir("ws"));
   report("round.orphans", o.verified && o.count === 0 ? "ok" : "orphaned_brokers", { verified: o.verified ? 1 : 0, count: o.count });
-  const clean = s.brokersLeft + s.unattributed + s.failed === 0 && !s.incomplete && o.verified && o.count === 0;
+  const skipped = [...s.skipped.values()];
+  const inUse = skipped.filter((k) => k === "in_use").length;
+  const unverified = skipped.length - inUse;
+  // A snapshot of a live round (in_use) is not a leftover; one that could not be judged (unverified) is not clean.
+  const clean = s.brokersLeft + s.unattributed + s.failed + unverified === 0 && !s.incomplete && o.verified && o.count === 0;
   out(
     {
       status: clean ? "clean" : "incomplete", swept: s.swept, brokers_left: s.brokersLeft, unattributed: s.unattributed, failed: s.failed + (o.verified ? 0 : 1),
-      incomplete: s.incomplete || !o.verified, orphans_detected: o.count
+      incomplete: s.incomplete || !o.verified, orphans_detected: o.count, in_use: inUse, unverified
     },
     clean ? EXIT.PASS : EXIT.SWEEP_INCOMPLETE
   );

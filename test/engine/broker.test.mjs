@@ -490,7 +490,9 @@ test("R2: a symlinked ws/plugin-* entry is never followed: the linked snapshot a
   assert.ok(alive(left.broker.pid));
   assert.ok(fs.lstatSync(left.root).isSymbolicLink(), "the link is left");
   assert.ok(fs.existsSync(path.join(moved, "owner.json")), "and so is what it points at");
-  assert.deepEqual(sweepEvents().map(outcome), [["ok", OK0]], "nothing swept");
+  // Nothing swept, and the entry it could not judge is said: unverified, so the sweep is not clean.
+  assert.deepEqual(sweepEvents().map(outcome), [["snapshot_sweep_incomplete", OK0]], "nothing swept");
+  assert.deepEqual(sweepEvents().map((e) => [e.data.in_use, e.data.unverified]), [[0, 1]]);
 });
 
 test("R2: when ps cannot answer, a live-owner snapshot and an old legacy snapshot are both left alone", { timeout: 90_000 }, async () => {
@@ -695,8 +697,8 @@ test("D: `sweep` clears a dead round's snapshot and prints the documented result
   const r = spawnSync(process.execPath, [ROUND, "sweep"], { env, encoding: "utf8" });
   assert.equal(r.status, 0, r.stdout + r.stderr);
   const o = JSON.parse(r.stdout);
-  assert.deepEqual(Object.keys(o), ["exit", "status", "swept", "brokers_left", "unattributed", "failed", "incomplete", "orphans_detected"]);
-  assert.deepEqual(o, { exit: 0, status: "clean", swept: 1, brokers_left: 0, unattributed: 0, failed: 0, incomplete: false, orphans_detected: 0 });
+  assert.deepEqual(Object.keys(o), ["exit", "status", "swept", "brokers_left", "unattributed", "failed", "incomplete", "orphans_detected", "in_use", "unverified"]);
+  assert.deepEqual(o, { exit: 0, status: "clean", swept: 1, brokers_left: 0, unattributed: 0, failed: 0, incomplete: false, orphans_detected: 0, in_use: 0, unverified: 0 });
   assert.deepEqual(snapshots(), []);
   // Its orphan check is an event either way: verified and clean, then (no process table) unverified.
   const r2 = spawnSync(process.execPath, [ROUND, "sweep"], { env: { ...env, ...psSeam(tablePsFails()) }, encoding: "utf8" });
@@ -1082,6 +1084,48 @@ test("B: a dead round's companion that exits on SIGTERM and leaves a child keeps
   }
 });
 
+test("D: `sweep` is clean beside a live round's snapshot, and incomplete beside one whose owner cannot be read", { timeout: 60_000 }, async () => {
+  const live = path.join(ws(), "plugin-Live01");
+  fs.mkdirSync(live, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(path.join(live, "owner.json"), JSON.stringify({ pid: process.pid, started: startTime(process.pid) }));
+  const a = spawnSync(process.execPath, [ROUND, "sweep"], { env, encoding: "utf8" });
+  assert.equal(a.status, 0, a.stdout);
+  assert.deepEqual([JSON.parse(a.stdout).status, JSON.parse(a.stdout).in_use, JSON.parse(a.stdout).unverified], ["clean", 1, 0]);
+  const odd = path.join(ws(), "plugin-Odd001");
+  fs.mkdirSync(odd, { mode: 0o700 });
+  // A live pid whose start time is not a string: its owner cannot be told apart.
+  fs.writeFileSync(path.join(odd, "owner.json"), JSON.stringify({ pid: process.pid, started: 0 }));
+  const b = spawnSync(process.execPath, [ROUND, "sweep"], { env, encoding: "utf8" });
+  assert.equal(b.status, 60, b.stdout);
+  assert.deepEqual([JSON.parse(b.stdout).status, JSON.parse(b.stdout).in_use, JSON.parse(b.stdout).unverified], ["incomplete", 1, 1]);
+  const ev = fs.readFileSync(path.join(env.REVIEW_LOOP_STATE_DIR, "events.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l)).filter((e) => e.event === "round.sweep");
+  assert.deepEqual(ev.slice(-1).map((e) => [e.code, e.data.in_use, e.data.unverified]), [["snapshot_sweep_incomplete", 1, 1]]);
+  assert.ok(fs.existsSync(live) && fs.existsSync(odd), "neither is touched");
+});
+
+test("B: a dead round's companion that ignores SIGTERM is not SIGKILLed once the sweep's budget is spent", { timeout: 60_000 }, async () => {
+  const parent = path.join(dir, "ws-companion-deadline");
+  fs.mkdirSync(parent, { mode: 0o700 });
+  const s = await deadSnapshot(parent, { broker: false });
+  await afterSnapshotSecond(s.root);
+  const script = path.join(s.root, "scripts", "codex-companion.mjs");
+  const ready = path.join(dir, "companion-deadline.ready");
+  fs.writeFileSync(script, `process.on("SIGTERM", () => {}); require("node:fs").writeFileSync(${JSON.stringify(ready)}, ""); setInterval(() => {}, 1000);`.replace('require("node:fs")', '(await import("node:fs")).default'));
+  const launch = `const c = require("node:child_process").spawn(process.execPath, [${JSON.stringify(script)}], { detached: true, stdio: "ignore" }); c.unref(); process.stdout.write(String(c.pid));`;
+  const companionPid = Number(spawnSync(process.execPath, ["-e", launch], { encoding: "utf8" }).stdout);
+  reapAfter.push(companionPid);
+  assert.ok(await until(() => fs.existsSync(ready), 5000));
+  try {
+    // The budget runs out while the stop waits on SIGTERM.
+    const res = await withSeams({ REVIEW_LOOP_TEST_SWEEP_TICK: "0" }, () => sweepStaleSnapshots(parent, { all: true, deadlineMs: 1200 }));
+    assert.ok(alive(companionPid), "no SIGKILL after the deadline");
+    assert.deepEqual(res.stops.map((st) => st.reason), ["deadline"], JSON.stringify(res));
+    assert.ok(fs.existsSync(s.root), "and the snapshot is kept for the next sweep");
+  } finally {
+    signalPid(companionPid, "SIGKILL", { group: true });
+  }
+});
+
 test("units: namesUpTo stops reading past its cap instead of listing the whole directory", () => {
   const d = path.join(dir, "many");
   fs.mkdirSync(d);
@@ -1175,7 +1219,7 @@ test("units: removeSnapshot keeps the snapshot unless the temp dir its tmp.json 
 test("units: round.sweep's counts fit every sweep the engine can run (SWEEP_LIST_MAX snapshots)", async () => {
   const { EVENT_CATALOG } = await import("../../plugin/engine/lib/codes.mjs");
   const d = EVENT_CATALOG["round.sweep"].data;
-  for (const k of ["swept", "brokers_left", "failed", "unattributed", "held"]) assert.equal(d[k](SWEEP_LIST_MAX), SWEEP_LIST_MAX, k);
+  for (const k of ["swept", "brokers_left", "failed", "unattributed", "held", "in_use", "unverified"]) assert.equal(d[k](SWEEP_LIST_MAX), SWEEP_LIST_MAX, k);
 });
 
 test("D: a clean sweep whose round.sweep line cannot be written says so on stderr", { timeout: 90_000 }, async () => {

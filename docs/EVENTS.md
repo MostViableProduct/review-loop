@@ -46,7 +46,7 @@ that does not pass its check is written as `null`.
 | `round.decision` | round | `kind`, `option`, `reason` |
 | `round.dispute` | round | `kind` |
 | `round.push` | round | — |
-| `round.sweep` | round | `swept`, `brokers_left`, `failed`, `unattributed`, `incomplete`, `held`, `partition`, `partitions` |
+| `round.sweep` | round | `swept`, `brokers_left`, `failed`, `unattributed`, `incomplete`, `held`, `partition`, `partitions`, `in_use`, `unverified` |
 | `round.stop_orphan` | round | `status` |
 | `round.orphans` | round | `verified`, `count` |
 | `round.broker_stop` | round | `reason`, `left`, `unattributed`, `snapshot` |
