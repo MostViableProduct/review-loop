@@ -715,6 +715,9 @@ test("D: `sweep` exits 60 when a broker will not stop, and when ws/ cannot be li
   assert.deepEqual([JSON.parse(r.stdout).status, JSON.parse(r.stdout).brokers_left], ["incomplete", 1]);
   // The manual sweep has no artifact of its own: the kept snapshot's event names the review that left it.
   assert.deepEqual(stopDetails().slice(-1).map((e) => e.artifact_key), [origin]);
+  // And the same hook.error a round's own stop logs, so a consumer counting failures sees this one too.
+  const errors = fs.readFileSync(path.join(env.REVIEW_LOOP_STATE_DIR, "events.jsonl"), "utf8").trim().split("\n").map((l) => JSON.parse(l)).filter((e) => e.event === "hook.error" && e.code === "broker_stop_failed");
+  assert.deepEqual(errors.slice(-1).map((e) => e.artifact_key), [origin]);
   assert.match(origin, /^[0-9a-f]{24}$/);
   signalPid(left.broker.pid, "SIGKILL");
   fs.chmodSync(ws(), 0o000);

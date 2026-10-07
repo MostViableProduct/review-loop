@@ -1525,13 +1525,18 @@ export async function stopOrphan(parentDir, o) {
       return /** @type {NodeJS.ErrnoException} */ (e).code === "ENOENT" ? "absent" : "unverified";
     }
   };
+  // "stopped" only while the snapshot is still gone: a restored one makes the tree a round's again.
+  const stoppedIfStillGone = () => {
+    const back = snapshotPresent();
+    return back === "absent" ? "stopped" : back;
+  };
   for (;;) {
     const table = readProcs();
     if (table === null) return "unverified";
     // Another process now leading group <pid>: the pid was reissued, so the broker's group had emptied (an id is never
     // reissued while its group lives) and every member now is the newcomer's. A reissue into another group proves
     // nothing about the old group, which is still emptied below.
-    if (leaderReissued(table.find((p) => p.pid === first.pid) ?? "gone", first)) return "stopped";
+    if (leaderReissued(table.find((p) => p.pid === first.pid) ?? "gone", first)) return stoppedIfStillGone();
     const members = table.filter((p) => p.pgid === first.pid && p.uid === uid);
     if (members.length === 0) return "stopped";
     if (performance.now() >= until) return "still_running";
@@ -1546,7 +1551,7 @@ export async function stopOrphan(parentDir, o) {
       if (back !== "absent") return back;
       const lead = procRow(first.pid);
       if (lead === null) return "unverified";
-      if (leaderReissued(lead, first)) return "stopped";
+      if (leaderReissued(lead, first)) return stoppedIfStillGone();
       signal(m.pid, "SIGKILL");
     }
     await sleep(500);

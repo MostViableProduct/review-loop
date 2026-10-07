@@ -322,10 +322,7 @@ async function cmdRun(v) {
   } finally {
     const stop = plugin ? await stopCompanionBroker(plugin.root, { deadline: performance.now() + STOP_DEADLINE_MS }) : null;
     const kept = stop !== null && (stop.left > 0 || stop.unattributed > 0);
-    if (kept) {
-      emitEvent({ source: "round", event: "hook.error", code: "broker_stop_failed", session_id: SESSION, artifact_key: key, data: { stage: "broker_stop_failed" } });
-      reportStop(key, path.basename(/** @type {{ root: string }} */ (plugin).root), /** @type {import("./lib/pin.mjs").StopResult} */ (stop));
-    }
+    if (kept) reportStop(key, path.basename(/** @type {{ root: string }} */ (plugin).root), /** @type {import("./lib/pin.mjs").StopResult} */ (stop));
     prep && !prep.nothing && prep.cleanup();
     // A snapshot whose broker tree may still run is kept: it is the only evidence that ties the tree to this round,
     // and the next sweep retries it once this (its owner) has exited.
@@ -335,11 +332,15 @@ async function cmdRun(v) {
 }
 
 /**
- * The detail of a stop that left a snapshot in place. Counts and a bounded reason only; a lost line is still said on
- * stderr, so it is never silent.
+ * The detail of a stop that left a snapshot in place, for every path that keeps one (the round's own stop and both
+ * sweeps): `hook.error` `broker_stop_failed` whenever something may still run, plus `round.broker_stop` with the
+ * detail. Counts and a bounded reason only; a lost line is still said on stderr, so it is never silent.
  * @param {string | null} key @param {string} snapshot @param {{ left: number, unattributed: number, reason: string | null }} s
  */
 function reportStop(key, snapshot, s) {
+  if (s.left + s.unattributed > 0 && !emitEvent({ source: "round", event: "hook.error", code: "broker_stop_failed", session_id: SESSION, artifact_key: key, data: { stage: "broker_stop_failed" } })) {
+    process.stderr.write(`review-loop: event_write_failed ${JSON.stringify({ event: "hook.error", code: "broker_stop_failed", artifact_key: key })}\n`);
+  }
   const data = { reason: s.reason ?? "members_left", left: s.left, unattributed: s.unattributed, snapshot };
   if (!emitEvent({ source: "round", event: "round.broker_stop", code: "broker_stop_failed", session_id: SESSION, artifact_key: key, data })) {
     process.stderr.write(`review-loop: event_write_failed ${JSON.stringify({ event: "round.broker_stop", code: "broker_stop_failed", artifact_key: key, left: s.left, unattributed: s.unattributed })}\n`);
