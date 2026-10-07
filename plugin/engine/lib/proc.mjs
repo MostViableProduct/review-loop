@@ -1,6 +1,7 @@
-import { spawn } from "node:child_process";
+import { spawn, execFileSync } from "node:child_process";
 import crypto from "node:crypto";
 import { ReviewLoopError } from "./errors.mjs";
+import { sha256hex } from "./fsutil.mjs";
 
 /** Process groups of children not yet closed; reaped if this process is told to stop. */
 const liveGroups = new Set();
@@ -23,6 +24,33 @@ let signalMode = "reap-and-reraise";
  */
 export function trustedPs() {
   return process.env.REVIEW_LOOP_TEST_SEAMS === "1" && process.env.REVIEW_LOOP_TEST_PS_PATH ? process.env.REVIEW_LOOP_TEST_PS_PATH : "/bin/ps";
+}
+
+/**
+ * A process's identity as the kernel stores it: its start time and full command line, hashed. Neither changes after
+ * the process starts (nothing in review-loop sets process.title), and a wall-clock change doesn't alter a stored start
+ * time. lstart has one-second resolution; the command line tells apart a PID reused within that second unless the
+ * reuser runs the identical command (on macOS that needs the PID space to wrap within one second).
+ * - /bin/ps, never a PATH lookup: this answer decides that a live process is SOMEONE ELSE, so a shim on one
+ *   contender's PATH must not be able to fake a mismatch.
+ * - A fixed environment, never the caller's: lstart prints local time, so TZ and the locale are pinned for every
+ *   caller. -ww never truncates the command.
+ * @param {number} pid @returns {string | null} null on any failure or empty output
+ */
+export function processIdent(pid) {
+  try {
+    const out = execFileSync(trustedPs(), ["-ww", "-o", "lstart=,command=", "-p", String(pid)], {
+      timeout: 2000,
+      maxBuffer: 256 * 1024,
+      stdio: ["ignore", "pipe", "ignore"],
+      env: { PATH: "/usr/bin:/bin", LC_ALL: "C", TZ: "UTC" }
+    })
+      .toString("utf8")
+      .trim();
+    return out === "" ? null : sha256hex(out);
+  } catch {
+    return null;
+  }
 }
 
 export function setSignalMode(mode) {

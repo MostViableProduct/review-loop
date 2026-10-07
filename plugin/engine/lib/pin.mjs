@@ -6,7 +6,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { ReviewLoopError } from "./errors.mjs";
 import { safeReadFile, sha256hex, atomicWriteJson, readJsonValidated, isObject, MiB } from "./fsutil.mjs";
-import { run, onReap, trustedPs } from "./proc.mjs";
+import { run, onReap, trustedPs, processIdent } from "./proc.mjs";
 import { claudeConfigDir as claudeDir, stateRoot } from "./paths.mjs";
 import { SEVERITIES } from "./scoring.mjs";
 import { companionArgs } from "./codexcfg.mjs";
@@ -211,7 +211,10 @@ export function companionTmp(root) {
       if (/** @type {NodeJS.ErrnoException} */ (err).code !== "EEXIST" || attempt >= 2) throw err;
       continue;
     }
-    fs.writeFileSync(path.join(short, TMP_TOKEN_FILE), token, { flag: "wx", mode: 0o600 });
+    // Whole or not at all (rename): a dir whose token is not exactly tmp.json's is never taken for ours.
+    const part = path.join(short, `${TMP_TOKEN_FILE}.part`);
+    fs.writeFileSync(part, token, { flag: "wx", mode: 0o600 });
+    fs.renameSync(part, path.join(short, TMP_TOKEN_FILE));
     return short;
   }
 }
@@ -246,12 +249,9 @@ function removeShortTmp(v) {
     } catch (e) {
       if (/** @type {NodeJS.ErrnoException} */ (e).code !== "ENOENT") return false;
     }
-    // A prefix too (empty included): a token write cut short still marks the dir ours.
-    if (held === null || !v.token.startsWith(held)) {
-      // Empty and tokenless: a kill between its mkdir and its token (rmdir removes only an empty dir).
-      if (held === null && p === v.dir && namesUpTo(p, 1).length === 0) fs.rmdirSync(p);
-      continue;
-    }
+    // Only the exact token (written whole, by rename) marks the dir ours. Anything else, empty or tokenless included,
+    // is left as it is: a kill before the token leaves at most an empty dir in the OS temp dir, for the OS to clear.
+    if (held !== v.token) continue;
     if (p === v.dir) fs.renameSync(p, hold);
     const h = fs.lstatSync(hold);
     if (!h.isDirectory() || h.dev !== st.dev || h.ino !== st.ino) return false;
@@ -332,9 +332,11 @@ export function snapshotVerified(parentDir, artifactKey = null) {
     // the next round's sweepStaleSnapshots removes it once this owner is provably gone.
     // Before the companion can start: a snapshot whose owner cannot be named would never read as dead, so it is not
     // made at all. Written whole (rename), so a kill mid-write leaves no half-file.
+    // `ident` (start time and full command line, as the locks use) tells this round from a pid reused within its second.
     const started = startTimeOf(process.pid);
-    if (started === null) throw new ReviewLoopError("snapshot_owner_unknown", "ps could not read this round's start time, so its snapshot could not be marked");
-    atomicWriteJson(path.join(root, OWNER_FILE), { pid: process.pid, started, ...(artifactKey && ORIGIN_KEY.test(artifactKey) ? { key: artifactKey } : {}) }, root);
+    const ident = processIdent(process.pid);
+    if (started === null || ident === null) throw new ReviewLoopError("snapshot_owner_unknown", "ps could not read this round's start time, so its snapshot could not be marked");
+    atomicWriteJson(path.join(root, OWNER_FILE), { pid: process.pid, started, ident, ...(artifactKey && ORIGIN_KEY.test(artifactKey) ? { key: artifactKey } : {}) }, root);
     return { root, cleanup };
   } catch (err) {
     cleanup();
@@ -1206,7 +1208,13 @@ function ownerState(root, table) {
   if (starts === null) return "unknown";
   const now = starts.get(pid);
   if (now === undefined) return isAlive(pid) ? "unknown" : "dead";
-  return now === squash(v.started) ? "alive" : "dead";
+  if (now !== squash(v.started)) return "dead";
+  // Same second: only the full identity can tell the owner from a pid reused within it. An owner.json without one
+  // (or with one not shaped as one) cannot be judged further.
+  if (typeof v.ident !== "string" || !/^[0-9a-f]{64}$/.test(v.ident)) return "unknown";
+  const ident = processIdent(pid);
+  if (ident === null) return "unknown";
+  return ident === v.ident ? "alive" : "dead";
 }
 
 /**

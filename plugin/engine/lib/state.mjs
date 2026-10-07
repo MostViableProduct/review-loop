@@ -1,6 +1,5 @@
 import fs from "node:fs";
 import crypto from "node:crypto";
-import { execFileSync } from "node:child_process";
 import path from "node:path";
 import { ReviewLoopError } from "./errors.mjs";
 import { atomicWriteJson, readJsonValidated, isObject, sha256hex, assertNoLinkedParent } from "./fsutil.mjs";
@@ -8,7 +7,10 @@ import { stateRoot, stateSubdir } from "./paths.mjs";
 import { emitEvent } from "./events.mjs";
 import { OPTIONS } from "./policy.mjs";
 import { isTreeRef } from "./pin.mjs";
-import { trustedPs } from "./proc.mjs";
+import { trustedPs, processIdent } from "./proc.mjs";
+
+// Moved to proc.mjs (pin.mjs uses it too, and state.mjs already imports pin.mjs); re-exported for its callers.
+export { processIdent };
 
 export { stateRoot, stateSubdir };
 
@@ -496,33 +498,6 @@ function seamMs(name) {
 /** @param {number} ms */
 function sleepSync(ms) {
   if (ms > 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
-}
-
-/**
- * A process's identity as the kernel stores it: its start time and full command line, hashed. Neither changes after
- * the process starts (nothing in review-loop sets process.title), and a wall-clock change doesn't alter a stored start
- * time. lstart has one-second resolution; the command line tells apart a PID reused within that second unless the
- * reuser runs the identical command (on macOS that needs the PID space to wrap within one second).
- * - /bin/ps, never a PATH lookup: this answer decides that a live process is SOMEONE ELSE, so a shim on one
- *   contender's PATH must not be able to fake a mismatch.
- * - A fixed environment, never the caller's: lstart prints local time, so TZ and the locale are pinned for every
- *   caller. -ww never truncates the command.
- * @param {number} pid @returns {string | null} null on any failure or empty output
- */
-export function processIdent(pid) {
-  try {
-    const out = execFileSync(trustedPs(), ["-ww", "-o", "lstart=,command=", "-p", String(pid)], {
-      timeout: 2000,
-      maxBuffer: 256 * 1024,
-      stdio: ["ignore", "pipe", "ignore"],
-      env: { PATH: "/usr/bin:/bin", LC_ALL: "C", TZ: "UTC" }
-    })
-      .toString("utf8")
-      .trim();
-    return out === "" ? null : sha256hex(out);
-  } catch {
-    return null;
-  }
 }
 
 /** @type {string | null} this process's own identity, read once it succeeds */

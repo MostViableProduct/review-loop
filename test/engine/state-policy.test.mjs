@@ -868,8 +868,10 @@ test("lock section: identity comes from /bin/ps alone — a PATH ps can't fake a
   assert.equal(await own.done, "lock_identity_unavailable");
   assert.deepEqual(fs.readdirSync(locksDir()).filter((n) => n.startsWith(`${fresh}.lock.reclaim.`)), [], "no identity, no marker");
 
-  const src = fs.readFileSync(new URL(STATE_MJS), "utf8");
+  // processIdent lives in proc.mjs, beside trustedPs; state.mjs takes it from there.
+  const src = fs.readFileSync(new URL("../../plugin/engine/lib/proc.mjs", import.meta.url), "utf8");
   assert.match(src, /execFileSync\(trustedPs\(\), /, "the lock reads identity through the shared trusted ps");
+  assert.match(fs.readFileSync(new URL(STATE_MJS), "utf8"), /import \{[^}]*\bprocessIdent\b[^}]*\} from "\.\/proc\.mjs"/, "the lock's processIdent is proc.mjs's");
   assert.match(fs.readFileSync(new URL("proc.mjs", new URL(STATE_MJS)), "utf8"), /: "\/bin\/ps";/);
   assert.match(src, /env: \{ PATH: "\/usr\/bin:\/bin", LC_ALL: "C", TZ: "UTC" \}/);
   assert.doesNotMatch(src, /execFileSync\("ps"/);

@@ -12,6 +12,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { makeRepo, commitFile, writeFile, tmpDir, GIT_ENV } from "./helpers.mjs";
 import { isRealPid, signalPid } from "../fakes/signal.mjs";
 import { validateLine } from "../../plugin/engine/lib/events.mjs";
+import { processIdent } from "../../plugin/engine/lib/proc.mjs";
 import {
   afterSnapshotSecond, brokerArgv, deadGroupTargets, namesUpTo, removeSnapshot, SWEEP_LIST_MAX, companionTmp, goneGroupsLeft, hashOf, isHeld, parseProcRow, partitionCount, sameMember, stopCompanionBroker, sweepStaleSnapshots, treeMembers
 } from "../../plugin/engine/lib/pin.mjs";
@@ -405,6 +406,8 @@ function legacySnapshot(d) {
 }
 /** @param {number} pid a process's start time as the engine records it (ps lstart, C locale, UTC) */
 const startTime = (pid) => spawnSync("ps", ["-o", "lstart=", "-p", String(pid)], { encoding: "utf8", env: { ...process.env, LC_ALL: "C", TZ: "UTC" } }).stdout.trim().replace(/\s+/g, " ");
+/** owner.json naming `pid` as snapshotVerified writes it: pid, start time, full identity. @param {number} pid */
+const liveOwner = (pid) => JSON.stringify({ pid, started: startTime(pid), ident: processIdent(pid) });
 /** The round's round.sweep events, each checked schema v1 and content-free (counts only, no path). */
 function sweepEvents() {
   const f = path.join(env.REVIEW_LOOP_STATE_DIR, "events.jsonl");
@@ -478,7 +481,7 @@ test("R2: a dead round's broker that will not stop keeps its snapshot for a late
 test("R2: a snapshot whose owner is alive is never touched; a reused owner pid (another start time) counts as gone", { timeout: 90_000 }, async () => {
   const left = await killedRound();
   const ownerFile = path.join(left.root, "owner.json");
-  fs.writeFileSync(ownerFile, JSON.stringify({ pid: process.pid, started: startTime(process.pid) }));
+  fs.writeFileSync(ownerFile, liveOwner(process.pid));
   assert.equal(round().code, 0);
   assert.ok(alive(left.broker.pid), "a live owner's broker is left running (afterEach reaps it)");
   assert.ok(fs.existsSync(left.broker.sessionDir));
@@ -488,6 +491,23 @@ test("R2: a snapshot whose owner is alive is never touched; a reused owner pid (
   assert.equal(round().code, 0);
   assert.ok(await until(() => !alive(left.broker.pid), 5000), "a pid now held by another process is not the owner");
   assert.deepEqual(snapshots(), []);
+});
+
+test("R2: a pid reused within the owner's start second (same lstart, another identity) counts as gone, not as the owner", { timeout: 90_000 }, async () => {
+  const left = await killedRound();
+  fs.writeFileSync(path.join(left.root, "owner.json"), JSON.stringify({ pid: process.pid, started: startTime(process.pid), ident: "0".repeat(64) }));
+  assert.equal(round().code, 0);
+  assert.ok(await until(() => !alive(left.broker.pid), 5000), "the owner's identity, not its second, names it");
+  assert.deepEqual(snapshots(), []);
+});
+
+test("R2: a live owner.json without an identity cannot be judged past its second: unverified, left alone", { timeout: 60_000 }, async () => {
+  const snap = path.join(ws(), "plugin-NoId01");
+  fs.mkdirSync(snap, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(path.join(snap, "owner.json"), JSON.stringify({ pid: process.pid, started: startTime(process.pid) }));
+  const r = spawnSync(process.execPath, [ROUND, "sweep"], { env, encoding: "utf8" });
+  assert.deepEqual([r.status, JSON.parse(r.stdout).unverified], [60, 1], r.stdout);
+  assert.ok(fs.existsSync(path.join(snap, "owner.json")));
 });
 
 test("R2: a symlinked ws/plugin-* entry is never followed: the linked snapshot and its broker are untouched", { timeout: 90_000 }, async () => {
@@ -507,7 +527,7 @@ test("R2: a symlinked ws/plugin-* entry is never followed: the linked snapshot a
 
 test("R2: when ps cannot answer, a live-owner snapshot and an old legacy snapshot are both left alone", { timeout: 90_000 }, async () => {
   const left = await killedRound();
-  fs.writeFileSync(path.join(left.root, "owner.json"), JSON.stringify({ pid: process.pid, started: startTime(process.pid) }));
+  fs.writeFileSync(path.join(left.root, "owner.json"), liveOwner(process.pid));
   const legacy = path.join(ws(), "plugin-LegOld");
   legacySnapshot(legacy);
   const old = new Date(Date.now() - 25 * 60 * 60_000);
@@ -862,7 +882,7 @@ test("C: one partition per sweep, and every dead snapshot is reached within 2^K 
   for (let i = 0; i < 40; i++) await deadSnapshot(parent, { broker: false });
   const live = () => {
     const root = fs.mkdtempSync(path.join(parent, "plugin-"));
-    fs.writeFileSync(path.join(root, "owner.json"), JSON.stringify({ pid: process.pid, started: startTime(process.pid) }));
+    fs.writeFileSync(path.join(root, "owner.json"), liveOwner(process.pid));
     return root;
   };
   /** @type {string[]} */
@@ -1122,7 +1142,7 @@ test("B: a dead round's companion that exits on SIGTERM and leaves a child keeps
 test("D: `sweep` is clean beside a live round's snapshot, and incomplete beside one whose owner cannot be read", { timeout: 60_000 }, async () => {
   const live = path.join(ws(), "plugin-Live01");
   fs.mkdirSync(live, { recursive: true, mode: 0o700 });
-  fs.writeFileSync(path.join(live, "owner.json"), JSON.stringify({ pid: process.pid, started: startTime(process.pid) }));
+  fs.writeFileSync(path.join(live, "owner.json"), liveOwner(process.pid));
   const a = spawnSync(process.execPath, [ROUND, "sweep"], { env, encoding: "utf8" });
   assert.equal(a.status, 0, a.stdout);
   assert.deepEqual([JSON.parse(a.stdout).status, JSON.parse(a.stdout).in_use, JSON.parse(a.stdout).unverified], ["clean", 1, 0]);
@@ -1354,22 +1374,20 @@ test("units: removeSnapshot keeps the snapshot unless the temp dir its tmp.json 
       fs.rmSync(foreign, { recursive: true, force: true });
     }
   }
-  // A token write cut short (an empty or partial file): still ours, removed.
-  for (const partial of ["", token.slice(0, 7)]) {
+  // Not the exact token (the token is written whole, by rename): empty, partial or absent, it proves nothing, and
+  // the dir is left as it is, even an empty one that might be a killed round's.
+  for (const held of ["", token.slice(0, 7), null]) {
     const d = fs.mkdtempSync(path.join(os.tmpdir(), "rl-"));
-    fs.writeFileSync(path.join(d, ".review-loop-tmp"), partial);
-    fs.mkdirSync(path.join(d, "cxc-x"));
+    if (held !== null) fs.writeFileSync(path.join(d, ".review-loop-tmp"), held);
     const s = mk();
     fs.writeFileSync(path.join(s, "tmp.json"), JSON.stringify({ dir: d, token }));
-    assert.equal(removeSnapshot(s), true);
-    assert.ok(!fs.existsSync(d), `a ${partial ? "partial" : "empty"} token still proves the dir ours`);
+    try {
+      assert.equal(removeSnapshot(s), true, "the pointer goes");
+      assert.ok(fs.existsSync(d), `a dir holding ${held === null ? "no token" : held ? "a partial token" : "an empty token"} is left as it is`);
+    } finally {
+      fs.rmSync(d, { recursive: true, force: true });
+    }
   }
-  // Empty and tokenless: a kill between its mkdir and its token. Removed (rmdir: only an empty dir can go).
-  const empty = fs.mkdtempSync(path.join(os.tmpdir(), "rl-"));
-  const e = mk();
-  fs.writeFileSync(path.join(e, "tmp.json"), JSON.stringify({ dir: empty, token }));
-  assert.equal(removeSnapshot(e), true);
-  assert.ok(!fs.existsSync(empty));
 });
 
 test("units: removeSnapshot never removes through a temp dir swapped for a link after its check", (t) => {

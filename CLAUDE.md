@@ -188,9 +188,10 @@ These are copied from the spec, and every task implicitly includes them.
   - **Temp dir.** The companion runs with `TMPDIR` inside the snapshot (`companionTmp`), so a broker's `cxc-*` dir
     goes with the snapshot even when no broker.json names it; when that socket path would pass 103 bytes (a long
     state dir), a short `rl-XXXXXX` under the OS temp dir, recorded in `tmp.json` (`{dir, token}`) before it is
-    made, the token then written into it (`.review-loop-tmp`). `removeSnapshot` removes that dir first, token last,
-    only when it holds that token or a prefix of it (a write cut short), or is empty (a kill between mkdir and
-    token); a dir without it is never touched. It is detached first (atomic rename to `<dir>.rm`, checked to be
+    made, the token then written into it whole (`.review-loop-tmp`, by rename from `.part`). `removeSnapshot`
+    removes that dir first, token last, only when it holds exactly that token; any other dir (tokenless, empty, a
+    partial or another token) is never touched: a kill before the token leaves at most an empty dir in the OS temp
+    dir, for the OS to clear. It is detached first (atomic rename to `<dir>.rm`, checked to be
     the same device and inode), so a path swapped for a link after the check removes nothing behind it; a removal
     cut short resumes from `<dir>.rm`.
     The snapshot is kept (`temp_unremoved`) unless the dir is confirmed gone or not ours.
@@ -211,7 +212,9 @@ These are copied from the spec, and every task implicitly includes them.
     both counts go in its output and in `round.sweep`. Doctor's `orphaned_brokers` judges each snapshot with the same
     `judgeSnapshot`, so it is unverified exactly where the sweep is. An owner's `started` is compared only when it is a
     real `ps` lstart (`isLstart`: every field read back from the parsed date); anything else is unknown, never a
-    mismatch, so a corrupt owner.json never makes a live round read as dead. A sweep step that throws is reported on
+    mismatch, so a corrupt owner.json never makes a live round read as dead. Within the same second, `ident`
+    (`processIdent`, the locks' start-time-plus-command-line hash, in proc.mjs) decides: another identity is dead, an
+    owner.json without one is unknown. A sweep step that throws is reported on
     its snapshot as `failed_<judge|companion|broker|remove>` (`BROKER_STOP_REASONS`), never the error's text; it counts
     nothing, so `reportStop` emits `hook.error` `broker_stop_failed` for it on the reason alone. A companion stop signals nothing once the budget is spent
     (`deadline`, snapshot kept). Two streaming passes over `ws/` (count, then hold one partition: `partitionCount(n)` is a power

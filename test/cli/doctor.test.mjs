@@ -19,6 +19,7 @@ const { ownerSeam } = await import("../../cli/lib/configguard.mjs");
 const { PACKAGE_VERSION } = await import("../../plugin/engine/lib/events.mjs");
 const { CODES } = await import("../../plugin/engine/lib/codes.mjs");
 const { writePin, latestInstalledVersion } = await import("../../plugin/engine/lib/pin.mjs");
+const { processIdent } = await import("../../plugin/engine/lib/proc.mjs");
 const { sha256hex } = await import("../../plugin/engine/lib/fsutil.mjs");
 
 const claudeVersion = { stdout: `${MIN_CLAUDE} (Claude Code)\n` };
@@ -785,7 +786,7 @@ test("orphaned_brokers: a snapshot whose owner cannot be judged is unverified, a
   const r = await check("orphaned_brokers").run(ctx());
   assert.equal(r.status, "warn");
   assert.match(r.note ?? "", /unverified/);
-  fs.writeFileSync(path.join(snap, "owner.json"), JSON.stringify({ pid: process.pid, started: spawnSync("/bin/ps", ["-o", "lstart=", "-p", String(process.pid)], { encoding: "utf8", env: { PATH: "/usr/bin:/bin", LC_ALL: "C", TZ: "UTC" } }).stdout.trim().replace(/\s+/g, " ") }));
+  fs.writeFileSync(path.join(snap, "owner.json"), JSON.stringify({ pid: process.pid, started: spawnSync("/bin/ps", ["-o", "lstart=", "-p", String(process.pid)], { encoding: "utf8", env: { PATH: "/usr/bin:/bin", LC_ALL: "C", TZ: "UTC" } }).stdout.trim().replace(/\s+/g, " ") , ident: processIdent(process.pid) }));
   assert.equal((await check("orphaned_brokers").run(ctx())).status, "pass", "a live owner's snapshot is in use, not a problem");
 });
 
