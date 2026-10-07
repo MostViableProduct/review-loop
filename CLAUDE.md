@@ -203,7 +203,8 @@ These are copied from the spec, and every task implicitly includes them.
     24 h goes by the legacy rule.
   - **The sweep.** Only entries named as snapshotVerified names them (`SNAPSHOT_NAME`, `plugin-` + 6 alphanumerics)
     are snapshots; any other `plugin-*` is not touched (one that happens to fit, such as `plugin-backup`, cannot be
-    told apart and goes by the owner/legacy rules). A snapshot it leaves alone is `in_use` (owner alive, fresh, or referenced) or `unverified` (not a
+    told apart by name). An owner-less one is a legacy snapshot only with a snapshot's layout (`hasSnapshotLayout`:
+    `scripts/codex-companion.mjs` a regular file, no links); any other is unverified and kept. A snapshot it leaves alone is `in_use` (owner alive, fresh, or referenced) or `unverified` (not a
     real dir of ours, an owner that cannot be read); the manual `sweep` is `clean` only with no `unverified` left, and
     both counts go in its output and in `round.sweep`. Doctor's `orphaned_brokers` judges each snapshot with the same
     `judgeSnapshot`, so it is unverified exactly where the sweep is. An owner's `started` is compared only when it is a

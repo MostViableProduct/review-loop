@@ -394,6 +394,12 @@ test("M2: the companion's job files live only inside the round's 0700 snapshot, 
 
 const ws = () => path.join(env.REVIEW_LOOP_STATE_DIR, "ws");
 const snapshots = () => fs.readdirSync(ws()).filter((n) => n.startsWith("plugin-")).sort();
+
+/** A pre-1.0.4 snapshot as snapshotVerified left it: no owner.json, its companion copied in. @param {string} d */
+function legacySnapshot(d) {
+  fs.mkdirSync(path.join(d, "scripts"), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(path.join(d, "scripts", "codex-companion.mjs"), "");
+}
 /** @param {number} pid a process's start time as the engine records it (ps lstart, C locale, UTC) */
 const startTime = (pid) => spawnSync("ps", ["-o", "lstart=", "-p", String(pid)], { encoding: "utf8", env: { ...process.env, LC_ALL: "C", TZ: "UTC" } }).stdout.trim().replace(/\s+/g, " ");
 /** The round's round.sweep events, each checked schema v1 and content-free (counts only, no path). */
@@ -500,7 +506,7 @@ test("R2: when ps cannot answer, a live-owner snapshot and an old legacy snapsho
   const left = await killedRound();
   fs.writeFileSync(path.join(left.root, "owner.json"), JSON.stringify({ pid: process.pid, started: startTime(process.pid) }));
   const legacy = path.join(ws(), "plugin-LegOld");
-  fs.mkdirSync(legacy, { mode: 0o700 });
+  legacySnapshot(legacy);
   const old = new Date(Date.now() - 25 * 60 * 60_000);
   fs.utimesSync(legacy, old, old);
   assert.equal(round(psSeam(tablePsFails())).code, 0);
@@ -516,7 +522,7 @@ test("R2: a legacy snapshot (no owner file) is swept only when older than 24 h a
   fs.utimesSync(left.root, old, old);
   const unused = path.join(ws(), "plugin-LegUnu");
   const fresh = path.join(ws(), "plugin-LegFrs");
-  for (const d of [unused, fresh]) fs.mkdirSync(d, { mode: 0o700 });
+  for (const d of [unused, fresh]) legacySnapshot(d);
   fs.utimesSync(unused, old, old);
   assert.equal(round().code, 0);
   assert.ok(alive(left.broker.pid), "a legacy snapshot a live broker's args name is left, broker and all");
@@ -1217,6 +1223,7 @@ test("R2: a ws/plugin-* directory not shaped like a snapshot (plugin-old, plugin
 
 test("R2: a sweep step that throws on a real error (EACCES) emits hook.error as well as its round.broker_stop", { timeout: 60_000 }, async () => {
   const snap = path.join(ws(), "plugin-Lock01");
+  legacySnapshot(snap);
   const locked = path.join(snap, "locked");
   fs.mkdirSync(locked, { recursive: true, mode: 0o700 });
   fs.writeFileSync(path.join(locked, "f"), "x");
@@ -1232,6 +1239,23 @@ test("R2: a sweep step that throws on a real error (EACCES) emits hook.error as 
   } finally {
     fs.chmodSync(locked, 0o700);
   }
+});
+
+test("R2: an old owner-less dir named exactly like a snapshot but without a snapshot's layout is unverified, never swept", { timeout: 60_000 }, async () => {
+  const old = new Date(Date.now() - 25 * 60 * 60_000);
+  const decoys = ["plugin-Decoy1", "plugin-Decoy2"].map((name) => path.join(ws(), name));
+  fs.mkdirSync(decoys[0], { recursive: true, mode: 0o700 });
+  fs.writeFileSync(path.join(decoys[0], "keep.txt"), "the user's");
+  // The companion's place taken by a link: not a snapshot's layout either.
+  fs.mkdirSync(path.join(decoys[1], "scripts"), { recursive: true, mode: 0o700 });
+  fs.writeFileSync(path.join(dir, "elsewhere.mjs"), "");
+  fs.symlinkSync(path.join(dir, "elsewhere.mjs"), path.join(decoys[1], "scripts", "codex-companion.mjs"));
+  for (const d of decoys) fs.utimesSync(d, old, old);
+  const r = spawnSync(process.execPath, [ROUND, "sweep"], { env, encoding: "utf8" });
+  assert.equal(r.status, 60, r.stdout);
+  assert.deepEqual([JSON.parse(r.stdout).swept, JSON.parse(r.stdout).unverified], [0, 2], r.stdout);
+  assert.ok(fs.existsSync(path.join(decoys[0], "keep.txt")), "the user's dir is left as it is");
+  assert.ok(fs.lstatSync(path.join(decoys[1], "scripts", "codex-companion.mjs")).isSymbolicLink());
 });
 
 test("units: namesUpTo stops reading past its cap instead of listing the whole directory", () => {

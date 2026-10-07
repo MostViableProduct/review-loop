@@ -1408,10 +1408,22 @@ function judgeSnapshot(root, table) {
   if (owner === "alive") return "in_use";
   if (owner === "dead") return "stale";
   if (owner !== "none") return "unverified";
+  // With no owner to name it, only a snapshot's own layout (its companion, copied in by snapshotVerified) tells a
+  // pre-1.0.4 snapshot from a same-named dir of anyone else's: one without it is never taken for stale.
+  if (!hasSnapshotLayout(root)) return "unverified";
   if (Date.now() - fs.lstatSync(root).mtimeMs < LEGACY_SNAPSHOT_AGE_MS) return "in_use";
   const ref = referenced(root, table);
   if (ref === null) return "unverified";
   return ref ? "in_use" : "stale";
+}
+
+/** `scripts/` a real directory and `scripts/codex-companion.mjs` a regular file in it, neither a link. @param {string} root */
+function hasSnapshotLayout(root) {
+  try {
+    return fs.lstatSync(path.join(root, "scripts")).isDirectory() && fs.lstatSync(path.join(root, COMPANION_SCRIPT)).isFile();
+  } catch {
+    return false;
+  }
 }
 
 /**
