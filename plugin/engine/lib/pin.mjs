@@ -897,13 +897,11 @@ export async function stopCompanionBroker(root, opts = {}) {
       }
       const leaderNow = again.find((p) => p.pid === pgid);
       const leaderThen = leaders.get(pgid);
-      if (leaderNow) {
-        // A live process holding this pid is either the same broker (its whole group is killed), or another process
-        // that took the pid, which means this tree is gone: the pid of a live group's id is never reissued.
-        if (leaderThen && sameMember(leaderNow, leaderThen)) {
-          if (!signalGroupIfSame(leaderThen, "SIGKILL")) keep("unknown_rows");
-          killed = true;
-        }
+      // The same broker still there: its whole group is killed. Any other holder of the pid (a reissue) proves nothing
+      // about the group, so it is handled as a gone leader's: only members seen unchanged at the first read.
+      if (leaderNow && leaderThen && sameMember(leaderNow, leaderThen)) {
+        if (!signalGroupIfSame(leaderThen, "SIGKILL")) keep("unknown_rows");
+        killed = true;
         continue;
       }
       const t = deadGroupTargets(table, again, pgid, snapshotSec, uid);
@@ -933,8 +931,8 @@ export async function stopCompanionBroker(root, opts = {}) {
     for (const pgid of groups) {
       const leaderNow = last.find((p) => p.pid === pgid);
       const leaderThen = leaders.get(pgid);
-      if (leaderNow) {
-        if (leaderThen && sameMember(leaderNow, leaderThen)) res.left++;
+      if (leaderNow && leaderThen && sameMember(leaderNow, leaderThen)) {
+        res.left++;
         continue;
       }
       const t = deadGroupTargets(table, last, pgid, snapshotSec, uid);
@@ -1452,9 +1450,8 @@ export async function stopOrphan(parentDir, o) {
   signal(-first.pid, "SIGTERM");
   await exitedWithin(first.pid, 5000);
   // Then the group as it is now, read afresh each pass until it is empty: a member started after any one read (one
-  // the broker spawns on its way out) is still found. While a group has members its id cannot be reused, so a member
-  // is the orphan's while the leader is this broker or gone; a different process holding the leader's pid means the
-  // group emptied (the pid was reused) and so it is stopped.
+  // the broker spawns on its way out) is still found. Whoever holds the leader's pid now (a reissue proves nothing),
+  // the group is stopped only once it has no members.
   const uid = process.getuid?.();
   const until = performance.now() + STOP_DEADLINE_MS;
   /** @returns {"absent" | "mismatch" | "unverified"} */
@@ -1469,8 +1466,6 @@ export async function stopOrphan(parentDir, o) {
   for (;;) {
     const table = readProcs();
     if (table === null) return "unverified";
-    const lead = table.find((p) => p.pid === first.pid);
-    if (lead && !sameMember(lead, first)) return "stopped";
     const members = table.filter((p) => p.pgid === first.pid && p.uid === uid);
     if (members.length === 0) return "stopped";
     if (performance.now() >= until) return "still_running";

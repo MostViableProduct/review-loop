@@ -264,6 +264,18 @@ function stopDetails() {
 /** The engine's ps swapped for `<bin>/ps`, through the test seam (never PATH: the engine runs /bin/ps). @param {string} bin */
 const psSeam = (bin) => ({ REVIEW_LOOP_TEST_SEAMS: "1", REVIEW_LOOP_TEST_PS_PATH: path.join(bin, "ps") });
 
+/**
+ * A `ps` whose table reads add, for every group whose leader is gone, a row holding the leader's pid in another group:
+ * what a reissued pid looks like.
+ */
+function reusedLeaderPs() {
+  const bin = path.join(dir, "reused-leader-ps");
+  fs.mkdirSync(bin, { recursive: true });
+  const awk = '{ print; pid[$2] = 1; if ($4 != $2) { g[$4] = $1 } } END { for (k in g) if (!(k in pid) && k > 1) printf "%5d %5d     1     1 Thu Jan  1 00:00:00 2026 /usr/bin/true reused\\n", g[k], k }';
+  fs.writeFileSync(path.join(bin, "ps"), `#!/bin/sh\ncase " $* " in *" -A "*) /bin/ps "$@" | /usr/bin/awk '${awk}'; exit 0;; esac\nexec /bin/ps "$@"\n`, { mode: 0o755 });
+  return bin;
+}
+
 function tablePsFails() {
   const bin = path.join(dir, "table-ps-fails");
   fs.mkdirSync(bin, { recursive: true });
@@ -562,6 +574,14 @@ test("B: a broker that exits on SIGTERM without closing its child still leaves n
   const [k] = kids();
   assert.ok(await until(() => !alive(k.pid), 5000), "the child it left behind was killed");
   await assertCleanedUp("term leaves child");
+});
+
+test("B: a broker that exits on SIGTERM leaving a child, its pid then held by another process, still leaves nothing running", { timeout: 60_000 }, async () => {
+  const r = round({ FAKE_BROKER_IGNORE_SHUTDOWN: "1", FAKE_BROKER_TERM_LEAVES_CHILD: "1", FAKE_BROKER_CHILD: "1", ...psSeam(reusedLeaderPs()) });
+  assert.equal(r.code, 0, JSON.stringify(r.json));
+  const [k] = kids();
+  assert.ok(await until(() => !alive(k.pid), 5000), "a reissued leader pid did not hide the child it left behind");
+  await assertCleanedUp("reused leader pid");
 });
 
 test("B: a broker that died before writing broker.json leaves a codex app-server that is never signalled; the snapshot is kept until it is gone", { timeout: 90_000 }, async () => {

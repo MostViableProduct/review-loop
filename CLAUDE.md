@@ -172,18 +172,23 @@ These are copied from the spec, and every task implicitly includes them.
     strictly after the snapshot's creation second (PPID ignored: grandchildren) AND already there, unchanged, at the
     stop's first read, each re-checked just before its SIGKILL. A broker.json pid already gone at the first read is
     never a group to signal (author's decision, 2026-10-06: its number may have been reissued): what still runs in
-    it is `unattributed`, the snapshot kept and reported. The same holds for a dead companion's group (sweep).
+    it is `unattributed`, the snapshot kept and reported. The same holds for a dead companion's group (sweep). A
+    pid held by a process other than the broker first read is never taken to mean "group gone" (`goneGroupsLeft`, the
+    stop, `stop-orphan`): the group itself is read, whoever holds the number.
     `cmdRun` waits past the
     snapshot's second before the companion starts (`afterSnapshotSecond`), so a same-second member is never the
     round's own: `unattributed`, never signalled. A `codex app-server` in a leaderless group inside the companion's
     pid window (`companion.json` = `{pid, after}`, written through `run`'s `onSpawn` and right after the companion
     exits) is `unattributed` too. Known limit: a broker that dies before broker.json AND whose app-server dies too
-    leaves its grandchildren unattributed and unreported (no evidence names them).
+    leaves its grandchildren unattributed and unreported (no evidence names them; `ps -E` would read every process's
+    environment and macOS hides it for platform binaries such as shells and git — author's decision 2026-10-06:
+    kept as a documented limit).
   - **Temp dir.** The companion runs with `TMPDIR` inside the snapshot (`companionTmp`), so a broker's `cxc-*` dir
     goes with the snapshot even when no broker.json names it; when that socket path would pass 103 bytes (a long
-    state dir), a short `rl-XXXXXX` under the OS temp dir recorded in `tmp.json` instead, removed by `removeSnapshot`.
+    state dir), a short `rl-XXXXXX` under the OS temp dir, recorded in `tmp.json` before it is made, instead.
+    `removeSnapshot` removes that dir first and keeps the snapshot (`temp_unremoved`) unless it is confirmed gone.
   - **Fail closed.** Anything unverifiable (`ps_unavailable`, `registry_unreadable`, `deadline`, `unknown_rows`,
-    `members_left`, `unattributed`: `BROKER_STOP_REASONS`) signals nothing more and keeps the snapshot; the round
+    `members_left`, `unattributed`, `temp_unremoved`: `BROKER_STOP_REASONS`) signals nothing more and keeps the snapshot; the round
     logs `round.broker_stop` (reason, counts, the `plugin-XXXXXX` name), and a lost line is said on stderr
     (`event_write_failed`). The owner marker is written whole before the companion can start; when ps cannot name
     the round, `snapshot_owner_unknown` (exit 30) and no companion. A damaged owner.json in a snapshot older than
