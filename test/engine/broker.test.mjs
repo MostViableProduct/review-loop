@@ -1215,6 +1215,25 @@ test("R2: a ws/plugin-* directory not shaped like a snapshot (plugin-old, plugin
   for (const d of theirs) assert.ok(fs.existsSync(path.join(d, "keep.txt")), `${path.basename(d)}: a name snapshotVerified never makes is not a snapshot`);
 });
 
+test("R2: a sweep step that throws on a real error (EACCES) emits hook.error as well as its round.broker_stop", { timeout: 60_000 }, async () => {
+  const snap = path.join(ws(), "plugin-Lock01");
+  const locked = path.join(snap, "locked");
+  fs.mkdirSync(locked, { recursive: true, mode: 0o700 });
+  fs.writeFileSync(path.join(locked, "f"), "x");
+  fs.chmodSync(locked, 0o500);
+  const old = new Date(Date.now() - 25 * 60 * 60_000);
+  fs.utimesSync(snap, old, old);
+  try {
+    const r = spawnSync(process.execPath, [ROUND, "sweep"], { env, encoding: "utf8" });
+    assert.notEqual(r.status, 0, r.stdout);
+    assert.deepEqual(stopDetails().map((e) => [e.data.snapshot, e.data.reason]), [["plugin-Lock01", "failed_remove"]]);
+    assert.equal(brokerStopEvents().length, 1, "a step that threw counted nothing, so it is still said as a failure");
+    assert.ok(fs.existsSync(snap), "the snapshot is kept for the next sweep");
+  } finally {
+    fs.chmodSync(locked, 0o700);
+  }
+});
+
 test("units: namesUpTo stops reading past its cap instead of listing the whole directory", () => {
   const d = path.join(dir, "many");
   fs.mkdirSync(d);

@@ -333,12 +333,12 @@ async function cmdRun(v) {
 
 /**
  * The detail of a stop that left a snapshot in place, for every path that keeps one (the round's own stop and both
- * sweeps): `hook.error` `broker_stop_failed` whenever something may still run, plus `round.broker_stop` with the
- * detail. Counts and a bounded reason only; a lost line is still said on stderr, so it is never silent.
+ * sweeps): `hook.error` `broker_stop_failed` whenever something may still run (counted, or a sweep step that threw
+ * and so counted nothing: `failed_<step>`), plus `round.broker_stop` with the detail. Counts and a bounded reason only; a lost line is still said on stderr, so it is never silent.
  * @param {string | null} key @param {string} snapshot @param {{ left: number, unattributed: number, reason: string | null }} s
  */
 function reportStop(key, snapshot, s) {
-  if (s.left + s.unattributed > 0 && !emitEvent({ source: "round", event: "hook.error", code: "broker_stop_failed", session_id: SESSION, artifact_key: key, data: { stage: "broker_stop_failed" } })) {
+  if ((s.left + s.unattributed > 0 || (s.reason ?? "").startsWith("failed_")) && !emitEvent({ source: "round", event: "hook.error", code: "broker_stop_failed", session_id: SESSION, artifact_key: key, data: { stage: "broker_stop_failed" } })) {
     process.stderr.write(`review-loop: event_write_failed ${JSON.stringify({ event: "hook.error", code: "broker_stop_failed", artifact_key: key })}\n`);
   }
   const data = { reason: s.reason ?? "members_left", left: s.left, unattributed: s.unattributed, snapshot };
