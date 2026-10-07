@@ -189,7 +189,8 @@ These are copied from the spec, and every task implicitly includes them.
     goes with the snapshot even when no broker.json names it; when that socket path would pass 103 bytes (a long
     state dir), a short `rl-XXXXXX` under the OS temp dir, recorded in `tmp.json` (`{dir, token}`) before it is
     made, the token then written into it whole (`.review-loop-tmp`, by rename from `.part`). `removeSnapshot`
-    removes that dir first, token last, only when it holds exactly that token; any other dir (tokenless, empty, a
+    removes that dir first, token last, only when it holds exactly that token (in the token file, or still in
+    its `.part` after a failed rename or a kill); any other dir (tokenless, empty, a
     partial or another token) is never touched: a kill before the token leaves at most an empty dir in the OS temp
     dir, for the OS to clear. It is detached first (atomic rename to `<dir>.rm`, checked to be
     the same device and inode), so a path swapped for a link after the check removes nothing behind it; a removal

@@ -1390,6 +1390,27 @@ test("units: removeSnapshot keeps the snapshot unless the temp dir its tmp.json 
   }
 });
 
+test("units: a token left in its .part (the rename failed or the round died) still marks the temp dir ours: removed", (t) => {
+  const root = fs.mkdtempSync(path.join(dir, "plugin-"));
+  const long = path.join(root, "y".repeat(120));
+  fs.mkdirSync(long, { recursive: true });
+  const rename = fs.renameSync;
+  t.mock.method(fs, "renameSync", (/** @type {Parameters<typeof fs.renameSync>} */ ...a) => {
+    if (path.basename(String(a[1])) === ".review-loop-tmp") throw Object.assign(new Error("EIO"), { code: "EIO" });
+    return rename(...a);
+  });
+  assert.throws(() => companionTmp(long), /EIO/);
+  t.mock.restoreAll();
+  const short = JSON.parse(fs.readFileSync(path.join(long, "tmp.json"), "utf8")).dir;
+  try {
+    assert.deepEqual(fs.readdirSync(short), [".review-loop-tmp.part"], "the token never left its .part");
+    assert.equal(removeSnapshot(long), true);
+    assert.ok(!fs.existsSync(short) && !fs.existsSync(`${short}.rm`), "the dir is removed, not leaked");
+  } finally {
+    fs.rmSync(short, { recursive: true, force: true });
+  }
+});
+
 test("units: removeSnapshot never removes through a temp dir swapped for a link after its check", (t) => {
   const token = "0123456789abcdef0123456789abcdef";
   const short = fs.mkdtempSync(path.join(os.tmpdir(), "rl-"));

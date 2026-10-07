@@ -212,7 +212,7 @@ export function companionTmp(root) {
       continue;
     }
     // Whole or not at all (rename): a dir whose token is not exactly tmp.json's is never taken for ours.
-    const part = path.join(short, `${TMP_TOKEN_FILE}.part`);
+    const part = path.join(short, TOKEN_NAMES[1]);
     fs.writeFileSync(part, token, { flag: "wx", mode: 0o600 });
     fs.renameSync(part, path.join(short, TMP_TOKEN_FILE));
     return short;
@@ -242,21 +242,24 @@ function removeShortTmp(v) {
       return false;
     }
     if (!st.isDirectory() || st.uid !== process.getuid?.()) return false;
-    let held = null;
-    try {
-      fs.lstatSync(path.join(p, TMP_TOKEN_FILE));
-      held = safeReadFile(path.join(p, TMP_TOKEN_FILE), 64, {}, { within: p }).toString("utf8");
-    } catch (e) {
-      if (/** @type {NodeJS.ErrnoException} */ (e).code !== "ENOENT") return false;
+    // Only the exact token marks the dir ours: in the token file, or still in its `.part` (a kill or a failed rename
+    // before it was published). Anything else, empty, partial or tokenless, is left as it is: a kill before the token
+    // is whole leaves at most an empty dir in the OS temp dir, for the OS to clear.
+    let ours = false;
+    for (const name of TOKEN_NAMES) {
+      try {
+        fs.lstatSync(path.join(p, name));
+        ours ||= safeReadFile(path.join(p, name), 64, {}, { within: p }).toString("utf8") === v.token;
+      } catch (e) {
+        if (/** @type {NodeJS.ErrnoException} */ (e).code !== "ENOENT") return false;
+      }
     }
-    // Only the exact token (written whole, by rename) marks the dir ours. Anything else, empty or tokenless included,
-    // is left as it is: a kill before the token leaves at most an empty dir in the OS temp dir, for the OS to clear.
-    if (held !== v.token) continue;
+    if (!ours) continue;
     if (p === v.dir) fs.renameSync(p, hold);
     const h = fs.lstatSync(hold);
     if (!h.isDirectory() || h.dev !== st.dev || h.ino !== st.ino) return false;
     // The token goes last: a removal that fails part-way leaves the dir still provably ours for the retry.
-    for (const n of fs.readdirSync(hold)) if (n !== TMP_TOKEN_FILE) fs.rmSync(path.join(hold, n), { recursive: true, force: true });
+    for (const n of fs.readdirSync(hold)) if (!TOKEN_NAMES.includes(n)) fs.rmSync(path.join(hold, n), { recursive: true, force: true });
     fs.rmSync(hold, { recursive: true, force: true });
   }
   return true;
@@ -515,6 +518,8 @@ const TMP_FILE = "tmp.json";
 /** A snapshot dir's name, exactly as snapshotVerified's mkdtemp makes it. */
 export const SNAPSHOT_NAME = /^plugin-[A-Za-z0-9]{6}$/;
 const TMP_TOKEN_FILE = ".review-loop-tmp";
+/** The token file, and the `.part` it is written to before it is renamed into place. */
+const TOKEN_NAMES = [TMP_TOKEN_FILE, `${TMP_TOKEN_FILE}.part`];
 const COMPANION_MAX_BYTES = 4096;
 /** A snapshot's companion data holds one state dir per workspace; more than this is not a companion's doing. */
 const REGISTRY_MAX_ENTRIES = 32;
