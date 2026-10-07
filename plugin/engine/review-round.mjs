@@ -329,7 +329,7 @@ async function cmdRun(v) {
     prep && !prep.nothing && prep.cleanup();
     // A snapshot whose broker tree may still run is kept: it is the only evidence that ties the tree to this round,
     // and the next sweep retries it once this (its owner) has exited.
-    if (!kept) plugin?.cleanup();
+    if (!kept && plugin && !plugin.cleanup()) reportStop(key, path.basename(plugin.root), { left: 0, unattributed: 0, reason: "temp_unremoved" });
     lock.release();
   }
 }
@@ -356,7 +356,8 @@ async function sweepSnapshots(key, opts = {}) {
   const s = await sweepStaleSnapshots(stateSubdir("ws"), opts);
   for (const st of s.stops) reportStop(key, st.snapshot, st);
   const bad = s.brokersLeft + s.unattributed + s.failed > 0 || s.incomplete;
-  if (s.counted === 0 && !bad) return s;
+  // counted is the last count (a full sweep re-counts after acting, down to 0), so held says whether it acted.
+  if (s.counted === 0 && s.held === 0 && !bad) return s;
   const data = {
     swept: s.swept, brokers_left: s.brokersLeft, failed: s.failed, unattributed: s.unattributed, incomplete: s.incomplete ? 1 : 0,
     held: s.held, partition: s.partition, partitions: s.partitions
@@ -365,7 +366,7 @@ async function sweepSnapshots(key, opts = {}) {
   const ok = bad
     ? emitEvent({ source: "round", event: "round.sweep", code: "snapshot_sweep_incomplete", session_id: SESSION, artifact_key: key, data })
     : emitEvent({ source: "round", event: "round.sweep", code: "ok", session_id: SESSION, artifact_key: key, data });
-  if (!ok && bad) process.stderr.write(`review-loop: event_write_failed ${JSON.stringify({ event: "round.sweep", code: "snapshot_sweep_incomplete", artifact_key: key, ...data })}\n`);
+  if (!ok) process.stderr.write(`review-loop: event_write_failed ${JSON.stringify({ event: "round.sweep", code: bad ? "snapshot_sweep_incomplete" : "ok", artifact_key: key, ...data })}\n`);
   return s;
 }
 

@@ -234,7 +234,9 @@ export const COMMANDS_ENUM = Object.freeze(["setup", "config", "doctor", "update
 export const KINDS = Object.freeze(["spec", "plan", "impl", "pr"]);
 export const DECISION_OPTIONS = Object.freeze(["continue", "more", "accept", "stop", "accept-finding", "waive", "repin", "override", "merge", "pull"]);
 /** Why a broker stop left a snapshot in place (see stopCompanionBroker). */
-export const BROKER_STOP_REASONS = Object.freeze(["ps_unavailable", "registry_unreadable", "deadline", "unknown_rows", "members_left", "unattributed"]);
+export const BROKER_STOP_REASONS = Object.freeze(["ps_unavailable", "registry_unreadable", "deadline", "unknown_rows", "members_left", "unattributed", "temp_unremoved"]);
+/** The most snapshots a sweep looks at (pin.mjs SWEEP_LIST_MAX, pinned equal by a test): every count fits. */
+const SWEEP_COUNT_MAX = 65_536;
 /** `review-round.mjs stop-orphan`'s outcomes (only "stopped" is a success). */
 export const STOP_ORPHAN_STATUSES = Object.freeze(["stopped", "mismatch", "still_running", "unverified", "leader_gone"]);
 export const PAUSE_REASONS = Object.freeze(["checkpoint", "stall", "dispute_deadlock", "criss_cross", "push_rejected", "head_diverged", "plugin_pin"]);
@@ -270,8 +272,8 @@ export const EVENT_CATALOG = Object.freeze({
   "round.sweep": {
     sources: ["round"],
     data: {
-      swept: int(0, 10_000), brokers_left: int(0, 10_000), failed: int(0, 10_000), unattributed: int(0, 10_000), incomplete: int(0, 1),
-      held: int(0, 10_000), partition: int(0, 4095), partitions: int(1, 4096)
+      swept: int(0, SWEEP_COUNT_MAX), brokers_left: int(0, SWEEP_COUNT_MAX), failed: int(0, SWEEP_COUNT_MAX), unattributed: int(0, SWEEP_COUNT_MAX),
+      incomplete: int(0, 1), held: int(0, SWEEP_COUNT_MAX), partition: int(0, 4095), partitions: int(1, 4096)
     }
   },
   "round.stop_orphan": { sources: ["round"], data: { status: oneOf(STOP_ORPHAN_STATUSES) } },

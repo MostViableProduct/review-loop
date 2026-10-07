@@ -213,27 +213,40 @@ function isTmpMarker(v) {
 }
 
 /**
- * Removes a snapshot and the short temp dir its tmp.json records. That dir is removed only when it is what
- * companionTmp makes: a real `rl-XXXXXX` directory of ours directly in the OS temp dir, never a link.
+ * Removes a snapshot, after the short temp dir its tmp.json records. tmp.json is the only pointer to that dir, so the
+ * snapshot is kept (false) unless the dir is confirmed gone: a tmp.json that cannot be read or is not what
+ * companionTmp writes (a real `rl-XXXXXX` directory of ours directly in the OS temp dir, never a link), or a removal
+ * that fails, keeps it for a later retry. True when the snapshot is removed.
  * @param {string} root
  */
 export function removeSnapshot(root) {
+  const marker = path.join(root, TMP_FILE);
+  let tracked = true;
   try {
-    const v = readJsonValidated(path.join(root, TMP_FILE), isTmpMarker, root, 4096, { readOnly: true });
+    fs.lstatSync(marker);
+  } catch (e) {
+    if (/** @type {NodeJS.ErrnoException} */ (e).code !== "ENOENT") return false;
+    tracked = false;
+  }
+  if (tracked) {
     const tmps = new Set([os.tmpdir()]);
     try {
       tmps.add(fs.realpathSync(os.tmpdir()));
     } catch {
       // Compared as given.
     }
-    if (v && /^rl-[A-Za-z0-9]{6}$/.test(path.basename(v.dir)) && tmps.has(path.dirname(v.dir))) {
+    try {
+      const v = readJsonValidated(marker, isTmpMarker, root, 4096, { readOnly: true });
+      if (!v || !/^rl-[A-Za-z0-9]{6}$/.test(path.basename(v.dir)) || !tmps.has(path.dirname(v.dir))) return false;
       const st = fs.lstatSync(v.dir);
-      if (st.isDirectory() && st.uid === process.getuid?.()) fs.rmSync(v.dir, { recursive: true, force: true });
+      if (!st.isDirectory() || st.uid !== process.getuid?.()) return false;
+      fs.rmSync(v.dir, { recursive: true, force: true });
+    } catch (e) {
+      if (/** @type {NodeJS.ErrnoException} */ (e).code !== "ENOENT") return false;
     }
-  } catch {
-    // No record, or not one companionTmp made: nothing outside the snapshot to remove.
   }
   fs.rmSync(root, { recursive: true, force: true });
+  return true;
 }
 
 /**
@@ -242,7 +255,7 @@ export function removeSnapshot(root) {
  * re-hash the COPIED bytes against the pin, and execute only from there. plugin.json (client name/version metadata,
  * read at run time) is copied unpinned so adopting this does not force a repin.
  * @param {string} parentDir private (0700) directory the snapshot is created in
- * @returns {{ root: string, cleanup: () => void }}
+ * @returns {{ root: string, cleanup: () => boolean }} cleanup: false when the snapshot was kept (see removeSnapshot)
  */
 export function snapshotVerified(parentDir) {
   const pin = readPin();
@@ -1244,6 +1257,8 @@ export async function sweepStaleSnapshots(parentDir, opts = {}) {
         else {
           res.brokersLeft += r.left;
           res.unattributed += r.unattributed;
+          // Nothing runs, but the snapshot stayed (its temp dir did not go): not clean either.
+          if (r.left + r.unattributed === 0) res.failed++;
           res.stops.push({ snapshot: name, reason: r.reason ?? "members_left", left: r.left, unattributed: r.unattributed });
         }
       }
@@ -1281,8 +1296,7 @@ async function sweepOne(root, name, table, remaining) {
     // from it now (a fresh read; an unreadable table keeps it).
     if (!ownedRealDirectory(root)) return "skip";
     if (runsFrom(root)) return { left: 1, unattributed: 0, reason: "members_left" };
-    removeSnapshot(root);
-    return "swept";
+    return removeSnapshot(root) ? "swept" : { left: 0, unattributed: 0, reason: "temp_unremoved" };
   } catch {
     return "failed";
   }

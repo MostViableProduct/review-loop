@@ -13,7 +13,7 @@ import { makeRepo, commitFile, writeFile, tmpDir, GIT_ENV } from "./helpers.mjs"
 import { isRealPid, signalPid } from "../fakes/signal.mjs";
 import { validateLine } from "../../plugin/engine/lib/events.mjs";
 import {
-  afterSnapshotSecond, brokerArgv, deadGroupTargets, namesUpTo, hashOf, isHeld, parseProcRow, partitionCount, sameMember, stopCompanionBroker, sweepStaleSnapshots, treeMembers
+  afterSnapshotSecond, brokerArgv, deadGroupTargets, namesUpTo, removeSnapshot, SWEEP_LIST_MAX, hashOf, isHeld, parseProcRow, partitionCount, sameMember, stopCompanionBroker, sweepStaleSnapshots, treeMembers
 } from "../../plugin/engine/lib/pin.mjs";
 
 const HERE = path.dirname(new URL(import.meta.url).pathname);
@@ -1067,4 +1067,50 @@ test("B: a ps on PATH is never consulted for broker identity: a shim that fails 
   assert.equal(r.code, 0, JSON.stringify(r.json));
   await assertCleanedUp("PATH ps");
   assert.deepEqual(brokerLog(), ["sigterm"], "identity came from /bin/ps, so the broker was matched and stopped");
+});
+
+test("units: removeSnapshot keeps the snapshot unless the temp dir its tmp.json names is confirmed gone", () => {
+  const mk = () => {
+    const root = fs.mkdtempSync(path.join(dir, "plugin-"));
+    return root;
+  };
+  const absent = mk();
+  assert.equal(removeSnapshot(absent), true);
+  assert.ok(!fs.existsSync(absent), "no tmp.json: removed");
+
+  const stuck = mk();
+  const short = fs.mkdtempSync(path.join(os.tmpdir(), "rl-"));
+  fs.mkdirSync(path.join(short, "locked"));
+  fs.writeFileSync(path.join(short, "locked", "f"), "");
+  fs.chmodSync(path.join(short, "locked"), 0o000);
+  fs.writeFileSync(path.join(stuck, "tmp.json"), JSON.stringify({ dir: short }));
+  try {
+    assert.equal(removeSnapshot(stuck), false);
+    assert.ok(fs.existsSync(path.join(stuck, "tmp.json")), "a temp dir that would not go keeps the only pointer to it");
+  } finally {
+    fs.chmodSync(path.join(short, "locked"), 0o700);
+  }
+  assert.equal(removeSnapshot(stuck), true, "and the retry clears both");
+  assert.ok(!fs.existsSync(short) && !fs.existsSync(stuck));
+
+  const bad = mk();
+  fs.writeFileSync(path.join(bad, "tmp.json"), "{not json");
+  assert.equal(removeSnapshot(bad), false, "an unreadable tmp.json keeps the snapshot");
+  const gone = mk();
+  fs.writeFileSync(path.join(gone, "tmp.json"), JSON.stringify({ dir: path.join(os.tmpdir(), "rl-Gone12") }));
+  assert.equal(removeSnapshot(gone), true, "a temp dir already gone: removed");
+});
+
+test("units: round.sweep's counts fit every sweep the engine can run (SWEEP_LIST_MAX snapshots)", async () => {
+  const { EVENT_CATALOG } = await import("../../plugin/engine/lib/codes.mjs");
+  const d = EVENT_CATALOG["round.sweep"].data;
+  for (const k of ["swept", "brokers_left", "failed", "unattributed", "held"]) assert.equal(d[k](SWEEP_LIST_MAX), SWEEP_LIST_MAX, k);
+});
+
+test("D: a clean sweep whose round.sweep line cannot be written says so on stderr", { timeout: 90_000 }, async () => {
+  await killedRound();
+  fs.mkdirSync(path.join(env.REVIEW_LOOP_STATE_DIR, "events.jsonl"));
+  const r = spawnSync(process.execPath, [ROUND, "sweep"], { env, encoding: "utf8" });
+  assert.equal(JSON.parse(r.stdout).status, "clean", r.stdout);
+  assert.match(r.stderr, /event_write_failed .*"event":"round\.sweep".*"code":"ok"/);
 });
