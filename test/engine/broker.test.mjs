@@ -13,7 +13,7 @@ import { makeRepo, commitFile, writeFile, tmpDir, GIT_ENV } from "./helpers.mjs"
 import { isRealPid, signalPid } from "../fakes/signal.mjs";
 import { validateLine } from "../../plugin/engine/lib/events.mjs";
 import {
-  afterSnapshotSecond, brokerArgv, deadGroupTargets, namesUpTo, removeSnapshot, SWEEP_LIST_MAX, hashOf, isHeld, parseProcRow, partitionCount, sameMember, stopCompanionBroker, sweepStaleSnapshots, treeMembers
+  afterSnapshotSecond, brokerArgv, deadGroupTargets, namesUpTo, removeSnapshot, SWEEP_LIST_MAX, companionTmp, goneGroupsLeft, hashOf, isHeld, parseProcRow, partitionCount, sameMember, stopCompanionBroker, sweepStaleSnapshots, treeMembers
 } from "../../plugin/engine/lib/pin.mjs";
 
 const HERE = path.dirname(new URL(import.meta.url).pathname);
@@ -1113,4 +1113,59 @@ test("D: a clean sweep whose round.sweep line cannot be written says so on stder
   const r = spawnSync(process.execPath, [ROUND, "sweep"], { env, encoding: "utf8" });
   assert.equal(JSON.parse(r.stdout).status, "clean", r.stdout);
   assert.match(r.stderr, /event_write_failed .*"event":"round\.sweep".*"code":"ok"/);
+});
+
+test("units: goneGroupsLeft counts a gone broker's group even when its pid number is held again", () => {
+  const row = (/** @type {number} */ pid, /** @type {number} */ pgid, /** @type {number} */ started) => ({ pid, pgid, uid: 501, started, args: "x" });
+  const rows = [row(700, 900, 2000), row(701, 700, 2000), row(702, 700, 1000)];
+  assert.equal(goneGroupsLeft(rows, [700], 1500, 501), 1, "pid 700 is held by a process in another group; group 700's later member still counts");
+  assert.equal(goneGroupsLeft(rows, [700], 1500, 502), 0, "another user's processes are not ours to count");
+  assert.equal(goneGroupsLeft([row(700, 900, 2000)], [700], 1500, 501), 0, "an empty group: nothing left");
+});
+
+test("units: companionTmp records the short temp dir before making it", (t) => {
+  const root = fs.mkdtempSync(path.join(dir, "plugin-"));
+  const long = path.join(root, "y".repeat(120));
+  fs.mkdirSync(long, { recursive: true });
+  /** @type {boolean[]} */
+  const namedFirst = [];
+  const marker = path.join(long, "tmp.json");
+  const check = (/** @type {unknown} */ p) => {
+    if (typeof p !== "string" || !path.basename(p).startsWith("rl-")) return;
+    namedFirst.push(fs.existsSync(marker) && (path.basename(p) === "rl-" || JSON.parse(fs.readFileSync(marker, "utf8")).dir === p));
+  };
+  const mkdir = fs.mkdirSync;
+  const mkdtemp = fs.mkdtempSync;
+  t.mock.method(fs, "mkdirSync", (/** @type {Parameters<typeof fs.mkdirSync>} */ ...a) => (check(a[0]), mkdir(...a)));
+  t.mock.method(fs, "mkdtempSync", (/** @type {Parameters<typeof fs.mkdtempSync>} */ ...a) => (check(a[0]), mkdtemp(...a)));
+  const short = companionTmp(long);
+  try {
+    assert.ok(short && /^rl-[A-Za-z0-9]{6}$/.test(path.basename(short)), String(short));
+    assert.deepEqual(namedFirst, [true], "tmp.json named the dir before it existed");
+    assert.equal(JSON.parse(fs.readFileSync(marker, "utf8")).dir, short);
+  } finally {
+    t.mock.restoreAll();
+    if (short) fs.rmSync(short, { recursive: true, force: true });
+  }
+});
+
+test("B: a companion marker whose pid is held by a process that is not the companion still has its group counted", { timeout: 60_000 }, async () => {
+  const parent = path.join(dir, "ws-companion-reused");
+  fs.mkdirSync(parent, { mode: 0o700 });
+  const s = await deadSnapshot(parent, { broker: false });
+  await afterSnapshotSecond(s.root);
+  // A live leader that is not a companion (its args name no companion script), with a child in its group.
+  const src = `const c = require("node:child_process").spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" }); process.stdout.write(String(c.pid) + "\\n"); setInterval(() => {}, 1000);`;
+  const leader = spawn(process.execPath, ["-e", src], { detached: true, stdio: ["ignore", "pipe", "ignore"] });
+  const childPid = await new Promise((res) => leader.stdout.once("data", (d) => res(Number(String(d).trim()))));
+  try {
+    fs.writeFileSync(path.join(s.root, "companion.json"), JSON.stringify({ pid: leader.pid }));
+    const res = await withSeams({ REVIEW_LOOP_TEST_SWEEP_TICK: "0" }, () => sweepStaleSnapshots(parent, { all: true }));
+    assert.deepEqual([res.swept, res.brokersLeft], [0, 1], JSON.stringify(res));
+    assert.ok(fs.existsSync(s.root), "the snapshot is kept");
+    assert.ok(alive(childPid) && alive(/** @type {number} */ (leader.pid)), "and nothing was signalled");
+  } finally {
+    signalPid(childPid, "SIGKILL");
+    signalPid(/** @type {number} */ (leader.pid), "SIGKILL");
+  }
 });

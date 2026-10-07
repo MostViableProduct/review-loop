@@ -189,7 +189,7 @@ export function verifyPin(opts = {}) {
  * (removeSnapshot). null only when even that is too long: the companion then keeps the inherited temp dir.
  * @param {string} root
  */
-function companionTmp(root) {
+export function companionTmp(root) {
   const fits = (/** @type {string} */ d) => Buffer.byteLength(path.join(d, "cxc-XXXXXX", "broker.sock")) <= SOCKET_PATH_MAX;
   const inside = path.join(root, "tmp");
   if (fits(inside)) {
@@ -197,14 +197,19 @@ function companionTmp(root) {
     return inside;
   }
   if (!fits(path.join(os.tmpdir(), "rl-XXXXXX"))) return null;
-  const short = fs.mkdtempSync(path.join(os.tmpdir(), "rl-"));
-  try {
+  // Recorded before it is made: a kill between the two leaves a tmp.json naming a dir that is not there (removeSnapshot
+  // treats that as gone), never a dir that nothing names.
+  const ALNUM = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+  for (let attempt = 0; ; attempt++) {
+    const short = path.join(os.tmpdir(), `rl-${Array.from({ length: 6 }, () => ALNUM[crypto.randomInt(ALNUM.length)]).join("")}`);
     atomicWriteJson(path.join(root, TMP_FILE), { dir: short }, root);
-  } catch (err) {
-    fs.rmSync(short, { recursive: true, force: true });
-    throw err;
+    try {
+      fs.mkdirSync(short, { mode: 0o700 });
+      return short;
+    } catch (err) {
+      if (/** @type {NodeJS.ErrnoException} */ (err).code !== "EEXIST" || attempt >= 2) throw err;
+    }
   }
-  return short;
 }
 
 /** @param {unknown} v @returns {v is { dir: string }} */
@@ -555,6 +560,21 @@ export function treeMembers(rows, pgid, snapshotSec, uid) {
     else if (p.started === snapshotSec) out.unattributed.push(p);
   }
   return out;
+}
+
+/**
+ * What still runs in the groups of brokers that were gone before the stop began. A process now holding one of those
+ * pids proves nothing (it may be a reissue), so each group's members are counted whoever holds the number: they are
+ * unattributed, keep the snapshot, and are never signalled.
+ * @param {Proc[]} rows @param {number[]} pgids @param {number} snapshotSec @param {number | undefined} uid
+ */
+export function goneGroupsLeft(rows, pgids, snapshotSec, uid) {
+  let n = 0;
+  for (const pgid of pgids) {
+    const t = treeMembers(rows, pgid, snapshotSec, uid);
+    n += t.members.length + t.unattributed.length + t.unknown.length;
+  }
+  return n;
 }
 
 /** The snapshot root's creation second, which every process its round starts is strictly after. @param {string} root */
@@ -921,11 +941,7 @@ export async function stopCompanionBroker(root, opts = {}) {
       if (t.members.length || t.unknown.length) res.left++;
       res.unattributed += t.unattributed.length;
     }
-    for (const pgid of goneRegistered) {
-      if (last.some((p) => p.pid === pgid)) continue;
-      const t = treeMembers(last, pgid, snapshotSec, uid);
-      res.unattributed += t.members.length + t.unattributed.length + t.unknown.length;
-    }
+    res.unattributed += goneGroupsLeft(last, goneRegistered, snapshotSec, uid);
     res.unattributed += leaderlessAppServers(last, snapshotSec, marker, new Set([...groups, ...goneRegistered]));
     if (res.left > 0) res.reason ??= "members_left";
     else if (res.unattributed > 0) res.reason ??= "unattributed";
@@ -989,7 +1005,7 @@ async function stopSnapshotCompanion(root, table, remaining) {
   }
   // A companion gone before this stop leaves no identity for its group (its pid may have been reissued): members still
   // there keep the snapshot, and are never signalled.
-  if (marker.state === "ok" && !table.some((p) => p.pid === marker.pid)) {
+  if (marker.state === "ok" && !found.some((c) => c.pid === marker.pid)) {
     const t = treeMembers(table, marker.pid, snapshotSecond(root), uid);
     if (t.members.length || t.unattributed.length || t.unknown.length) return false;
   }
