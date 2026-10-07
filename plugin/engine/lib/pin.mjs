@@ -258,7 +258,8 @@ export function removeSnapshot(root) {
       } catch (e) {
         if (/** @type {NodeJS.ErrnoException} */ (e).code !== "ENOENT") return false;
       }
-      if (held === v.token) {
+      // A prefix too (empty included): a token write cut short still marks the dir ours.
+      if (held !== null && v.token.startsWith(held)) {
         // The token goes last: a removal that fails part-way leaves the dir still provably ours for the retry.
         for (const n of fs.readdirSync(v.dir)) if (n !== TMP_TOKEN_FILE) fs.rmSync(path.join(v.dir, n), { recursive: true, force: true });
         fs.rmSync(v.dir, { recursive: true, force: true });
@@ -1469,6 +1470,9 @@ export function countOrphanBrokers(parentDir) {
   return res;
 }
 
+/** @param {Proc | "gone"} now the row holding the leader's pid now @param {Proc} first the leader stop-orphan verified */
+const leaderReissued = (now, first) => now !== "gone" && !sameMember(now, first) && now.pgid === first.pid;
+
 /**
  * The operator's `stop-orphan`: ends one broker tree whose snapshot is gone, re-reading the leader right before each
  * signal and acting only while it is still the very process doctor listed (pid, start second, args hash), still leads
@@ -1524,6 +1528,10 @@ export async function stopOrphan(parentDir, o) {
   for (;;) {
     const table = readProcs();
     if (table === null) return "unverified";
+    // Another process now leading group <pid>: the pid was reissued, so the broker's group had emptied (an id is never
+    // reissued while its group lives) and every member now is the newcomer's. A reissue into another group proves
+    // nothing about the old group, which is still emptied below.
+    if (leaderReissued(table.find((p) => p.pid === first.pid) ?? "gone", first)) return "stopped";
     const members = table.filter((p) => p.pgid === first.pid && p.uid === uid);
     if (members.length === 0) return "stopped";
     if (performance.now() >= until) return "still_running";
@@ -1536,6 +1544,9 @@ export async function stopOrphan(parentDir, o) {
       // snapshot makes the tree a round's again.
       const back = snapshotPresent();
       if (back !== "absent") return back;
+      const lead = procRow(first.pid);
+      if (lead === null) return "unverified";
+      if (leaderReissued(lead, first)) return "stopped";
       signal(m.pid, "SIGKILL");
     }
     await sleep(500);

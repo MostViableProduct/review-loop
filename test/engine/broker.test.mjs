@@ -1226,6 +1226,16 @@ test("units: removeSnapshot keeps the snapshot unless the temp dir its tmp.json 
       fs.rmSync(foreign, { recursive: true, force: true });
     }
   }
+  // A token write cut short (an empty or partial file): still ours, removed.
+  for (const partial of ["", token.slice(0, 7)]) {
+    const d = fs.mkdtempSync(path.join(os.tmpdir(), "rl-"));
+    fs.writeFileSync(path.join(d, ".review-loop-tmp"), partial);
+    fs.mkdirSync(path.join(d, "cxc-x"));
+    const s = mk();
+    fs.writeFileSync(path.join(s, "tmp.json"), JSON.stringify({ dir: d, token }));
+    assert.equal(removeSnapshot(s), true);
+    assert.ok(!fs.existsSync(d), `a ${partial ? "partial" : "empty"} token still proves the dir ours`);
+  }
   // Empty and tokenless: a kill between its mkdir and its token. Removed (rmdir: only an empty dir can go).
   const empty = fs.mkdtempSync(path.join(os.tmpdir(), "rl-"));
   const e = mk();

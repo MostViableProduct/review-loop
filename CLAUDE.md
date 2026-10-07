@@ -174,7 +174,9 @@ These are copied from the spec, and every task implicitly includes them.
     never a group to signal (author's decision, 2026-10-06: its number may have been reissued): what still runs in
     it is `unattributed`, the snapshot kept and reported. The same holds for a dead companion's group (sweep). A
     pid held by a process other than the broker first read is never taken to mean "group gone" (`goneGroupsLeft`, the
-    stop, `stop-orphan`): the group itself is read, whoever holds the number.
+    stop, `stop-orphan`): the group itself is read, whoever holds the number. The one exception: a newcomer
+    leading a group of that very id means the old group had emptied (an id is never reissued while its group
+    lives), so `stop-orphan` stops there and signals nothing more.
     `cmdRun` waits past the
     snapshot's second before the companion starts (`afterSnapshotSecond`), so a same-second member is never the
     round's own: `unattributed`, never signalled. A `codex app-server` in a leaderless group inside the companion's
@@ -187,7 +189,8 @@ These are copied from the spec, and every task implicitly includes them.
     goes with the snapshot even when no broker.json names it; when that socket path would pass 103 bytes (a long
     state dir), a short `rl-XXXXXX` under the OS temp dir, recorded in `tmp.json` (`{dir, token}`) before it is
     made, the token then written into it (`.review-loop-tmp`). `removeSnapshot` removes that dir first, token last,
-    only when it holds that token (or is empty: a kill between mkdir and token); a dir without it is never touched.
+    only when it holds that token or a prefix of it (a write cut short), or is empty (a kill between mkdir and
+    token); a dir without it is never touched.
     The snapshot is kept (`temp_unremoved`) unless the dir is confirmed gone or not ours.
   - **Fail closed.** Anything unverifiable (`ps_unavailable`, `registry_unreadable`, `deadline`, `unknown_rows`,
     `members_left`, `unattributed`, `temp_unremoved`: `BROKER_STOP_REASONS`) signals nothing more and keeps the snapshot; the round

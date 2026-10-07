@@ -606,6 +606,35 @@ test("orphaned_brokers: stop-orphan stops the child a broker leaves even when th
   assert.equal(spawnSync("/bin/ps", ["-o", "pid=", "-g", String(pid)], { encoding: "utf8" }).stdout.trim(), "", "the child it left is gone too");
 });
 
+test("orphaned_brokers: stop-orphan signals nothing once the broker's pid is reissued to a process leading a new group of that id", { timeout: 30_000 }, async () => {
+  const h = healthy();
+  const pid = orphanBroker(h, { termLeavesChild: true });
+  const r = await check("orphaned_brokers").run(ctx());
+  const cmd = /stop-orphan --snapshot (\S+) --pid (\d+) --started (\d+) --args-sha ([0-9a-f]{64})/.exec(r.fix ?? "");
+  assert.ok(cmd, r.fix ?? "");
+  // A ps whose table reads show the leader's pid held by a newcomer leading its own group of that id (pgid = pid).
+  const fake = path.join(h, "reused-ps");
+  fs.mkdirSync(fake, { recursive: true });
+  const awk = `{ print; pid[$2] = 1; if ($4 == ${pid} && $2 != ${pid}) u = $1 } END { if (u != "" && !(${pid} in pid)) printf "%5d %5d     1 %5d Thu Jan  1 00:00:00 2026 /usr/bin/true reused\\n", u, ${pid}, ${pid} }`;
+  fs.writeFileSync(path.join(fake, "ps"), `#!/bin/sh\ncase " $* " in *" -A "*) /bin/ps "$@" | /usr/bin/awk '${awk}'; exit 0;; esac\nexec /bin/ps "$@"\n`, { mode: 0o755 });
+  const member = Number(spawnSync("/bin/ps", ["-o", "pid=", "-g", String(pid)], { encoding: "utf8" }).stdout.trim().split(/\s+/).find((p) => Number(p) !== pid));
+  const engine = path.join(process.cwd(), "plugin", "engine", "review-round.mjs");
+  const { spawn } = await import("node:child_process");
+  // Not spawnSync: this process must stay free to reap the broker, so its pid really leaves the table.
+  const child = spawn(process.execPath, [engine, "stop-orphan", "--snapshot", cmd[1], "--pid", cmd[2], "--started", cmd[3], "--args-sha", cmd[4]], { env: { ...process.env, REVIEW_LOOP_TEST_SEAMS: "1", REVIEW_LOOP_TEST_PS_PATH: path.join(fake, "ps") }, stdio: ["ignore", "pipe", "ignore"] });
+  let out = "";
+  child.stdout.on("data", (d) => { out += d; });
+  const code = await new Promise((res) => child.once("exit", res));
+  assert.equal(code, 0, out);
+  assert.equal(JSON.parse(out).status, "stopped");
+  // An id is never reissued while its group lives, so the group seen now is the newcomer's: nothing in it is signalled.
+  try {
+    assert.ok(process.kill(member, 0), "no SIGKILL reached a member once the leader's pid led a new group");
+  } finally {
+    signalPid(member, "SIGKILL");
+  }
+});
+
 test("orphaned_brokers: stop-orphan sends no SIGKILL once the snapshot is back", { timeout: 30_000 }, async () => {
   const h = healthy();
   const pid = orphanBroker(h, { ignoreTerm: true });
