@@ -635,6 +635,27 @@ test("orphaned_brokers: a linked ws/ is never followed; the check is unverified"
   assert.match(r.note ?? "", /unverified/);
 });
 
+test("orphaned_brokers: a live broker whose snapshot name now holds a link or a file is unverified, never taken as a snapshot", { timeout: 30_000 }, async () => {
+  const h = healthy();
+  const pid = orphanBroker(h);
+  const entry = path.join(h, "state", "ws", "plugin-AbC123");
+  const elsewhere = path.join(h, "elsewhere-snapshot");
+  fs.mkdirSync(elsewhere);
+  try {
+    for (const make of [() => fs.symlinkSync(elsewhere, entry), () => fs.writeFileSync(entry, "")]) {
+      make();
+      const r = await check("orphaned_brokers").run(ctx());
+      assert.equal(r.status, "warn");
+      assert.match(r.note ?? "", /unverified/);
+      assert.match(r.fix ?? "", /ls -la/);
+      assert.doesNotMatch(r.fix ?? "", /stop-orphan/, "no command acts on a broker whose snapshot cannot be told apart");
+      fs.rmSync(entry, { force: true });
+    }
+  } finally {
+    signalPid(pid, "SIGKILL", { group: true });
+  }
+});
+
 test("orphaned_brokers: a snapshot restored between a member's check and its SIGKILL stops stop-orphan before the signal", { timeout: 30_000 }, async () => {
   const h = healthy();
   const pid = orphanBroker(h, { ignoreTerm: true });

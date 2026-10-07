@@ -942,7 +942,7 @@ test("A: a round whose start time ps cannot read starts no companion and leaves 
   assert.deepEqual(snapshots(), [], "and no snapshot is left that would never read as dead");
 });
 
-test("B: a broker gone before its stop: its cxc-* dir goes too, but only when it holds nothing but a broker's files", { timeout: 60_000 }, async () => {
+test("B: a broker gone before its stop: broker.json's word never removes a dir outside the snapshot, broker-shaped or not", { timeout: 60_000 }, async () => {
   const parent = path.join(dir, "ws-deaddir");
   fs.mkdirSync(parent, { mode: 0o700 });
   const s = await deadSnapshot(parent);
@@ -950,7 +950,8 @@ test("B: a broker gone before its stop: its cxc-* dir goes too, but only when it
   assert.ok(await until(() => !alive(s.pid), 3000));
   const r = await stopCompanionBroker(s.root);
   assert.deepEqual([r.left, r.unattributed], [0, 0]);
-  assert.ok(!fs.existsSync(s.sessionDir), "the dead broker's session dir is removed");
+  assert.ok(fs.existsSync(s.sessionDir), "even its own-looking session dir: nothing binds broker.json's claim to it");
+  fs.rmSync(s.sessionDir, { recursive: true, force: true });
 
   const t = await deadSnapshot(parent);
   signalPid(t.pid, "SIGKILL");

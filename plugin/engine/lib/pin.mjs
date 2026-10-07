@@ -946,10 +946,10 @@ export async function stopCompanionBroker(root, opts = {}) {
     if (res.left > 0) res.reason ??= "members_left";
     else if (res.unattributed > 0) res.reason ??= "unattributed";
     if (res.left === 0) {
+      // Only a dir a live, verified broker's own args name. broker.json's sessionDir binds nothing (it is the broker's
+      // own claim): a gone broker's dir is never removed from it. Since 1.0.4 that dir is inside the snapshot's TMPDIR
+      // (companionTmp) and goes with the snapshot; an older one in the OS temp dir is left to the OS.
       for (const dir of ownDirs.values()) removeSessionDir(dir);
-      // A broker gone before this stop has no args left to name its dir: broker.json's is used only when it is
-      // provably that broker's and unused (deadBrokersOwnDir), so an untrusted path takes nothing else with it.
-      for (const s of reg.sessions) if (!ownDirs.has(s.pid) && deadBrokersOwnDir(s.sessionDir, s.pid)) removeSessionDir(s.sessionDir);
     }
   } catch {
     keep("unknown_rows");
@@ -1326,34 +1326,8 @@ function runsFrom(root) {
   return procs.some((p) => p.uid === process.getuid?.() && (brokerArgv(p.args, roots) !== null || brokerArgv(p.args, roots, COMPANION_SCRIPT) !== null));
 }
 
-const BROKER_FILES = new Set(["broker.sock", "broker.pid", "broker.log"]);
 /** Below every supported platform's sun_path size (macOS 104, Linux 108), less a terminating byte. */
 const SOCKET_PATH_MAX = 103;
-
-/**
- * Whether broker.json's session dir is that dead broker's own and unused: a real directory of ours (never a link)
- * holding nothing but a broker's files, its broker.pid naming exactly that broker, and no live process of this user
- * naming its socket. Anything unreadable says no, so the dir is kept.
- * @param {string | null} dir @param {number} pid
- */
-function deadBrokersOwnDir(dir, pid) {
-  if (!dir) return false;
-  try {
-    const ds = fs.lstatSync(dir);
-    if (!ds.isDirectory() || ds.uid !== process.getuid?.()) return false;
-    const names = namesUpTo(dir, BROKER_FILES.size);
-    if (names === "too_large" || !names.every((n) => BROKER_FILES.has(n))) return false;
-    // The broker writes its own pid here at start (--pid-file); without it nothing binds the dir to this broker.
-    // Bounded, never through a link, its parents checked from the session dir (safeReadFile throws otherwise).
-    if (safeReadFile(path.join(dir, "broker.pid"), 32, {}, { within: dir }).toString("utf8").trim() !== String(pid)) return false;
-  } catch {
-    return false;
-  }
-  const procs = readProcs();
-  if (procs === null) return false;
-  const sock = `unix:${path.join(dir, "broker.sock")}`;
-  return !procs.some((p) => p.uid === process.getuid?.() && p.args.split(" ").includes(sock));
-}
 
 /** The snapshot parent as it is (never followed): a real directory of ours, absent, or anything else ("failed"). @param {string} p */
 function wsState(p) {
@@ -1396,12 +1370,11 @@ export function countOrphanBrokers(parentDir) {
   for (const p of procs) {
     const m = p.uid === uid ? re.exec(p.args) : null;
     if (!m) continue;
-    try {
-      fs.lstatSync(path.join(parentDir, m[1]));
-      continue;
-    } catch (e) {
-      if (/** @type {NodeJS.ErrnoException} */ (e).code !== "ENOENT") return res;
-    }
+    // Only a real directory of ours is the broker's snapshot; a link, a file or another user's entry by that name is
+    // not, and is not "gone" either: the check is unverified, for the operator to inspect.
+    const st = wsState(path.join(parentDir, m[1]));
+    if (st === "ok") continue;
+    if (st === "failed") return res;
     res.orphans.push({ kind: "missing_snapshot", pid: p.pid, pgid: p.pgid, snapshot: m[1], started: p.started, argsSha: sha256hex(p.args) });
   }
   const w = walkSnapshots(parentDir, (name) => {

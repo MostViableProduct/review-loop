@@ -266,7 +266,7 @@ export const DOCTOR_CHECKS = [
   { id: "orphaned_brokers", async run() {
     // Read-only: it counts, and prints the operator's commands; it never signals or sweeps.
     const o = countOrphanBrokers(path.join(stateRoot(), "ws"));
-    if (!o.verified) return fail("orphaned_brokers", "check that `ps -A` runs in a terminal and that the state dir's ws/ folder is readable, then re-run doctor", { warn: true, note: "unverified: the process table or ws/ could not be read" });
+    if (!o.verified) return fail("orphaned_brokers", "check that `ps -A` runs in a terminal and that the state dir's ws/ folder is readable, and inspect any ws/plugin-* entry that is not a directory of yours (`ls -la` it: a link, a file, another user's), then re-run doctor", { warn: true, note: "unverified: the process table or ws/ could not be read, or a ws/ entry is not a snapshot directory" });
     if (o.count === 0 && o.kept === 0) return pass();
     return fail("orphaned_brokers", orphanFix(o), { warn: true, note: `${o.count} Codex broker(s) running from a removed snapshot; ${o.kept} snapshot(s) of an ended round still to clean` });
   } },
