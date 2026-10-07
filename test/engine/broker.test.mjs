@@ -499,13 +499,13 @@ test("R2: a symlinked ws/plugin-* entry is never followed: the linked snapshot a
 test("R2: when ps cannot answer, a live-owner snapshot and an old legacy snapshot are both left alone", { timeout: 90_000 }, async () => {
   const left = await killedRound();
   fs.writeFileSync(path.join(left.root, "owner.json"), JSON.stringify({ pid: process.pid, started: startTime(process.pid) }));
-  const legacy = path.join(ws(), "plugin-legacy-old");
+  const legacy = path.join(ws(), "plugin-LegOld");
   fs.mkdirSync(legacy, { mode: 0o700 });
   const old = new Date(Date.now() - 25 * 60 * 60_000);
   fs.utimesSync(legacy, old, old);
   assert.equal(round(psSeam(tablePsFails())).code, 0);
   assert.ok(alive(left.broker.pid));
-  for (const kept of [path.basename(left.root), "plugin-legacy-old"]) assert.ok(snapshots().includes(kept), `${kept} is left alone`);
+  for (const kept of [path.basename(left.root), "plugin-LegOld"]) assert.ok(snapshots().includes(kept), `${kept} is left alone`);
   assert.deepEqual(sweepEvents().map((e) => [e.code, e.data.swept, e.data.incomplete]), [["snapshot_sweep_incomplete", 0, 1]], "nothing swept, and the sweep says it could not verify");
 });
 
@@ -514,13 +514,13 @@ test("R2: a legacy snapshot (no owner file) is swept only when older than 24 h a
   fs.rmSync(path.join(left.root, "owner.json"));
   const old = new Date(Date.now() - 25 * 60 * 60_000);
   fs.utimesSync(left.root, old, old);
-  const unused = path.join(ws(), "plugin-legacy-unused");
-  const fresh = path.join(ws(), "plugin-legacy-fresh");
+  const unused = path.join(ws(), "plugin-LegUnu");
+  const fresh = path.join(ws(), "plugin-LegFrs");
   for (const d of [unused, fresh]) fs.mkdirSync(d, { mode: 0o700 });
   fs.utimesSync(unused, old, old);
   assert.equal(round().code, 0);
   assert.ok(alive(left.broker.pid), "a legacy snapshot a live broker's args name is left, broker and all");
-  assert.deepEqual(snapshots(), [path.basename(left.root), "plugin-legacy-fresh"].sort(), "only the old, unreferenced one is swept");
+  assert.deepEqual(snapshots(), [path.basename(left.root), "plugin-LegFrs"].sort(), "only the old, unreferenced one is swept");
   assert.deepEqual(sweepEvents().map(outcome), [["ok", { ...OK0, swept: 1 }]]);
 });
 
@@ -1177,6 +1177,20 @@ test("C: a sweep step that throws is reported on its snapshot, by step (failed_r
   } finally {
     t.mock.restoreAll();
   }
+});
+
+test("R2: a ws/plugin-* directory not shaped like a snapshot (plugin-old, plugin-backup-2026) is never swept, however old", { timeout: 60_000 }, async () => {
+  const old = new Date(Date.now() - 25 * 60 * 60_000);
+  const theirs = ["plugin-old", "plugin-backup-2026"].map((name) => {
+    const d = path.join(ws(), name);
+    fs.mkdirSync(d, { recursive: true, mode: 0o700 });
+    fs.writeFileSync(path.join(d, "keep.txt"), "the user's");
+    fs.utimesSync(d, old, old);
+    return d;
+  });
+  const r = spawnSync(process.execPath, [ROUND, "sweep"], { env, encoding: "utf8" });
+  assert.equal(JSON.parse(r.stdout).swept, 0, r.stdout);
+  for (const d of theirs) assert.ok(fs.existsSync(path.join(d, "keep.txt")), `${path.basename(d)}: a name snapshotVerified never makes is not a snapshot`);
 });
 
 test("units: namesUpTo stops reading past its cap instead of listing the whole directory", () => {

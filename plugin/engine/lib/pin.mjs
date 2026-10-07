@@ -510,6 +510,8 @@ const BROKER_SCRIPT = path.join("scripts", "app-server-broker.mjs");
 const COMPANION_SCRIPT = path.join("scripts", "codex-companion.mjs");
 const COMPANION_FILE = "companion.json";
 const TMP_FILE = "tmp.json";
+/** A snapshot dir's name, exactly as snapshotVerified's mkdtemp makes it. */
+export const SNAPSHOT_NAME = /^plugin-[A-Za-z0-9]{6}$/;
 const TMP_TOKEN_FILE = ".review-loop-tmp";
 const COMPANION_MAX_BYTES = 4096;
 /** A snapshot's companion data holds one state dir per workspace; more than this is not a companion's doing. */
@@ -1268,7 +1270,8 @@ function walkSnapshots(parentDir, onName, remaining) {
     for (let ent = dir.readSync(); ent !== null; ent = dir.readSync()) {
       if (++seen > SWEEP_LIST_MAX) return "too_large";
       if (seen % 256 === 0 && remaining() <= 0) return "deadline";
-      if (ent.name.startsWith("plugin-")) onName(ent.name);
+      // Only the shape snapshotVerified makes (mkdtemp "plugin-"): a `plugin-backup` of the user's is not a snapshot.
+      if (SNAPSHOT_NAME.test(ent.name)) onName(ent.name);
     }
     return "done";
   } catch {

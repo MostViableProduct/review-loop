@@ -26,7 +26,7 @@ import {
 } from "./lib/state.mjs";
 import { EXIT, OPTION_LABELS, applyRoundResult, applyDecision, awaitHuman, resetIfNewLoop, withoutWaived, exitForAwaiting } from "./lib/policy.mjs";
 import { scoreFindings, parseDimensionTag } from "./lib/scoring.mjs";
-import { verifyPin, verifyUsage, runCompanion, parseCompanionOutput, companionFailureText, writePin, pinFile, installedTreeDigest, snapshotVerified, stopCompanionBroker, sweepStaleSnapshots, afterSnapshotSecond, countOrphanBrokers, stopOrphan, STOP_DEADLINE_MS, SWEEP_MANUAL_DEADLINE_MS } from "./lib/pin.mjs";
+import { verifyPin, verifyUsage, runCompanion, parseCompanionOutput, companionFailureText, writePin, pinFile, installedTreeDigest, snapshotVerified, stopCompanionBroker, sweepStaleSnapshots, afterSnapshotSecond, countOrphanBrokers, stopOrphan, STOP_DEADLINE_MS, SWEEP_MANUAL_DEADLINE_MS, SNAPSHOT_NAME } from "./lib/pin.mjs";
 import { loadRubricSection, buildFocus } from "./lib/rubric.mjs";
 import { prepare, pushBranch, HumanNeeded, NON_RETRYABLE } from "./lib/round.mjs";
 import { repoRoot, headSha, implFingerprint, mergeBaseValidity, readArtifact } from "./lib/git.mjs";
@@ -412,7 +412,7 @@ async function cmdSweep() {
  * @param {Record<string, string | boolean | undefined>} v
  */
 async function cmdStopOrphan(v) {
-  const snapshot = typeof v.snapshot === "string" && /^plugin-[A-Za-z0-9]{6}$/.test(v.snapshot) ? v.snapshot : null;
+  const snapshot = typeof v.snapshot === "string" && SNAPSHOT_NAME.test(v.snapshot) ? v.snapshot : null;
   const int = (/** @type {unknown} */ x) => (typeof x === "string" && /^[1-9]\d{0,9}$/.test(x) ? Number(x) : null);
   const pid = int(v.pid);
   const started = int(v.started);

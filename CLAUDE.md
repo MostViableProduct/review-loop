@@ -201,7 +201,9 @@ These are copied from the spec, and every task implicitly includes them.
     (`event_write_failed`). The owner marker is written whole before the companion can start; when ps cannot name
     the round, `snapshot_owner_unknown` (exit 30) and no companion. A damaged owner.json in a snapshot older than
     24 h goes by the legacy rule.
-  - **The sweep.** A snapshot it leaves alone is `in_use` (owner alive, fresh, or referenced) or `unverified` (not a
+  - **The sweep.** Only entries named as snapshotVerified names them (`SNAPSHOT_NAME`, `plugin-` + 6 alphanumerics)
+    are snapshots; any other `plugin-*` is not touched (one that happens to fit, such as `plugin-backup`, cannot be
+    told apart and goes by the owner/legacy rules). A snapshot it leaves alone is `in_use` (owner alive, fresh, or referenced) or `unverified` (not a
     real dir of ours, an owner that cannot be read); the manual `sweep` is `clean` only with no `unverified` left, and
     both counts go in its output and in `round.sweep`. Doctor's `orphaned_brokers` judges each snapshot with the same
     `judgeSnapshot`, so it is unverified exactly where the sweep is. An owner's `started` is compared only when it is a
