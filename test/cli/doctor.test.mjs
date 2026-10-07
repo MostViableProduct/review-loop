@@ -719,6 +719,19 @@ test("orphaned_brokers: a leftover broker that does not lead its group is listed
   assert.ok(process.kill(pid, 0), "and nothing was signalled");
 });
 
+test("orphaned_brokers: a snapshot whose owner cannot be judged is unverified, as the manual sweep finds it", async () => {
+  const h = healthy();
+  const snap = path.join(h, "state", "ws", "plugin-Unk001");
+  fs.mkdirSync(snap, { recursive: true, mode: 0o700 });
+  // A live pid with no usable start time: neither alive-and-the-same nor dead.
+  fs.writeFileSync(path.join(snap, "owner.json"), JSON.stringify({ pid: process.pid, started: 0 }));
+  const r = await check("orphaned_brokers").run(ctx());
+  assert.equal(r.status, "warn");
+  assert.match(r.note ?? "", /unverified/);
+  fs.writeFileSync(path.join(snap, "owner.json"), JSON.stringify({ pid: process.pid, started: spawnSync("/bin/ps", ["-o", "lstart=", "-p", String(process.pid)], { encoding: "utf8", env: { PATH: "/usr/bin:/bin", LC_ALL: "C", TZ: "UTC" } }).stdout.trim().replace(/\s+/g, " ") }));
+  assert.equal((await check("orphaned_brokers").run(ctx())).status, "pass", "a live owner's snapshot is in use, not a problem");
+});
+
 test("orphaned_brokers: a snapshot restored between a member's check and its SIGKILL stops stop-orphan before the signal", { timeout: 30_000 }, async () => {
   const h = healthy();
   const pid = orphanBroker(h, { ignoreTerm: true });

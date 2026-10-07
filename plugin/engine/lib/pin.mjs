@@ -1342,6 +1342,25 @@ export async function sweepStaleSnapshots(parentDir, opts = {}) {
 }
 
 /**
+ * What a sweep makes of a snapshot before acting, shared with doctor (countOrphanBrokers) so the two never disagree:
+ * "stale" (its round is gone: a sweep acts on it), "in_use" (owner alive, or fresh or referenced), "unverified" (not
+ * a real directory of ours, an owner that cannot be judged, or ps could not answer).
+ * @param {string} root @param {ReturnType<typeof processTable>} table
+ * @returns {"stale" | "in_use" | "unverified"}
+ */
+function judgeSnapshot(root, table) {
+  if (!ownedRealDirectory(root)) return "unverified";
+  const owner = ownerState(root, table);
+  if (owner === "alive") return "in_use";
+  if (owner === "dead") return "stale";
+  if (owner !== "none") return "unverified";
+  if (Date.now() - fs.lstatSync(root).mtimeMs < LEGACY_SNAPSHOT_AGE_MS) return "in_use";
+  const ref = referenced(root, table);
+  if (ref === null) return "unverified";
+  return ref ? "in_use" : "stale";
+}
+
+/**
  * One snapshot: left alone ("in_use" or "unverified", see SweepResult.skipped), removed ("swept"), kept with what is
  * still running, or "failed".
  * @param {string} root @param {string} name @param {ReturnType<typeof processTable>} table @param {() => number} remaining
@@ -1349,14 +1368,8 @@ export async function sweepStaleSnapshots(parentDir, opts = {}) {
  */
 async function sweepOne(root, name, table, remaining) {
   try {
-    if (!ownedRealDirectory(root)) return "unverified";
-    const owner = ownerState(root, table);
-    if (owner === "none") {
-      if (Date.now() - fs.lstatSync(root).mtimeMs < LEGACY_SNAPSHOT_AGE_MS) return "in_use";
-      const ref = referenced(root, table);
-      if (ref !== false) return ref === true ? "in_use" : "unverified";
-    } else if (owner === "alive") return "in_use";
-    else if (owner !== "dead") return "unverified";
+    const j = judgeSnapshot(root, table);
+    if (j !== "stale") return j;
     // Fresh, not the sweep's cached table: a decision to signal or to delete rests on what runs now.
     const procs = readProcs();
     if (procs === null) return { left: 1, unattributed: 0, reason: "ps_unavailable" };
@@ -1440,11 +1453,16 @@ export function countOrphanBrokers(parentDir) {
   }
   let odd = 0;
   const w = walkSnapshots(parentDir, (name) => {
-    const root = path.join(parentDir, name);
-    if (!ownedRealDirectory(root)) odd++;
-    else if (ownerState(root, table) === "dead") res.kept++;
+    let j;
+    try {
+      j = judgeSnapshot(path.join(parentDir, name), table);
+    } catch {
+      j = "unverified";
+    }
+    if (j === "unverified") odd++;
+    else if (j === "stale") res.kept++;
   }, () => Infinity);
-  // An entry that is not a real directory of ours is one the sweep cannot judge (unverified there too).
+  // Judged as the sweep judges it: an entry it cannot judge leaves this check unverified too.
   if ((w !== "done" && w !== "absent") || odd > 0) return res;
   res.count = res.orphans.length;
   res.verified = true;
