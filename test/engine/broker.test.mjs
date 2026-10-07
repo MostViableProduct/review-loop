@@ -1203,10 +1203,11 @@ test("units: removeSnapshot keeps the snapshot unless the temp dir its tmp.json 
     assert.equal(removeSnapshot(stuck), false);
     assert.ok(fs.existsSync(path.join(stuck, "tmp.json")), "a temp dir that would not go keeps the only pointer to it");
   } finally {
-    fs.chmodSync(path.join(short, "locked"), 0o700);
+    // Detached before the removal began: the rest of it waits at <dir>.rm.
+    fs.chmodSync(path.join(fs.existsSync(short) ? short : `${short}.rm`, "locked"), 0o700);
   }
   assert.equal(removeSnapshot(stuck), true, "and the retry clears both");
-  assert.ok(!fs.existsSync(short) && !fs.existsSync(stuck));
+  assert.ok(!fs.existsSync(short) && !fs.existsSync(`${short}.rm`) && !fs.existsSync(stuck));
 
   const bad = mk();
   fs.writeFileSync(path.join(bad, "tmp.json"), "{not json");
@@ -1245,6 +1246,32 @@ test("units: removeSnapshot keeps the snapshot unless the temp dir its tmp.json 
   fs.writeFileSync(path.join(e, "tmp.json"), JSON.stringify({ dir: empty, token }));
   assert.equal(removeSnapshot(e), true);
   assert.ok(!fs.existsSync(empty));
+});
+
+test("units: removeSnapshot never removes through a temp dir swapped for a link after its check", (t) => {
+  const token = "0123456789abcdef0123456789abcdef";
+  const short = fs.mkdtempSync(path.join(os.tmpdir(), "rl-"));
+  fs.writeFileSync(path.join(short, ".review-loop-tmp"), token);
+  const victim = fs.mkdtempSync(path.join(dir, "victim-"));
+  fs.writeFileSync(path.join(victim, "precious.txt"), "not the round's");
+  const root = fs.mkdtempSync(path.join(dir, "plugin-"));
+  fs.writeFileSync(path.join(root, "tmp.json"), JSON.stringify({ dir: short, token }));
+  const rename = fs.renameSync;
+  // The swap lands between the checks and the detach: the checked dir moves aside and a link takes its name.
+  t.mock.method(fs, "renameSync", (/** @type {string} */ from, /** @type {string} */ to) => {
+    if (from === short) {
+      rename(short, `${short}.real`);
+      fs.symlinkSync(victim, short);
+    }
+    return rename(from, to);
+  });
+  try {
+    assert.equal(removeSnapshot(root), false, "kept: what was detached is not the dir that was checked");
+    assert.ok(fs.existsSync(path.join(victim, "precious.txt")), "and nothing behind the link was removed");
+  } finally {
+    t.mock.restoreAll();
+    for (const p of [short, `${short}.rm`, `${short}.real`]) fs.rmSync(p, { recursive: true, force: true });
+  }
 });
 
 test("units: round.sweep's counts fit every sweep the engine can run (SWEEP_LIST_MAX snapshots)", async () => {

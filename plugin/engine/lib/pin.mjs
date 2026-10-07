@@ -222,6 +222,47 @@ function isTmpMarker(v) {
 }
 
 /**
+ * Removes the short temp dir tmp.json records, if it is ours; true once it is gone or proven not ours (left as it is).
+ * The OS temp dir is shared, so a path checked there can be swapped (for a link) before it is used: the dir is first
+ * detached by an atomic rename to `<dir>.rm`, and nothing is removed unless that is still the very directory checked
+ * (same device and inode). A removal cut short leaves `<dir>.rm`, which the next call resumes from.
+ * @param {{ dir: string, token: string }} v
+ */
+function removeShortTmp(v) {
+  const hold = `${v.dir}.rm`;
+  for (const p of [v.dir, hold]) {
+    let st;
+    try {
+      st = fs.lstatSync(p);
+    } catch (e) {
+      if (/** @type {NodeJS.ErrnoException} */ (e).code === "ENOENT") continue;
+      return false;
+    }
+    if (!st.isDirectory() || st.uid !== process.getuid?.()) return false;
+    let held = null;
+    try {
+      fs.lstatSync(path.join(p, TMP_TOKEN_FILE));
+      held = safeReadFile(path.join(p, TMP_TOKEN_FILE), 64, {}, { within: p }).toString("utf8");
+    } catch (e) {
+      if (/** @type {NodeJS.ErrnoException} */ (e).code !== "ENOENT") return false;
+    }
+    // A prefix too (empty included): a token write cut short still marks the dir ours.
+    if (held === null || !v.token.startsWith(held)) {
+      // Empty and tokenless: a kill between its mkdir and its token (rmdir removes only an empty dir).
+      if (held === null && p === v.dir && namesUpTo(p, 1).length === 0) fs.rmdirSync(p);
+      continue;
+    }
+    if (p === v.dir) fs.renameSync(p, hold);
+    const h = fs.lstatSync(hold);
+    if (!h.isDirectory() || h.dev !== st.dev || h.ino !== st.ino) return false;
+    // The token goes last: a removal that fails part-way leaves the dir still provably ours for the retry.
+    for (const n of fs.readdirSync(hold)) if (n !== TMP_TOKEN_FILE) fs.rmSync(path.join(hold, n), { recursive: true, force: true });
+    fs.rmSync(hold, { recursive: true, force: true });
+  }
+  return true;
+}
+
+/**
  * Removes a snapshot, after the short temp dir its tmp.json records. tmp.json is the only pointer to that dir, so the
  * snapshot is kept (false) unless the dir is confirmed gone or confirmed not ours: a tmp.json that cannot be read or is
  * not what companionTmp writes, or a removal that fails, keeps it for a later retry. The dir is removed only when it
@@ -249,23 +290,9 @@ export function removeSnapshot(root) {
     try {
       const v = readJsonValidated(marker, isTmpMarker, root, 4096, { readOnly: true });
       if (!v || !/^rl-[A-Za-z0-9]{6}$/.test(path.basename(v.dir)) || !tmps.has(path.dirname(v.dir))) return false;
-      const st = fs.lstatSync(v.dir);
-      if (!st.isDirectory() || st.uid !== process.getuid?.()) return false;
-      let held = null;
-      try {
-        fs.lstatSync(path.join(v.dir, TMP_TOKEN_FILE));
-        held = safeReadFile(path.join(v.dir, TMP_TOKEN_FILE), 64, {}, { within: v.dir }).toString("utf8");
-      } catch (e) {
-        if (/** @type {NodeJS.ErrnoException} */ (e).code !== "ENOENT") return false;
-      }
-      // A prefix too (empty included): a token write cut short still marks the dir ours.
-      if (held !== null && v.token.startsWith(held)) {
-        // The token goes last: a removal that fails part-way leaves the dir still provably ours for the retry.
-        for (const n of fs.readdirSync(v.dir)) if (n !== TMP_TOKEN_FILE) fs.rmSync(path.join(v.dir, n), { recursive: true, force: true });
-        fs.rmSync(v.dir, { recursive: true, force: true });
-      } else if (held === null && namesUpTo(v.dir, 1).length === 0) fs.rmdirSync(v.dir);
-    } catch (e) {
-      if (/** @type {NodeJS.ErrnoException} */ (e).code !== "ENOENT") return false;
+      if (!removeShortTmp(v)) return false;
+    } catch {
+      return false;
     }
   }
   fs.rmSync(root, { recursive: true, force: true });

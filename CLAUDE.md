@@ -190,7 +190,9 @@ These are copied from the spec, and every task implicitly includes them.
     state dir), a short `rl-XXXXXX` under the OS temp dir, recorded in `tmp.json` (`{dir, token}`) before it is
     made, the token then written into it (`.review-loop-tmp`). `removeSnapshot` removes that dir first, token last,
     only when it holds that token or a prefix of it (a write cut short), or is empty (a kill between mkdir and
-    token); a dir without it is never touched.
+    token); a dir without it is never touched. It is detached first (atomic rename to `<dir>.rm`, checked to be
+    the same device and inode), so a path swapped for a link after the check removes nothing behind it; a removal
+    cut short resumes from `<dir>.rm`.
     The snapshot is kept (`temp_unremoved`) unless the dir is confirmed gone or not ours.
   - **Fail closed.** Anything unverifiable (`ps_unavailable`, `registry_unreadable`, `deadline`, `unknown_rows`,
     `members_left`, `unattributed`, `temp_unremoved`: `BROKER_STOP_REASONS`) signals nothing more and keeps the snapshot; every path that keeps one (the round's own stop, both
