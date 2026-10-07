@@ -185,11 +185,14 @@ These are copied from the spec, and every task implicitly includes them.
     kept as a documented limit).
   - **Temp dir.** The companion runs with `TMPDIR` inside the snapshot (`companionTmp`), so a broker's `cxc-*` dir
     goes with the snapshot even when no broker.json names it; when that socket path would pass 103 bytes (a long
-    state dir), a short `rl-XXXXXX` under the OS temp dir, recorded in `tmp.json` before it is made, instead.
-    `removeSnapshot` removes that dir first and keeps the snapshot (`temp_unremoved`) unless it is confirmed gone.
+    state dir), a short `rl-XXXXXX` under the OS temp dir, recorded in `tmp.json` (`{dir, token}`) before it is
+    made, the token then written into it (`.review-loop-tmp`). `removeSnapshot` removes that dir first, token last,
+    only when it holds that token (or is empty: a kill between mkdir and token); a dir without it is never touched.
+    The snapshot is kept (`temp_unremoved`) unless the dir is confirmed gone or not ours.
   - **Fail closed.** Anything unverifiable (`ps_unavailable`, `registry_unreadable`, `deadline`, `unknown_rows`,
     `members_left`, `unattributed`, `temp_unremoved`: `BROKER_STOP_REASONS`) signals nothing more and keeps the snapshot; the round
-    logs `round.broker_stop` (reason, counts, the `plugin-XXXXXX` name), and a lost line is said on stderr
+    logs `round.broker_stop` (reason, counts, the `plugin-XXXXXX` name; for a swept snapshot, the `artifact_key` of
+    the round that made it, from owner.json's `key`, never the sweeping round's), and a lost line is said on stderr
     (`event_write_failed`). The owner marker is written whole before the companion can start; when ps cannot name
     the round, `snapshot_owner_unknown` (exit 30) and no companion. A damaged owner.json in a snapshot older than
     24 h goes by the legacy rule.

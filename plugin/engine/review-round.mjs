@@ -177,7 +177,7 @@ async function cmdRun(v) {
       // Test seam: the snapshot is made just after a second begins, so a companion started without the wait below
       // would share that second.
       if (process.env.REVIEW_LOOP_TEST_SEAMS === "1" && process.env.REVIEW_LOOP_TEST_SNAPSHOT_AT_SECOND_START === "1") await new Promise((r) => setTimeout(r, 1000 - (Date.now() % 1000) + 5));
-      plugin = snapshotVerified(stateSubdir("ws"));
+      plugin = snapshotVerified(stateSubdir("ws"), key);
       pluginRoot = plugin.root;
       await afterSnapshotSecond(pluginRoot);
       await verifyUsage(pluginRoot);
@@ -354,7 +354,7 @@ function reportStop(key, snapshot, s) {
  */
 async function sweepSnapshots(key, opts = {}) {
   const s = await sweepStaleSnapshots(stateSubdir("ws"), opts);
-  for (const st of s.stops) reportStop(key, st.snapshot, st);
+  for (const st of s.stops) reportStop(st.origin, st.snapshot, st);
   const bad = s.brokersLeft + s.unattributed + s.failed > 0 || s.incomplete;
   // counted is the last count (a full sweep re-counts after acting, down to 0), so held says whether it acted.
   if (s.counted === 0 && s.held === 0 && !bad) return s;

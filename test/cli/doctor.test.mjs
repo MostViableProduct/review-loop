@@ -656,6 +656,24 @@ test("orphaned_brokers: a live broker whose snapshot name now holds a link or a 
   }
 });
 
+test("orphaned_brokers: stop-orphan re-reads the leader right at its SIGTERM; a changed leader is never signalled", { timeout: 30_000 }, async () => {
+  const h = healthy();
+  const pid = orphanBroker(h);
+  const r = await check("orphaned_brokers").run(ctx());
+  const cmd = /stop-orphan --snapshot (\S+) --pid (\d+) --started (\d+) --args-sha ([0-9a-f]{64})/.exec(r.fix ?? "");
+  assert.ok(cmd, r.fix ?? "");
+  const engine = path.join(process.cwd(), "plugin", "engine", "review-round.mjs");
+  // The seam makes the leader read at the signal differ from the one checked before it.
+  const out = spawnSync(process.execPath, [engine, "stop-orphan", "--snapshot", cmd[1], "--pid", cmd[2], "--started", cmd[3], "--args-sha", cmd[4]], { env: { ...process.env, REVIEW_LOOP_TEST_SEAMS: "1", REVIEW_LOOP_TEST_LEADER_RECHECK: "changed" }, encoding: "utf8", timeout: 20_000 });
+  try {
+    assert.equal(out.status, 60, out.stdout);
+    assert.equal(JSON.parse(out.stdout).status, "mismatch");
+    assert.ok(process.kill(pid, 0), "the group was not signalled");
+  } finally {
+    signalPid(pid, "SIGKILL", { group: true });
+  }
+});
+
 test("orphaned_brokers: a snapshot restored between a member's check and its SIGKILL stops stop-orphan before the signal", { timeout: 30_000 }, async () => {
   const h = healthy();
   const pid = orphanBroker(h, { ignoreTerm: true });

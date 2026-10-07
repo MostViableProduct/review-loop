@@ -442,6 +442,7 @@ test("R2: a SIGKILLed round's snapshot, broker and cxc-* dir are swept by the ne
   const owner = JSON.parse(fs.readFileSync(path.join(left.root, "owner.json"), "utf8"));
   assert.equal(owner.pid, left.owner, "the owner file names the round's pid");
   assert.equal(typeof owner.started, "string", "and its start time");
+  assert.match(owner.key, /^[0-9a-f]{24}$/, "and the round's artifact key, for a later sweep's events");
   assert.equal(fs.statSync(path.join(left.root, "owner.json")).mode & 0o777, 0o600);
   assert.ok(fs.existsSync(path.join(left.root, "data", "state")), "Codex's job files are still there");
   const r = round();
@@ -706,9 +707,13 @@ test("D: `sweep` clears a dead round's snapshot and prints the documented result
 
 test("D: `sweep` exits 60 when a broker will not stop, and when ws/ cannot be listed", { timeout: 90_000 }, async () => {
   const left = await killedRound({ FAKE_BROKER_IGNORE_SHUTDOWN: "1", FAKE_BROKER_IGNORE_SIGTERM: "1" });
+  const origin = JSON.parse(fs.readFileSync(path.join(left.root, "owner.json"), "utf8")).key;
   const r = spawnSync(process.execPath, [ROUND, "sweep"], { env: { ...env, REVIEW_LOOP_TEST_SEAMS: "1", REVIEW_LOOP_TEST_KILL_NOOP: "1" }, encoding: "utf8" });
   assert.equal(r.status, 60, r.stdout);
   assert.deepEqual([JSON.parse(r.stdout).status, JSON.parse(r.stdout).brokers_left], ["incomplete", 1]);
+  // The manual sweep has no artifact of its own: the kept snapshot's event names the review that left it.
+  assert.deepEqual(stopDetails().slice(-1).map((e) => e.artifact_key), [origin]);
+  assert.match(origin, /^[0-9a-f]{24}$/);
   signalPid(left.broker.pid, "SIGKILL");
   fs.chmodSync(ws(), 0o000);
   try {
@@ -1112,7 +1117,8 @@ test("B: a ps on PATH is never consulted for broker identity: a shim that fails 
   assert.deepEqual(brokerLog(), ["sigterm"], "identity came from /bin/ps, so the broker was matched and stopped");
 });
 
-test("units: removeSnapshot keeps the snapshot unless the temp dir its tmp.json names is confirmed gone", () => {
+test("units: removeSnapshot keeps the snapshot unless the temp dir its tmp.json names is confirmed gone or not ours", () => {
+  const token = "0123456789abcdef0123456789abcdef";
   const mk = () => {
     const root = fs.mkdtempSync(path.join(dir, "plugin-"));
     return root;
@@ -1126,7 +1132,8 @@ test("units: removeSnapshot keeps the snapshot unless the temp dir its tmp.json 
   fs.mkdirSync(path.join(short, "locked"));
   fs.writeFileSync(path.join(short, "locked", "f"), "");
   fs.chmodSync(path.join(short, "locked"), 0o000);
-  fs.writeFileSync(path.join(stuck, "tmp.json"), JSON.stringify({ dir: short }));
+  fs.writeFileSync(path.join(short, ".review-loop-tmp"), token);
+  fs.writeFileSync(path.join(stuck, "tmp.json"), JSON.stringify({ dir: short, token }));
   try {
     assert.equal(removeSnapshot(stuck), false);
     assert.ok(fs.existsSync(path.join(stuck, "tmp.json")), "a temp dir that would not go keeps the only pointer to it");
@@ -1140,8 +1147,29 @@ test("units: removeSnapshot keeps the snapshot unless the temp dir its tmp.json 
   fs.writeFileSync(path.join(bad, "tmp.json"), "{not json");
   assert.equal(removeSnapshot(bad), false, "an unreadable tmp.json keeps the snapshot");
   const gone = mk();
-  fs.writeFileSync(path.join(gone, "tmp.json"), JSON.stringify({ dir: path.join(os.tmpdir(), "rl-Gone12") }));
+  fs.writeFileSync(path.join(gone, "tmp.json"), JSON.stringify({ dir: path.join(os.tmpdir(), "rl-Gone12"), token }));
   assert.equal(removeSnapshot(gone), true, "a temp dir already gone: removed");
+
+  // A dir by that name that is not ours (no token, or another's): never removed; the pointer is all that goes.
+  for (const held of [null, "ffffffffffffffffffffffffffffffff"]) {
+    const foreign = fs.mkdtempSync(path.join(os.tmpdir(), "rl-"));
+    fs.writeFileSync(path.join(foreign, "keep.txt"), "someone else's");
+    if (held) fs.writeFileSync(path.join(foreign, ".review-loop-tmp"), held);
+    const s = mk();
+    fs.writeFileSync(path.join(s, "tmp.json"), JSON.stringify({ dir: foreign, token }));
+    try {
+      assert.equal(removeSnapshot(s), true);
+      assert.ok(fs.existsSync(path.join(foreign, "keep.txt")), `a dir without this token (${held ?? "none"}) is left as it is`);
+    } finally {
+      fs.rmSync(foreign, { recursive: true, force: true });
+    }
+  }
+  // Empty and tokenless: a kill between its mkdir and its token. Removed (rmdir: only an empty dir can go).
+  const empty = fs.mkdtempSync(path.join(os.tmpdir(), "rl-"));
+  const e = mk();
+  fs.writeFileSync(path.join(e, "tmp.json"), JSON.stringify({ dir: empty, token }));
+  assert.equal(removeSnapshot(e), true);
+  assert.ok(!fs.existsSync(empty));
 });
 
 test("units: round.sweep's counts fit every sweep the engine can run (SWEEP_LIST_MAX snapshots)", async () => {
@@ -1185,7 +1213,9 @@ test("units: companionTmp records the short temp dir before making it", (t) => {
   try {
     assert.ok(short && /^rl-[A-Za-z0-9]{6}$/.test(path.basename(short)), String(short));
     assert.deepEqual(namedFirst, [true], "tmp.json named the dir before it existed");
-    assert.equal(JSON.parse(fs.readFileSync(marker, "utf8")).dir, short);
+    const rec = JSON.parse(fs.readFileSync(marker, "utf8"));
+    assert.equal(rec.dir, short);
+    assert.equal(fs.readFileSync(path.join(short, ".review-loop-tmp"), "utf8"), rec.token, "and the dir holds tmp.json's token");
   } finally {
     t.mock.restoreAll();
     if (short) fs.rmSync(short, { recursive: true, force: true });

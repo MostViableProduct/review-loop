@@ -198,30 +198,36 @@ export function companionTmp(root) {
   }
   if (!fits(path.join(os.tmpdir(), "rl-XXXXXX"))) return null;
   // Recorded before it is made: a kill between the two leaves a tmp.json naming a dir that is not there (removeSnapshot
-  // treats that as gone), never a dir that nothing names.
+  // treats that as gone), never a dir that nothing names. The token, written into the dir as soon as it exists, is
+  // what proves the dir ours: a name that collides with an existing dir (EEXIST) never gets it.
   const ALNUM = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+  const token = crypto.randomBytes(16).toString("hex");
   for (let attempt = 0; ; attempt++) {
     const short = path.join(os.tmpdir(), `rl-${Array.from({ length: 6 }, () => ALNUM[crypto.randomInt(ALNUM.length)]).join("")}`);
-    atomicWriteJson(path.join(root, TMP_FILE), { dir: short }, root);
+    atomicWriteJson(path.join(root, TMP_FILE), { dir: short, token }, root);
     try {
       fs.mkdirSync(short, { mode: 0o700 });
-      return short;
     } catch (err) {
       if (/** @type {NodeJS.ErrnoException} */ (err).code !== "EEXIST" || attempt >= 2) throw err;
+      continue;
     }
+    fs.writeFileSync(path.join(short, TMP_TOKEN_FILE), token, { flag: "wx", mode: 0o600 });
+    return short;
   }
 }
 
-/** @param {unknown} v @returns {v is { dir: string }} */
+/** @param {unknown} v @returns {v is { dir: string, token: string }} */
 function isTmpMarker(v) {
-  return isObject(v) && Object.keys(v).length === 1 && typeof v.dir === "string";
+  return isObject(v) && Object.keys(v).length === 2 && typeof v.dir === "string" && typeof v.token === "string" && /^[0-9a-f]{32}$/.test(v.token);
 }
 
 /**
  * Removes a snapshot, after the short temp dir its tmp.json records. tmp.json is the only pointer to that dir, so the
- * snapshot is kept (false) unless the dir is confirmed gone: a tmp.json that cannot be read or is not what
- * companionTmp writes (a real `rl-XXXXXX` directory of ours directly in the OS temp dir, never a link), or a removal
- * that fails, keeps it for a later retry. True when the snapshot is removed.
+ * snapshot is kept (false) unless the dir is confirmed gone or confirmed not ours: a tmp.json that cannot be read or is
+ * not what companionTmp writes, or a removal that fails, keeps it for a later retry. The dir is removed only when it
+ * holds this tmp.json's token (a real `rl-XXXXXX` directory of ours in the OS temp dir, never a link), or is empty (a
+ * kill between its mkdir and its token); a dir without the token is someone else's and is left as it is. True when
+ * the snapshot is removed.
  * @param {string} root
  */
 export function removeSnapshot(root) {
@@ -245,7 +251,18 @@ export function removeSnapshot(root) {
       if (!v || !/^rl-[A-Za-z0-9]{6}$/.test(path.basename(v.dir)) || !tmps.has(path.dirname(v.dir))) return false;
       const st = fs.lstatSync(v.dir);
       if (!st.isDirectory() || st.uid !== process.getuid?.()) return false;
-      fs.rmSync(v.dir, { recursive: true, force: true });
+      let held = null;
+      try {
+        fs.lstatSync(path.join(v.dir, TMP_TOKEN_FILE));
+        held = safeReadFile(path.join(v.dir, TMP_TOKEN_FILE), 64, {}, { within: v.dir }).toString("utf8");
+      } catch (e) {
+        if (/** @type {NodeJS.ErrnoException} */ (e).code !== "ENOENT") return false;
+      }
+      if (held === v.token) {
+        // The token goes last: a removal that fails part-way leaves the dir still provably ours for the retry.
+        for (const n of fs.readdirSync(v.dir)) if (n !== TMP_TOKEN_FILE) fs.rmSync(path.join(v.dir, n), { recursive: true, force: true });
+        fs.rmSync(v.dir, { recursive: true, force: true });
+      } else if (held === null && namesUpTo(v.dir, 1).length === 0) fs.rmdirSync(v.dir);
     } catch (e) {
       if (/** @type {NodeJS.ErrnoException} */ (e).code !== "ENOENT") return false;
     }
@@ -260,9 +277,11 @@ export function removeSnapshot(root) {
  * re-hash the COPIED bytes against the pin, and execute only from there. plugin.json (client name/version metadata,
  * read at run time) is copied unpinned so adopting this does not force a repin.
  * @param {string} parentDir private (0700) directory the snapshot is created in
+ * @param {string | null} [artifactKey] the round's artifact key, recorded in owner.json so a later sweep that has to
+ *   keep this snapshot reports it under its own round's key (snapshotOrigin), not the sweeping round's
  * @returns {{ root: string, cleanup: () => boolean }} cleanup: false when the snapshot was kept (see removeSnapshot)
  */
-export function snapshotVerified(parentDir) {
+export function snapshotVerified(parentDir, artifactKey = null) {
   const pin = readPin();
   if (!pin) throw new ReviewLoopError("plugin_pin_mismatch", `no valid pin at ${pinFile()}`);
   const src = path.join(pluginBase(), pin.version);
@@ -287,7 +306,7 @@ export function snapshotVerified(parentDir) {
     // made at all. Written whole (rename), so a kill mid-write leaves no half-file.
     const started = startTimeOf(process.pid);
     if (started === null) throw new ReviewLoopError("snapshot_owner_unknown", "ps could not read this round's start time, so its snapshot could not be marked");
-    atomicWriteJson(path.join(root, OWNER_FILE), { pid: process.pid, started }, root);
+    atomicWriteJson(path.join(root, OWNER_FILE), { pid: process.pid, started, ...(artifactKey && ORIGIN_KEY.test(artifactKey) ? { key: artifactKey } : {}) }, root);
     return { root, cleanup };
   } catch (err) {
     cleanup();
@@ -463,6 +482,7 @@ const BROKER_SCRIPT = path.join("scripts", "app-server-broker.mjs");
 const COMPANION_SCRIPT = path.join("scripts", "codex-companion.mjs");
 const COMPANION_FILE = "companion.json";
 const TMP_FILE = "tmp.json";
+const TMP_TOKEN_FILE = ".review-loop-tmp";
 const COMPANION_MAX_BYTES = 4096;
 /** A snapshot's companion data holds one state dir per workspace; more than this is not a companion's doing. */
 const REGISTRY_MAX_ENTRIES = 32;
@@ -1023,6 +1043,21 @@ async function stopSnapshotCompanion(root, table, remaining) {
 }
 
 const OWNER_FILE = "owner.json";
+const ORIGIN_KEY = /^[0-9a-f]{24}$/;
+
+/**
+ * The artifact key of the round that made a snapshot (owner.json's `key`), or null when it is absent, unreadable or
+ * not a key: the events of a kept snapshot name the review that left it, never the round that happened to sweep it.
+ * @param {string} root
+ */
+function snapshotOrigin(root) {
+  try {
+    const v = JSON.parse(safeReadFile(path.join(root, OWNER_FILE), OWNER_MAX_BYTES, {}, { within: root }).toString("utf8"));
+    return isObject(v) && typeof v.key === "string" && ORIGIN_KEY.test(v.key) ? v.key : null;
+  } catch {
+    return null;
+  }
+}
 const OWNER_MAX_BYTES = 4096;
 /** Snapshot names per partition: about this many are examined per sweep, however many there are. */
 export const SWEEP_PART = 16;
@@ -1190,7 +1225,7 @@ function walkSnapshots(parentDir, onName, remaining) {
 /**
  * @typedef {{ swept: number, brokersLeft: number, unattributed: number, failed: number, incomplete: boolean,
  *   held: number, partition: number, partitions: number, counted: number,
- *   stops: Array<{ snapshot: string, reason: string, left: number, unattributed: number }> }} SweepResult
+ *   stops: Array<{ snapshot: string, origin: string | null, reason: string, left: number, unattributed: number }> }} SweepResult
  */
 
 /**
@@ -1275,7 +1310,7 @@ export async function sweepStaleSnapshots(parentDir, opts = {}) {
           res.unattributed += r.unattributed;
           // Nothing runs, but the snapshot stayed (its temp dir did not go): not clean either.
           if (r.left + r.unattributed === 0) res.failed++;
-          res.stops.push({ snapshot: name, reason: r.reason ?? "members_left", left: r.left, unattributed: r.unattributed });
+          res.stops.push({ snapshot: name, origin: snapshotOrigin(path.join(parentDir, name)), reason: r.reason ?? "members_left", left: r.left, unattributed: r.unattributed });
         }
       }
     }
@@ -1418,11 +1453,12 @@ export async function stopOrphan(parentDir, o) {
     return table.some((p) => p.pgid === o.pid && p.uid === process.getuid?.()) ? "leader_gone" : "mismatch";
   }
   if (typeof first === "string") return first;
-  // The whole identity again, right at the signal.
+  // The whole identity again (snapshot still gone included), then the leader once more inside signalGroupIfSame,
+  // right at the signal: a group whose leader changed is never signalled.
   const now = check();
   if (typeof now === "string") return now === "gone" ? "mismatch" : now;
   if (!sameMember(now, first)) return "mismatch";
-  signal(-first.pid, "SIGTERM");
+  if (!signalGroupIfSame(first, "SIGTERM")) return "mismatch";
   await exitedWithin(first.pid, 5000);
   // Then the group as it is now, read afresh each pass until it is empty: a member started after any one read (one
   // the broker spawns on its way out) is still found. Whoever holds the leader's pid now (a reissue proves nothing),
