@@ -903,9 +903,14 @@ export async function stopCompanionBroker(root, opts = {}) {
     const goneRegistered = [];
     for (const s of reg.sessions) {
       const row = table.find((p) => p.pid === s.pid);
-      if (row) {
-        if (row.uid === uid && brokerArgv(row.args, roots)) leaders.set(row.pid, row);
-      } else if (isAlive(s.pid)) keep("unknown_rows");
+      // A pid now held by anything but this snapshot's broker is a reissue. A holder leading a group of that very id
+      // means the broker's group had emptied (an id is never reissued while its group lives); one in another group
+      // proves nothing, so the old group is counted below like any gone broker's, never signalled.
+      if (row && row.uid === uid && brokerArgv(row.args, roots)) leaders.set(row.pid, row);
+      else if (row) {
+        if (row.pgid !== row.pid) goneRegistered.push(s.pid);
+      }
+      else if (isAlive(s.pid)) keep("unknown_rows");
       else goneRegistered.push(s.pid);
     }
     for (const p of table) if (p.uid === uid && brokerArgv(p.args, roots)) leaders.set(p.pid, p);

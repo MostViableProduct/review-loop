@@ -1027,6 +1027,28 @@ test("B: a broker.json pid alive as another process is never a group to empty, e
   }
 });
 
+test("B: a broker.json pid since held by a process in another group still has the broker's old group counted", { timeout: 60_000 }, async () => {
+  const parent = path.join(dir, "ws-registry-reissued");
+  fs.mkdirSync(parent, { mode: 0o700 });
+  const before = kids().length;
+  const s = await deadSnapshot(parent, { env: { FAKE_BROKER_CHILD: "2" } });
+  assert.ok(await until(() => kids().length === before + 2, 10_000), "the broker started its app-server and grandchild");
+  const mine = kids().slice(before);
+  const app = /** @type {{ pid: number }} */ (mine.find((k) => !k.grand));
+  const grand = /** @type {{ pid: number }} */ (mine.find((k) => k.grand));
+  // Only a member no app-server rule recognises (`sleep`) is left, so nothing but the registry pid's group counts it.
+  for (const pid of [s.pid, app.pid]) signalPid(pid, "SIGKILL");
+  assert.ok(await until(() => !alive(s.pid) && !alive(app.pid), 3000));
+  try {
+    // The fake ps shows the dead broker's pid held by a newcomer in another group, its grandchild still in the old one.
+    const r = await withSeams(psSeam(reusedLeaderPs()), () => stopCompanionBroker(s.root));
+    assert.equal(r.unattributed, 1, `the old group's member is counted, so the snapshot stays: ${JSON.stringify(r)}`);
+    assert.ok(alive(grand.pid), "and never signalled");
+  } finally {
+    signalPid(grand.pid, "SIGKILL");
+  }
+});
+
 test("B: a dead companion whose group still has a member keeps its snapshot; the member is never signalled", { timeout: 60_000 }, async () => {
   const parent = path.join(dir, "ws-companion-group");
   fs.mkdirSync(parent, { mode: 0o700 });
