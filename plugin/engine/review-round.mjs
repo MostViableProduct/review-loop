@@ -320,14 +320,27 @@ async function cmdRun(v) {
     const output = err instanceof ReviewLoopError && typeof err.details.output === "string" && err.details.output ? { output: err.details.output } : {};
     return out({ ...base, status: "op_error", error: { code, message: /** @type {Error} */ (err).message, retryable: !NON_RETRYABLE.has(code), attempts: rec.errorAttempts, ...output } }, EXIT.OP_ERROR);
   } finally {
-    const stop = plugin ? await stopCompanionBroker(plugin.root, { deadline: performance.now() + STOP_DEADLINE_MS }) : null;
-    const kept = stop !== null && (stop.left > 0 || stop.unattributed > 0);
-    if (kept) reportStop(key, path.basename(/** @type {{ root: string }} */ (plugin).root), /** @type {import("./lib/pin.mjs").StopResult} */ (stop));
-    prep && !prep.nothing && prep.cleanup();
-    // A snapshot whose broker tree may still run is kept: it is the only evidence that ties the tree to this round,
-    // and the next sweep retries it once this (its owner) has exited.
-    if (!kept && plugin && !plugin.cleanup()) reportStop(key, path.basename(plugin.root), { left: 0, unattributed: 0, reason: "temp_unremoved" });
-    lock.release();
+    // The lock goes whatever the cleanup does: a throw here would otherwise strand it for the next round to reclaim.
+    try {
+      const stop = plugin ? await stopCompanionBroker(plugin.root, { deadline: performance.now() + STOP_DEADLINE_MS }) : null;
+      const kept = stop !== null && (stop.left > 0 || stop.unattributed > 0);
+      if (kept) reportStop(key, path.basename(/** @type {{ root: string }} */ (plugin).root), /** @type {import("./lib/pin.mjs").StopResult} */ (stop));
+      prep && !prep.nothing && prep.cleanup();
+      // A snapshot whose broker tree may still run is kept: it is the only evidence that ties the tree to this round,
+      // and the next sweep retries it once this (its owner) has exited.
+      if (!kept && plugin) {
+        /** @type {string | null} */
+        let left = "temp_unremoved";
+        try {
+          if (plugin.cleanup()) left = null;
+        } catch {
+          left = "failed_remove";
+        }
+        if (left) reportStop(key, path.basename(plugin.root), { left: 0, unattributed: 0, reason: left });
+      }
+    } finally {
+      lock.release();
+    }
   }
 }
 

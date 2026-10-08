@@ -59,6 +59,8 @@ const args = process.argv.slice(2);
 if (args[0] === "help") { console.log("Usage:\\n  ${usage}"); } else {
   const state = path.join(process.env.CLAUDE_PLUGIN_DATA ?? path.join(os.tmpdir(), "codex-companion"), "state", "r-fake-0123456789abcdef");
   fs.mkdirSync(path.join(state, "jobs"), { recursive: true });
+  // A dir in the snapshot that cannot be emptied: the round's own cleanup of it throws (EACCES).
+  if (process.env.FAKE_COMPANION_LOCK_SNAPSHOT === "1") { const l = path.join(path.dirname(import.meta.dirname), "locked"); fs.mkdirSync(l); fs.writeFileSync(path.join(l, "f"), "x"); fs.chmodSync(l, 0o500); }
   fs.writeFileSync(path.join(state, "jobs", "review-1.json"), JSON.stringify({ output: "CODEX REVIEW TEXT" }));
   const sessionDir = fs.mkdtempSync(path.join(os.tmpdir(), "cxc-"));
   const sock = path.join(sessionDir, "broker.sock");
@@ -1289,6 +1291,73 @@ test("R2: an old owner-less dir named exactly like a snapshot is swept only when
   assert.deepEqual([JSON.parse(r.stdout).swept, JSON.parse(r.stdout).unverified], [0, 4], r.stdout);
   for (const d of decoys.slice(0, 3)) assert.ok(fs.existsSync(path.join(d, "keep.txt")), `${path.basename(d)}: the user's file is left`);
   assert.ok(fs.lstatSync(path.join(decoys[3], "scripts", "codex-companion.mjs")).isSymbolicLink());
+});
+
+test("A: a snapshot cleanup that throws still releases the round's lock, and is reported (failed_remove)", { timeout: 90_000 }, async () => {
+  const r = round({ FAKE_COMPANION_LOCK_SNAPSHOT: "1" });
+  try {
+    assert.equal(r.code, 0, JSON.stringify(r.json));
+    assert.deepEqual(fs.readdirSync(path.join(env.REVIEW_LOOP_STATE_DIR, "locks")).filter((n) => n.endsWith(".lock")), [], "the lock is released");
+    assert.deepEqual(stopDetails().map((e) => e.data.reason), ["failed_remove"]);
+    assert.equal(brokerStopEvents().length, 1);
+    assert.equal(snapshots().length, 1, "the snapshot is kept for a later sweep");
+  } finally {
+    for (const s of snapshots()) if (fs.existsSync(path.join(ws(), s, "locked"))) fs.chmodSync(path.join(ws(), s, "locked"), 0o700);
+  }
+});
+
+test("C: ws/ swapped for a link after the sweep began: nothing behind the link is removed (unverified)", { timeout: 60_000 }, async (t) => {
+  const parent = path.join(dir, "ws-swap");
+  const outside = path.join(dir, "ws-outside");
+  const name = "plugin-Swap01";
+  const old = new Date(Date.now() - 25 * 60 * 60_000);
+  for (const d of [parent, outside]) {
+    fs.mkdirSync(d, { mode: 0o700 });
+    legacySnapshot(path.join(d, name));
+    fs.utimesSync(path.join(d, name), old, old);
+  }
+  // Swapped as the snapshot is first read (its files checked), after the walks that found it.
+  const opendir = fs.opendirSync;
+  let swapped = false;
+  t.mock.method(fs, "opendirSync", (/** @type {Parameters<typeof fs.opendirSync>} */ ...a) => {
+    const h = opendir(...a);
+    if (!swapped && a[0] === path.join(parent, name)) {
+      swapped = true;
+      fs.renameSync(parent, `${parent}.real`);
+      fs.symlinkSync(outside, parent);
+    }
+    return h;
+  });
+  try {
+    const res = await withSeams({ REVIEW_LOOP_PIN_FILE: env.REVIEW_LOOP_PIN_FILE, REVIEW_LOOP_TEST_SWEEP_TICK: "0" }, () => sweepStaleSnapshots(parent, { all: true }));
+    assert.ok(swapped, "the swap happened");
+    assert.equal(res.swept, 0, JSON.stringify(res));
+    assert.ok(fs.existsSync(path.join(outside, name, "scripts", "codex-companion.mjs")), "the dir behind the link is untouched");
+  } finally {
+    t.mock.restoreAll();
+  }
+});
+
+test("C: a legacy snapshot's files are streamed against their cap, never listed whole", { timeout: 60_000 }, async (t) => {
+  const parent = path.join(dir, "ws-big");
+  fs.mkdirSync(parent, { mode: 0o700 });
+  const snap = path.join(parent, "plugin-Big001");
+  legacySnapshot(snap);
+  for (let i = 0; i < 200; i++) fs.writeFileSync(path.join(snap, `extra-${i}`), "");
+  const old = new Date(Date.now() - 25 * 60 * 60_000);
+  fs.utimesSync(snap, old, old);
+  const readdir = fs.readdirSync;
+  /** @type {string[]} */
+  const listed = [];
+  t.mock.method(fs, "readdirSync", (/** @type {Parameters<typeof fs.readdirSync>} */ ...a) => (listed.push(String(a[0])), readdir(...a)));
+  try {
+    const res = await withSeams({ REVIEW_LOOP_PIN_FILE: env.REVIEW_LOOP_PIN_FILE, REVIEW_LOOP_TEST_SWEEP_TICK: "0" }, () => sweepStaleSnapshots(parent, { all: true }));
+    assert.equal(res.swept, 0, JSON.stringify(res));
+    assert.deepEqual(listed.filter((p) => p.startsWith(snap)), [], "no listing of the snapshot was buffered whole");
+    assert.ok(fs.existsSync(snap));
+  } finally {
+    t.mock.restoreAll();
+  }
 });
 
 test("units: namesUpTo stops reading past its cap instead of listing the whole directory", () => {

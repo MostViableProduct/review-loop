@@ -1328,6 +1328,7 @@ export async function sweepStaleSnapshots(parentDir, opts = {}) {
   /** @type {SweepResult} */
   const res = { swept: 0, brokersLeft: 0, unattributed: 0, failed: 0, incomplete: false, held: 0, partition: 0, partitions: 1, counted: 0, stops: [], skipped: new Map() };
   const table = processTable();
+  const anchor = dirIdentity(parentDir);
   let acted = 0;
   const count = () => {
     let n = 0;
@@ -1380,7 +1381,7 @@ export async function sweepStaleSnapshots(parentDir, opts = {}) {
           res.incomplete = true;
           break;
         }
-        const r = await sweepOne(path.join(parentDir, name), name, table, remaining);
+        const r = await sweepOne(path.join(parentDir, name), name, table, remaining, anchor);
         if (r === "in_use" || r === "unverified") {
           res.skipped.set(name, r);
           continue;
@@ -1443,10 +1444,14 @@ function onlySnapshotFiles(root) {
   let entries = 0;
   /** @param {string} rel @returns {boolean} */
   const walk = (rel) => {
-    for (const ent of fs.readdirSync(path.join(root, rel), { withFileTypes: true })) {
-      if (++entries > 2 * allowed.size) return false;
-      const r = rel ? path.join(rel, ent.name) : ent.name;
-      if (ent.isDirectory() ? !walk(r) : !(ent.isFile() && allowed.has(r))) return false;
+    // Streamed against what is left of the budget, so an oversized dir is never buffered whole.
+    const names = namesUpTo(path.join(root, rel), 2 * allowed.size - entries);
+    if (names === "too_large") return false;
+    entries += names.length;
+    for (const name of names) {
+      const r = rel ? path.join(rel, name) : name;
+      const st = fs.lstatSync(path.join(root, r));
+      if (st.isDirectory() ? !walk(r) : !(st.isFile() && allowed.has(r))) return false;
     }
     return true;
   };
@@ -1461,9 +1466,10 @@ function onlySnapshotFiles(root) {
  * One snapshot: left alone ("in_use" or "unverified", see SweepResult.skipped), removed ("swept"), kept with what is
  * still running (an unexpected error: reason `failed_<step>`, one of BROKER_STOP_REASONS).
  * @param {string} root @param {string} name @param {ReturnType<typeof processTable>} table @param {() => number} remaining
+ * @param {{ dev: number, ino: number } | null} anchor the parent's identity when the sweep began
  * @returns {Promise<"in_use" | "unverified" | "swept" | StopResult>}
  */
-async function sweepOne(root, name, table, remaining) {
+async function sweepOne(root, name, table, remaining, anchor) {
   // The step an unexpected error interrupts, so the snapshot's event says where (a bounded reason, never a message).
   let step = "judge";
   try {
@@ -1482,6 +1488,10 @@ async function sweepOne(root, name, table, remaining) {
     // from it now (a fresh read; an unreadable table keeps it).
     if (!ownedRealDirectory(root)) return "unverified";
     if (runsFrom(root)) return { left: 1, unattributed: 0, reason: "members_left" };
+    // The parent too, as it was when the sweep began: one swapped for a link since (a same-user race) would point the
+    // remove somewhere else. This narrows that window; Node has no unlinkat to close it.
+    const ws = dirIdentity(path.dirname(root));
+    if (!ws || !anchor || ws.dev !== anchor.dev || ws.ino !== anchor.ino) return "unverified";
     return removeSnapshot(root) ? "swept" : { left: 0, unattributed: 0, reason: "temp_unremoved" };
   } catch {
     return { left: 0, unattributed: 0, reason: `failed_${step}` };
@@ -1498,6 +1508,16 @@ function runsFrom(root) {
 
 /** Below every supported platform's sun_path size (macOS 104, Linux 108), less a terminating byte. */
 const SOCKET_PATH_MAX = 103;
+
+/** A real directory's device and inode, never followed; null for anything else. @param {string} p */
+function dirIdentity(p) {
+  try {
+    const st = fs.lstatSync(p);
+    return st.isDirectory() ? { dev: st.dev, ino: st.ino } : null;
+  } catch {
+    return null;
+  }
+}
 
 /** The snapshot parent as it is (never followed): a real directory of ours, absent, or anything else ("failed"). @param {string} p */
 function wsState(p) {

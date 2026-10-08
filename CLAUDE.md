@@ -208,7 +208,13 @@ These are copied from the spec, and every task implicitly includes them.
     told apart by name). An owner-less one is a legacy snapshot only when it holds nothing but a snapshot's files
     (`onlySnapshotFiles`: every entry a directory or a regular file at a pinned path or `.claude-plugin/plugin.json`,
     the companion among them, no links, no other file); any other is unverified and kept, so a sweep only ever removes
-    copies of plugin files. A leftover from a plugin version whose file set differs stays unverified. A snapshot it leaves alone is `in_use` (owner alive, fresh, or referenced) or `unverified` (not a
+    copies of plugin files. A leftover from a plugin version whose file set differs stays unverified. The walk is
+    streamed against its cap (`namesUpTo`, `lstat` per entry), never a whole listing. Right before each remove,
+    `sweepOne` re-checks `ws/` itself against its device/inode from the sweep's start (`dirIdentity`) and leaves the
+    entry unverified on any change: this narrows, but cannot close, a same-user swap of `ws/` for a link (Node has
+    no `unlinkat`); a same-user process could delete the target itself, so no privilege boundary is crossed (known
+    limit, author's decision 2026-10-07). The round's `finally` releases its lock in an inner `finally`, and a
+    snapshot cleanup that throws is reported as `failed_remove`. A snapshot it leaves alone is `in_use` (owner alive, fresh, or referenced) or `unverified` (not a
     real dir of ours, an owner that cannot be read); the manual `sweep` is `clean` only with no `unverified` left, and
     both counts go in its output and in `round.sweep`. Doctor's `orphaned_brokers` judges each snapshot with the same
     `judgeSnapshot`, so it is unverified exactly where the sweep is. An owner's `started` is compared only when it is a
