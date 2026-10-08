@@ -1068,16 +1068,32 @@ export function deadGroupTargets(first, now, pgid, snapshotSec, uid) {
   return { members: t.members.filter(seen), unattributed: [...t.unattributed, ...t.members.filter((m) => !seen(m))], unknown: t.unknown };
 }
 
-/** The signal-path twin of stopCompanionBroker: synchronous, SIGTERM only, same identity checks. @param {string} root */
+/** Table reads on the signal path, and the pause between them (see reapCompanionBroker). */
+const REAP_READS = 3;
+const REAP_READ_GAP_MS = 100;
+
+/**
+ * The signal-path twin of stopCompanionBroker: synchronous, SIGTERM only, same identity checks. The table is read
+ * REAP_READS times (about half a second in all): a broker the companion forked just before its group was killed can
+ * show in the table only after the first read. One still missed keeps the snapshot, which the next sweep retries.
+ * @param {string} root
+ */
 function reapCompanionBroker(root) {
   const roots = rootsOf(root);
   const uid = process.getuid?.();
+  /** @type {Set<number>} */
+  const done = new Set();
   const pids = new Set(brokerRegistry(root).sessions.map((s) => s.pid));
-  // A broker started before the companion wrote broker.json is only in the process table.
-  for (const p of readProcs() ?? []) if (p.uid === uid && p.pgid === p.pid && brokerArgv(p.args, roots)) pids.add(p.pid);
-  for (const pid of pids) {
-    const now = procRow(pid);
-    if (now !== null && now !== "gone" && now.uid === uid && brokerArgv(now.args, roots)) signal(pid, "SIGTERM");
+  for (let read = 0; read < REAP_READS; read++) {
+    if (read > 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, REAP_READ_GAP_MS);
+    // A broker started before the companion wrote broker.json is only in the process table.
+    for (const p of readProcs() ?? []) if (p.uid === uid && p.pgid === p.pid && brokerArgv(p.args, roots)) pids.add(p.pid);
+    for (const pid of pids) {
+      if (done.has(pid)) continue;
+      done.add(pid);
+      const now = procRow(pid);
+      if (now !== null && now !== "gone" && now.uid === uid && brokerArgv(now.args, roots)) signal(pid, "SIGTERM");
+    }
   }
 }
 
@@ -1335,7 +1351,8 @@ function walkSnapshots(parentDir, onName, remaining) {
  * @typedef {{ swept: number, brokersLeft: number, unattributed: number, failed: number, incomplete: boolean,
  *   held: number, partition: number, partitions: number, counted: number,
  *   stops: Array<{ snapshot: string, origin: string | null, reason: string, left: number, unattributed: number }>,
- *   skipped: Map<string, "in_use" | "unverified">, quarantined: number }} SweepResult
+ *   skipped: Map<string, "in_use" | "unverified">, quarantined: Array<string | null> }} SweepResult
+ * quarantined: per damaged broker.json set aside, the artifact key of the round that made its snapshot.
  * skipped: the snapshots left alone, by name (a full sweep can visit one more than once): "in_use" (its round is
  * alive, or it is fresh or referenced), "unverified" (not a real directory of ours, or an owner that cannot be read).
  */
@@ -1358,7 +1375,7 @@ export async function sweepStaleSnapshots(parentDir, opts = {}) {
   const tick = sweepTick();
   const part = sweepPart();
   /** @type {SweepResult} */
-  const res = { swept: 0, brokersLeft: 0, unattributed: 0, failed: 0, incomplete: false, held: 0, partition: 0, partitions: 1, counted: 0, stops: [], skipped: new Map(), quarantined: 0 };
+  const res = { swept: 0, brokersLeft: 0, unattributed: 0, failed: 0, incomplete: false, held: 0, partition: 0, partitions: 1, counted: 0, stops: [], skipped: new Map(), quarantined: [] };
   const table = processTable();
   const anchor = dirIdentity(parentDir);
   let judged = 0;
@@ -1416,7 +1433,9 @@ export async function sweepStaleSnapshots(parentDir, opts = {}) {
           break;
         }
         judged++;
-        const r = await sweepOne(path.join(parentDir, name), name, table, remaining, anchor, (n) => (res.quarantined += n));
+        const r = await sweepOne(path.join(parentDir, name), name, table, remaining, anchor, (n) => {
+          for (let i = 0; i < n; i++) res.quarantined.push(snapshotOrigin(path.join(parentDir, name)));
+        });
         if (r === "in_use" || r === "unverified") {
           res.skipped.set(name, r);
           continue;

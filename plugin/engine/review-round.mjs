@@ -380,7 +380,8 @@ function reportStop(key, snapshot, s) {
  */
 async function sweepSnapshots(key, opts = {}) {
   const s = await sweepStaleSnapshots(stateSubdir("ws"), opts);
-  if (s.quarantined > 0) reportQuarantined(key);
+  // Each under the round that made the snapshot (owner.json's key), never the sweeping round's, as round.broker_stop.
+  for (const origin of s.quarantined) reportQuarantined(origin);
   for (const st of s.stops) reportStop(st.origin, st.snapshot, st);
   const skipped = [...s.skipped.values()];
   const inUse = skipped.filter((k) => k === "in_use").length;

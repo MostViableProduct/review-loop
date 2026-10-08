@@ -279,6 +279,20 @@ function reusedLeaderPs() {
   return bin;
 }
 
+/**
+ * A `ps` whose table leaves out the `codex app-server` rows of other test files running at the same time (theirs are
+ * outside this test's dir). The leaderless-app-server rule counts any of this user's in the companion's pid window, so
+ * another file's fake would keep this file's snapshot (correctly, for one sweep) and make the sweep's outcome depend
+ * on what else runs. Every other row, this file's own app-servers included, passes through.
+ */
+function ownAppServersPs() {
+  const bin = path.join(dir, "own-app-servers-ps");
+  fs.mkdirSync(bin, { recursive: true });
+  const awk = `{ if ($0 ~ /codex app-server$/ && index($0, "${path.basename(dir)}") == 0) next; print }`;
+  fs.writeFileSync(path.join(bin, "ps"), `#!/bin/sh\ncase " $* " in *" -A "*) /bin/ps "$@" | /usr/bin/awk '${awk}'; exit 0;; esac\nexec /bin/ps "$@"\n`, { mode: 0o755 });
+  return bin;
+}
+
 function tablePsFails() {
   const bin = path.join(dir, "table-ps-fails");
   fs.mkdirSync(bin, { recursive: true });
@@ -322,6 +336,28 @@ test("H1: SIGTERM mid-round reaps the broker from the signal path", { timeout: 6
     assert.ok(await until(() => !alive(b.pid), 5000), "the broker was reaped, not orphaned");
     assert.deepEqual(brokerLog(), ["sigterm"]);
     assert.deepEqual(parentDataFiles(), [], "nothing is written under the parent's CLAUDE_PLUGIN_DATA");
+  } finally {
+    if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+  }
+});
+
+test("H1: SIGTERM when the broker shows in the table only after the reaper's first read: a later read still reaps it", { timeout: 60_000 }, async () => {
+  const bin = path.join(dir, "late-broker-ps");
+  fs.mkdirSync(bin, { recursive: true });
+  const arm = path.join(bin, "arm");
+  // Armed by the test just before the signal: the next table read (the reaper's first) leaves out every broker row.
+  fs.writeFileSync(path.join(bin, "ps"), `#!/bin/sh\ncase " $* " in *" -A "*) if [ -e ${arm} ]; then rm -f ${arm}; /bin/ps "$@" | /usr/bin/grep -v app-server-broker; exit 0; fi;; esac\nexec /bin/ps "$@"\n`, { mode: 0o755 });
+  const child = spawn(process.execPath, [ROUND, "run", "--kind", "spec", "--path", specRepo()], { env: { ...env, ...psSeam(bin), STUB_SLEEP_MS: "30000", FAKE_NO_BROKER_JSON: "1" }, stdio: "ignore" });
+  try {
+    assert.ok(await until(() => fs.existsSync(env.BROKER_READY), 20_000), "the companion started its broker");
+    fs.writeFileSync(arm, "");
+    const exited = new Promise((r) => child.once("exit", (_code, sig) => r(sig)));
+    child.kill("SIGTERM");
+    assert.equal(await exited, "SIGTERM");
+    assert.ok(!fs.existsSync(arm), "the reaper's first read was the one that missed it");
+    const [b] = brokers();
+    assert.ok(await until(() => !alive(b.pid), 5000), "the broker the first read missed was reaped, not orphaned");
+    assert.deepEqual(brokerLog(), ["sigterm"]);
   } finally {
     if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
   }
@@ -459,7 +495,7 @@ test("R2: a SIGKILLed round's snapshot, broker and cxc-* dir are swept by the ne
   assert.match(owner.key, /^[0-9a-f]{24}$/, "and the round's artifact key, for a later sweep's events");
   assert.equal(fs.statSync(path.join(left.root, "owner.json")).mode & 0o777, 0o600);
   assert.ok(fs.existsSync(path.join(left.root, "data", "state")), "Codex's job files are still there");
-  const r = round();
+  const r = round(psSeam(ownAppServersPs()));
   assert.equal(r.code, 0, JSON.stringify(r.json));
   assert.ok(await until(() => !alive(left.broker.pid), 5000), "the dead round's broker is stopped");
   assert.equal(brokerLog().filter((l) => l === "shutdown").length, 2, "both brokers were asked to shut down, neither signalled");
@@ -1381,18 +1417,23 @@ test("B: a damaged broker.json (cut short, or the wrong shape) is set aside and 
   }
 });
 
-test("R2: a killed round's damaged broker.json does not strand its snapshot: the sweep stops the broker, removes it, and says so", { timeout: 90_000 }, async () => {
+test("R2: a killed round's damaged broker.json does not strand its snapshot: the sweep stops the broker, removes it, and says so under that round's key", { timeout: 90_000 }, async () => {
   const left = await killedRound();
   const state = path.join(left.root, "data", "state");
   const [slug] = fs.readdirSync(state);
   fs.writeFileSync(path.join(state, slug, "broker.json"), "{not json");
-  assert.equal(round().code, 0);
+  const origin = JSON.parse(fs.readFileSync(path.join(left.root, "owner.json"), "utf8")).key;
+  assert.match(String(origin), /^[0-9a-f]{24}$/, "the killed round recorded its key");
+  // The manual sweep has no artifact of its own: the event can only carry the snapshot's.
+  const sw = spawnSync(process.execPath, [ROUND, "sweep"], { env, encoding: "utf8" });
+  assert.equal(sw.status, 0, sw.stdout);
   assert.ok(await until(() => !alive(left.broker.pid), 5000), "the broker is stopped");
   assert.deepEqual(snapshots(), [], "and the snapshot removed");
   const f = path.join(env.REVIEW_LOOP_STATE_DIR, "events.jsonl");
   const q = fs.readFileSync(f, "utf8").split("\n").filter((l) => l.includes('"broker_registry_quarantined"'));
   assert.equal(q.length, 1, "one hook.error, never silent");
   assert.deepEqual(validateLine(JSON.parse(q[0])), []);
+  assert.equal(JSON.parse(q[0]).artifact_key, origin, "under the round that made the snapshot");
   assert.ok(!q[0].includes(dir) && !q[0].includes("broker.json"), "no path in it");
 });
 
