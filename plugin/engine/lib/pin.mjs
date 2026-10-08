@@ -1068,14 +1068,17 @@ export function deadGroupTargets(first, now, pgid, snapshotSec, uid) {
   return { members: t.members.filter(seen), unattributed: [...t.unattributed, ...t.members.filter((m) => !seen(m))], unknown: t.unknown };
 }
 
-/** Table reads on the signal path, and the pause between them (see reapCompanionBroker). */
+/** Table reads on the signal path, the pause between them, and the time no read may start after (see reapCompanionBroker). */
 const REAP_READS = 3;
 const REAP_READ_GAP_MS = 100;
+const REAP_BUDGET_MS = 3000;
 
 /**
- * The signal-path twin of stopCompanionBroker: synchronous, SIGTERM only, same identity checks. The table is read
- * REAP_READS times (about half a second in all): a broker the companion forked just before its group was killed can
- * show in the table only after the first read. One still missed keeps the snapshot, which the next sweep retries.
+ * The signal-path twin of stopCompanionBroker: synchronous, SIGTERM only, same identity checks. The table is read up
+ * to REAP_READS times: a broker the companion forked just before its group was killed can show in the table only after
+ * the first read. Each read decides every pid at once (no per-pid ps, however many broker.json names), and none starts
+ * after REAP_BUDGET_MS, so the signal is re-raised within that plus one ps timeout. A read ps could not answer decides
+ * nothing, so the next one retries every pid. One still missed keeps the snapshot, which the next sweep retries.
  * @param {string} root
  */
 function reapCompanionBroker(root) {
@@ -1083,16 +1086,16 @@ function reapCompanionBroker(root) {
   const uid = process.getuid?.();
   /** @type {Set<number>} */
   const done = new Set();
-  const pids = new Set(brokerRegistry(root).sessions.map((s) => s.pid));
-  for (let read = 0; read < REAP_READS; read++) {
+  const registered = new Set(brokerRegistry(root).sessions.map((s) => s.pid));
+  const end = Date.now() + REAP_BUDGET_MS;
+  for (let read = 0; read < REAP_READS && Date.now() < end; read++) {
     if (read > 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, REAP_READ_GAP_MS);
-    // A broker started before the companion wrote broker.json is only in the process table.
-    for (const p of readProcs() ?? []) if (p.uid === uid && p.pgid === p.pid && brokerArgv(p.args, roots)) pids.add(p.pid);
-    for (const pid of pids) {
-      if (done.has(pid)) continue;
-      done.add(pid);
-      const now = procRow(pid);
-      if (now !== null && now !== "gone" && now.uid === uid && brokerArgv(now.args, roots)) signal(pid, "SIGTERM");
+    for (const p of readProcs() ?? []) {
+      if (done.has(p.pid) || p.uid !== uid || !brokerArgv(p.args, roots)) continue;
+      // A broker started before the companion wrote broker.json is only in the process table, as its group's leader.
+      if (!registered.has(p.pid) && p.pgid !== p.pid) continue;
+      done.add(p.pid);
+      signal(p.pid, "SIGTERM");
     }
   }
 }
@@ -1486,14 +1489,15 @@ function judgeSnapshot(root, table) {
 
 /**
  * Whether every entry under `root` is a directory or a regular file at a pinned path (or the unpinned
- * .claude-plugin/plugin.json), the companion among them: no other file, no link. Read without following links, and
- * bounded by the pin's size. False when the pin cannot be read.
+ * .claude-plugin/plugin.json, or owner.json: an aged one too damaged to name anyone goes by this rule, see
+ * ownerState, which has already bounded its size), the companion among them: no other file, no link. Read without
+ * following links, and bounded by the pin's size. False when the pin cannot be read.
  * @param {string} root
  */
 function onlySnapshotFiles(root) {
   const pin = readPin({ readOnly: true });
   if (!pin) return false;
-  const allowed = new Set([...Object.keys(pin.files), path.join(".claude-plugin", "plugin.json")]);
+  const allowed = new Set([...Object.keys(pin.files), path.join(".claude-plugin", "plugin.json"), OWNER_FILE]);
   let entries = 0;
   /** @param {string} rel @returns {boolean} */
   const walk = (rel) => {

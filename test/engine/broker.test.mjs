@@ -363,6 +363,61 @@ test("H1: SIGTERM when the broker shows in the table only after the reaper's fir
   }
 });
 
+test("H1: SIGTERM when the reaper's first table read fails: a later read still reaps the registered broker", { timeout: 60_000 }, async () => {
+  const bin = path.join(dir, "fail-once-ps");
+  fs.mkdirSync(bin, { recursive: true });
+  const arm = path.join(bin, "arm");
+  // Armed by the test just before the signal: the next table read (the reaper's first) fails.
+  fs.writeFileSync(path.join(bin, "ps"), `#!/bin/sh\ncase " $* " in *" -A "*) if [ -e ${arm} ]; then rm -f ${arm}; exit 1; fi;; esac\nexec /bin/ps "$@"\n`, { mode: 0o755 });
+  const child = spawn(process.execPath, [ROUND, "run", "--kind", "spec", "--path", specRepo()], { env: { ...env, ...psSeam(bin), STUB_SLEEP_MS: "30000" }, stdio: "ignore" });
+  try {
+    assert.ok(await until(() => fs.existsSync(env.BROKER_READY), 20_000), "the companion started its broker");
+    fs.writeFileSync(arm, "");
+    const exited = new Promise((r) => child.once("exit", (_code, sig) => r(sig)));
+    child.kill("SIGTERM");
+    assert.equal(await exited, "SIGTERM");
+    assert.ok(!fs.existsSync(arm), "the reaper's first read was the one that failed");
+    const [b] = brokers();
+    assert.ok(await until(() => !alive(b.pid), 5000), "a failed read decided nothing: the next one reaped the broker");
+    assert.deepEqual(brokerLog(), ["sigterm"]);
+  } finally {
+    if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+  }
+});
+
+test("H1: the signal path asks ps for whole tables only, however many pids broker.json names, and starts no read after its budget", { timeout: 60_000 }, async () => {
+  const bin = path.join(dir, "slow-ps");
+  fs.mkdirSync(bin, { recursive: true });
+  const arm = path.join(bin, "arm");
+  const calls = path.join(bin, "calls");
+  // Once armed, every ps call is logged and each table read takes 1.5 s (under ps's 2 s timeout): a second read ends
+  // past the 3 s budget, so a third must never start.
+  fs.writeFileSync(path.join(bin, "ps"), `#!/bin/sh\nif [ -e ${arm} ]; then echo "$*" >> ${calls}; case " $* " in *" -A "*) /bin/sleep 1.5;; esac; fi\nexec /bin/ps "$@"\n`, { mode: 0o755 });
+  const child = spawn(process.execPath, [ROUND, "run", "--kind", "spec", "--path", specRepo()], { env: { ...env, ...psSeam(bin), STUB_SLEEP_MS: "30000" }, stdio: "ignore" });
+  try {
+    assert.ok(await until(() => fs.existsSync(env.BROKER_READY), 20_000), "the companion started its broker");
+    assert.ok(await until(() => snapshots().length === 1, 5000));
+    const state = path.join(ws(), snapshots()[0], "data", "state");
+    // Filled to the registry's 32-entry cap with the companion's own: each names a live pid that is not a broker.
+    for (let i = 0; i < 31; i++) {
+      fs.mkdirSync(path.join(state, `extra-${i}`), { recursive: true, mode: 0o700 });
+      fs.writeFileSync(path.join(state, `extra-${i}`, "broker.json"), JSON.stringify({ endpoint: "unix:/nonexistent", sessionDir: "/nonexistent", pid: process.pid }));
+    }
+    fs.writeFileSync(arm, "");
+    const exited = new Promise((r) => child.once("exit", (_code, sig) => r(sig)));
+    child.kill("SIGTERM");
+    assert.equal(await exited, "SIGTERM");
+    const log = fs.readFileSync(calls, "utf8").split("\n").filter(Boolean);
+    assert.deepEqual(log.filter((l) => !/(^| )-A( |$)/.test(l)), [], "no per-pid ps on the signal path");
+    assert.equal(log.length, 2, `two table reads fit the budget, a third never starts: ${JSON.stringify(log)}`);
+    const [b] = brokers();
+    assert.ok(await until(() => !alive(b.pid), 5000), "the broker was reaped from the first read");
+    assert.deepEqual(brokerLog(), ["sigterm"], "and nothing the extra entries named was signalled");
+  } finally {
+    if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+  }
+});
+
 test("H1: SIGTERM before broker.json exists still reaps the broker, found in the process table", { timeout: 60_000 }, async () => {
   const child = spawn(process.execPath, [ROUND, "run", "--kind", "spec", "--path", specRepo()], { env: { ...env, STUB_SLEEP_MS: "30000", FAKE_NO_BROKER_JSON: "1" }, stdio: "ignore" });
   try {
@@ -1254,6 +1309,25 @@ test("D: a live owner whose start time is corrupt is unverified, never taken for
     assert.deepEqual([JSON.parse(r.stdout).swept, JSON.parse(r.stdout).unverified], [0, 1], `${started}: ${r.stdout}`);
     assert.ok(fs.existsSync(path.join(snap, "owner.json")), `${started}: the live round's snapshot is left alone`);
   }
+});
+
+test("R2: an aged snapshot whose owner.json is too damaged to name anyone goes by the legacy rule and is swept; a fresh one is left alone", { timeout: 60_000 }, async () => {
+  const old = new Date(Date.now() - 25 * 60 * 60_000);
+  /** @param {string} name @param {string} body @param {boolean} aged */
+  const at = (name, body, aged) => {
+    const d = path.join(ws(), name);
+    legacySnapshot(d);
+    fs.writeFileSync(path.join(d, "owner.json"), body);
+    if (aged) fs.utimesSync(d, old, old);
+    return d;
+  };
+  const aged = [at("plugin-Dmg001", '{"pid":', true), at("plugin-Dmg002", JSON.stringify({ pid: "x" }), true)];
+  const fresh = at("plugin-Dmg003", '{"pid":', false);
+  const r = spawnSync(process.execPath, [ROUND, "sweep"], { env, encoding: "utf8" });
+  const out = JSON.parse(r.stdout);
+  assert.deepEqual([out.swept, out.unverified], [2, 1], r.stdout);
+  for (const d of aged) assert.ok(!fs.existsSync(d), `${path.basename(d)}: a killed round's aged snapshot is not stranded by its damaged owner.json`);
+  assert.ok(fs.existsSync(path.join(fresh, "owner.json")), "a fresh damaged owner could still be a live round: left alone");
 });
 
 test("C: a sweep step that throws is reported on its snapshot, by step (failed_remove), and keeps it", { timeout: 60_000 }, async (t) => {
