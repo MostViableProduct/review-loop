@@ -14,7 +14,7 @@ import { isRealPid, signalPid } from "../fakes/signal.mjs";
 import { validateLine } from "../../plugin/engine/lib/events.mjs";
 import { processIdent } from "../../plugin/engine/lib/proc.mjs";
 import {
-  afterSnapshotSecond, brokerArgv, deadGroupTargets, namesUpTo, removeSnapshot, SWEEP_LIST_MAX, companionTmp, goneGroupsLeft, hashOf, isHeld, parseProcRow, partitionCount, sameMember, stopCompanionBroker, sweepStaleSnapshots, treeMembers
+  afterSnapshotSecond, brokerArgv, deadGroupTargets, namesUpTo, removeSnapshot, SWEEP_LIST_MAX, companionTmp, goneGroupsLeft, hashOf, isHeld, parseProcRow, partitionCount, runCompanion, sameMember, stopCompanionBroker, sweepStaleSnapshots, treeMembers
 } from "../../plugin/engine/lib/pin.mjs";
 
 const HERE = path.dirname(new URL(import.meta.url).pathname);
@@ -385,7 +385,7 @@ test("H1: SIGTERM when the reaper's first table read fails: a later read still r
   }
 });
 
-test("H1: the signal path asks ps for whole tables only, however many pids broker.json names, and starts no read after its budget", { timeout: 60_000 }, async () => {
+test("H1: the signal path asks ps about a pid alone only once a table read matched it, however many pids broker.json names, and starts no read after its budget", { timeout: 60_000 }, async () => {
   const bin = path.join(dir, "slow-ps");
   fs.mkdirSync(bin, { recursive: true });
   const arm = path.join(bin, "arm");
@@ -408,13 +408,38 @@ test("H1: the signal path asks ps for whole tables only, however many pids broke
     child.kill("SIGTERM");
     assert.equal(await exited, "SIGTERM");
     const log = fs.readFileSync(calls, "utf8").split("\n").filter(Boolean);
-    assert.deepEqual(log.filter((l) => !/(^| )-A( |$)/.test(l)), [], "no per-pid ps on the signal path");
-    assert.equal(log.length, 2, `two table reads fit the budget, a third never starts: ${JSON.stringify(log)}`);
     const [b] = brokers();
+    const tables = log.filter((l) => / -A /.test(` ${l} `));
+    assert.deepEqual(log.filter((l) => !tables.includes(l)).map((l) => l.split(" ").slice(-2).join(" ")), [`-p ${b.pid}`], "one per-pid ps, for the matched broker, none for the 31 entries");
+    assert.equal(tables.length, 2, `two table reads fit the budget, a third never starts: ${JSON.stringify(log)}`);
     assert.ok(await until(() => !alive(b.pid), 5000), "the broker was reaped from the first read");
     assert.deepEqual(brokerLog(), ["sigterm"], "and nothing the extra entries named was signalled");
   } finally {
     if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+  }
+});
+
+test("H1: a broker the signal path's table read matched but whose pid is another process by the signal is never signalled", { timeout: 60_000 }, async () => {
+  const bin = path.join(dir, "reused-ps");
+  fs.mkdirSync(bin, { recursive: true });
+  const arm = path.join(bin, "arm");
+  // Once armed, a single-pid ps answers as if the broker had exited and its pid been reused by another command.
+  fs.writeFileSync(path.join(bin, "ps"), `#!/bin/sh\nif [ -e ${arm} ]; then case " $* " in *" -p "*) /bin/ps "$@" | /usr/bin/sed s/app-server-broker/app-server-reused/; exit 0;; esac; fi\nexec /bin/ps "$@"\n`, { mode: 0o755 });
+  const child = spawn(process.execPath, [ROUND, "run", "--kind", "spec", "--path", specRepo()], { env: { ...env, ...psSeam(bin), STUB_SLEEP_MS: "30000" }, stdio: "ignore" });
+  let b;
+  try {
+    assert.ok(await until(() => fs.existsSync(env.BROKER_READY), 20_000), "the companion started its broker");
+    fs.writeFileSync(arm, "");
+    const exited = new Promise((r) => child.once("exit", (_code, sig) => r(sig)));
+    child.kill("SIGTERM");
+    assert.equal(await exited, "SIGTERM");
+    [b] = brokers();
+    assert.ok(!(await until(() => !alive(b.pid), 1500)), "a pid that is another process by the signal is not signalled");
+    assert.deepEqual(brokerLog(), []);
+    assert.equal(snapshots().length, 1, "the snapshot is kept for the next sweep");
+  } finally {
+    if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+    if (b) signalPid(b.pid, "SIGKILL", { group: true });
   }
 });
 
@@ -1328,6 +1353,21 @@ test("R2: an aged snapshot whose owner.json is too damaged to name anyone goes b
   assert.deepEqual([out.swept, out.unverified], [2, 1], r.stdout);
   for (const d of aged) assert.ok(!fs.existsSync(d), `${path.basename(d)}: a killed round's aged snapshot is not stranded by its damaged owner.json`);
   assert.ok(fs.existsSync(path.join(fresh, "owner.json")), "a fresh damaged owner could still be a live round: left alone");
+});
+
+test("H1: a link in place of the snapshot's data/ or tmp/ is refused before the companion starts, never written through", { timeout: 60_000 }, async (t) => {
+  const outside = path.join(dir, "outside");
+  fs.mkdirSync(outside, { mode: 0o700 });
+  for (const name of ["data", "tmp"]) {
+    // Short enough that the companion's temp dir is <root>/tmp, not the short-dir fallback.
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "rl-l"));
+    t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+    assert.ok(Buffer.byteLength(path.join(root, "tmp", "cxc-XXXXXX", "broker.sock")) <= 103, "the in-snapshot temp dir fits");
+    fs.symlinkSync(outside, path.join(root, name));
+    const run = name === "data" ? () => runCompanion(root, { cwd: root, targetArgs: [], focus: "", codex: { model: null, effort: null, source: "config", passModel: null }, timeoutMs: 5000 }) : async () => companionTmp(root);
+    await assert.rejects(run, (e) => /** @type {{ code?: string }} */ (e).code === "state_symlink_rejected", `${name}: refused`);
+    assert.deepEqual(fs.readdirSync(outside), [], `${name}: nothing made through the link`);
+  }
 });
 
 test("C: a sweep step that throws is reported on its snapshot, by step (failed_remove), and keeps it", { timeout: 60_000 }, async (t) => {

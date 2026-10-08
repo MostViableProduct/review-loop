@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { ReviewLoopError } from "./errors.mjs";
-import { safeReadFile, sha256hex, atomicWriteJson, readJsonValidated, isObject, MiB, quarantine } from "./fsutil.mjs";
+import { safeReadFile, sha256hex, atomicWriteJson, readJsonValidated, isObject, MiB, quarantine, ensurePrivateDir } from "./fsutil.mjs";
 import { run, onReap, trustedPs, processIdent } from "./proc.mjs";
 import { claudeConfigDir as claudeDir, stateRoot } from "./paths.mjs";
 import { SEVERITIES } from "./scoring.mjs";
@@ -193,7 +193,7 @@ export function companionTmp(root) {
   const fits = (/** @type {string} */ d) => Buffer.byteLength(path.join(d, "cxc-XXXXXX", "broker.sock")) <= SOCKET_PATH_MAX;
   const inside = path.join(root, "tmp");
   if (fits(inside)) {
-    fs.mkdirSync(inside, { recursive: true, mode: 0o700 });
+    ensurePrivateDir(inside, root);
     return inside;
   }
   if (!fits(path.join(os.tmpdir(), "rl-XXXXXX"))) return null;
@@ -467,7 +467,8 @@ export async function runCompanion(root, p) {
   // A round-private data dir inside the 0700 snapshot, never the Codex plugin's shared one: the companion writes the
   // review's job files and broker.json there, and cleanup removes them (so these rounds no longer show in /codex:status).
   const dataDir = companionDataDir(root);
-  fs.mkdirSync(dataDir, { recursive: true, mode: 0o700 });
+  // Never through a link: one put in its place would carry the job files, sockets and broker.json out of the snapshot.
+  ensurePrivateDir(dataDir, root);
   // The companion's temp dir goes with the snapshot, so the broker's cxc-* session dir does too, even when the broker
   // dies before broker.json names it.
   const tmp = companionTmp(root);
@@ -1076,9 +1077,10 @@ const REAP_BUDGET_MS = 3000;
 /**
  * The signal-path twin of stopCompanionBroker: synchronous, SIGTERM only, same identity checks. The table is read up
  * to REAP_READS times: a broker the companion forked just before its group was killed can show in the table only after
- * the first read. Each read decides every pid at once (no per-pid ps, however many broker.json names), and none starts
- * after REAP_BUDGET_MS, so the signal is re-raised within that plus one ps timeout. A read ps could not answer decides
- * nothing, so the next one retries every pid. One still missed keeps the snapshot, which the next sweep retries.
+ * the first read. Each read decides every pid at once: a pid is asked about alone only once a read has matched it to
+ * this snapshot's broker, never for each pid broker.json names. No read starts after REAP_BUDGET_MS, so the signal is
+ * re-raised within that plus one ps timeout for the read in flight and one per broker matched. A read ps could not
+ * answer decides nothing, so the next one retries every pid. One still missed keeps the snapshot (the next sweep).
  * @param {string} root
  */
 function reapCompanionBroker(root) {
@@ -1094,8 +1096,12 @@ function reapCompanionBroker(root) {
       if (done.has(p.pid) || p.uid !== uid || !brokerArgv(p.args, roots)) continue;
       // A broker started before the companion wrote broker.json is only in the process table, as its group's leader.
       if (!registered.has(p.pid) && p.pgid !== p.pid) continue;
+      // Only a pid the read matched is asked about again, right before the signal: a broker that exited since, its pid
+      // reused, is another process now and is never signalled. ps failing here decides nothing; the next read retries.
+      const now = procRow(p.pid);
+      if (now === null) continue;
       done.add(p.pid);
-      signal(p.pid, "SIGTERM");
+      if (now !== "gone" && sameMember(now, p) && now.uid === uid) signal(p.pid, "SIGTERM");
     }
   }
 }
