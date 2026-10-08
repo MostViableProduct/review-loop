@@ -1087,7 +1087,7 @@ const REAP_BUDGET_MS = 3000;
  * The signal-path twin of stopCompanionBroker: synchronous, SIGTERM only, same identity checks. The table is read up
  * to REAP_READS times: a broker the companion forked just before its group was killed can show in the table only after
  * the first read. Each read decides every pid at once: a pid is asked about alone only once a read has matched it to
- * this snapshot's broker, never for each pid broker.json names. No read starts after REAP_BUDGET_MS, so the signal is
+ * this snapshot's broker leading its own group, never for each pid broker.json names (which is not read here). No read starts after REAP_BUDGET_MS, so the signal is
  * re-raised within that plus one ps timeout for the read in flight and one per broker matched. A read ps could not
  * answer decides nothing, so the next one retries every pid. One still missed keeps the snapshot (the next sweep).
  * @param {string} root
@@ -1097,14 +1097,14 @@ function reapCompanionBroker(root) {
   const uid = process.getuid?.();
   /** @type {Set<number>} */
   const done = new Set();
-  const registered = new Set(brokerRegistry(root).sessions.map((s) => s.pid));
   const end = Date.now() + REAP_BUDGET_MS;
   for (let read = 0; read < REAP_READS && Date.now() < end; read++) {
     if (read > 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, REAP_READ_GAP_MS);
     for (const p of readProcs() ?? []) {
       if (done.has(p.pid) || p.uid !== uid || !brokerArgv(p.args, roots)) continue;
-      // A broker started before the companion wrote broker.json is only in the process table, as its group's leader.
-      if (!registered.has(p.pid) && p.pgid !== p.pid) continue;
+      // Only a group's leader, as in the stop: a pid broker.json names is trusted no further, so the table alone
+      // finds every broker this may signal (one started before broker.json was written among them).
+      if (p.pgid !== p.pid) continue;
       // Only a pid the read matched is asked about again, right before the signal: a broker that exited since, its pid
       // reused, is another process now and is never signalled. ps failing here decides nothing; the next read retries.
       const now = recheck(p);

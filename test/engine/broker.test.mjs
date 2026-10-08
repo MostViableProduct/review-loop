@@ -443,6 +443,34 @@ test("H1: a broker the signal path's table read matched but whose pid is another
   }
 });
 
+test("H1: the signal path never signals a broker-shaped pid broker.json names that does not lead its group", { timeout: 60_000 }, async () => {
+  const child = spawn(process.execPath, [ROUND, "run", "--kind", "spec", "--path", specRepo()], { env: { ...env, STUB_SLEEP_MS: "30000" }, stdio: "ignore" });
+  /** @type {import("node:child_process").ChildProcess | undefined} */
+  let stray;
+  try {
+    assert.ok(await until(() => fs.existsSync(env.BROKER_READY), 20_000), "the companion started its broker");
+    assert.ok(await until(() => snapshots().length === 1, 5000));
+    const root = path.join(ws(), snapshots()[0]);
+    // This snapshot's broker script, serving, but in the test runner's group (not detached): it leads no group.
+    stray = spawn(process.execPath, [path.join(root, "scripts", "app-server-broker.mjs"), "serve", "--endpoint", `unix:${path.join(dir, "stray.sock")}`], { env: { ...env, BROKER_LOG: path.join(dir, "stray.log") }, stdio: "ignore" });
+    const pid = /** @type {number} */ (stray.pid);
+    assert.ok(await until(() => fs.existsSync(path.join(dir, "stray.sock")), 5000), "the stray serves");
+    const state = path.join(root, "data", "state", "stray");
+    fs.mkdirSync(state, { recursive: true, mode: 0o700 });
+    fs.writeFileSync(path.join(state, "broker.json"), JSON.stringify({ endpoint: `unix:${path.join(dir, "stray.sock")}`, sessionDir: dir, pid }));
+    const exited = new Promise((r) => child.once("exit", (_code, sig) => r(sig)));
+    child.kill("SIGTERM");
+    assert.equal(await exited, "SIGTERM");
+    const [b] = brokers();
+    assert.ok(await until(() => !alive(b.pid), 5000), "the round's own broker was reaped");
+    assert.ok(alive(pid), "the registered non-leader was not signalled");
+    assert.ok(!fs.existsSync(path.join(dir, "stray.log")), "it got no SIGTERM");
+  } finally {
+    if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+    stray?.kill("SIGKILL");
+  }
+});
+
 test("H1: SIGTERM before broker.json exists still reaps the broker, found in the process table", { timeout: 60_000 }, async () => {
   const child = spawn(process.execPath, [ROUND, "run", "--kind", "spec", "--path", specRepo()], { env: { ...env, STUB_SLEEP_MS: "30000", FAKE_NO_BROKER_JSON: "1" }, stdio: "ignore" });
   try {
