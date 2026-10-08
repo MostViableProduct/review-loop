@@ -23,6 +23,7 @@ https://github.com/MostViableProduct/review-loop/issues with the code and the li
 | `bad_args` | 2 | run `node "$(review-loop engine-path)/review-round.mjs" --help` for the flags |  |
 | `base_moved` | 1 | the base branch moved; re-run the review round |  |
 | `branch_marker_missing` | 1 | run the PR creation command again so review-loop records the branch |  |
+| `broker_registry_quarantined` | 4 | a review round's Codex companion left a damaged broker.json: it was set aside (broker.json.corrupt-&lt;time&gt;, in that round's snapshot) and the round's brokers were found and stopped from the process table instead; nothing to do unless it recurs, then report a bug |  |
 | `broker_stop_failed` | 4 | a Codex app-server broker from a review round may still be running: find it with `ps -ax \| grep app-server-broker` and stop it, then report a bug |  |
 | `busy` | 1 | another review is running for this artifact; wait for it to finish, or follow the message if it names a stuck process or a marker file |  |
 | `cancelled` | 3 | re-run the command when ready; completed steps are kept |  |

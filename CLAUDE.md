@@ -214,7 +214,11 @@ These are copied from the spec, and every task implicitly includes them.
     entry unverified on any change: this narrows, but cannot close, a same-user swap of `ws/` for a link (Node has
     no `unlinkat`); a same-user process could delete the target itself, so no privilege boundary is crossed (known
     limit, author's decision 2026-10-07). The round's `finally` releases its lock in an inner `finally`, and a
-    snapshot cleanup that throws is reported as `failed_remove`. A snapshot it leaves alone is `in_use` (owner alive, fresh, or referenced) or `unverified` (not a
+    snapshot cleanup that throws is reported as `failed_remove`. A damaged broker.json (unparseable, or not
+    `{pid: int > 1}`) is set aside (`quarantine`, `broker.json.corrupt-<ts>`) and the stop goes on the process table
+    alone, as for a missing one (`hook.error` `broker_registry_quarantined`); a linked, oversized or unreadable one
+    stays fail closed (`registry_unreadable`) (author's decision 2026-10-07). The sweep's deadline is checked before
+    every judgment, not only after one acted, and owner identities are read once per pid per sweep (`processTable`). A snapshot it leaves alone is `in_use` (owner alive, fresh, or referenced) or `unverified` (not a
     real dir of ours, an owner that cannot be read); the manual `sweep` is `clean` only with no `unverified` left, and
     both counts go in its output and in `round.sweep`. Doctor's `orphaned_brokers` judges each snapshot with the same
     `judgeSnapshot`, so it is unverified exactly where the sweep is. An owner's `started` is compared only when it is a

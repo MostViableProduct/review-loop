@@ -930,7 +930,7 @@ test("B: a leader whose re-check differs is not signalled, and the stop is unkno
   assert.ok(await until(() => !alive(s.pid), 3000));
 });
 
-test("B: companion.json and broker.json are read safely: a link, an oversized or extra-keyed file, or a broken registry signal nothing", { timeout: 60_000 }, async () => {
+test("B: companion.json and broker.json are read safely: a link, an oversized or extra-keyed file, or a linked or oversized registry signal nothing", { timeout: 60_000 }, async () => {
   const parent = path.join(dir, "ws-safe");
   fs.mkdirSync(parent, { mode: 0o700 });
   const s = await deadSnapshot(parent);
@@ -951,9 +951,16 @@ test("B: companion.json and broker.json are read safely: a link, an oversized or
   fs.rmSync(marker, { force: true });
   const bj = path.join(s.root, "data", "state", "r-fake", "broker.json");
   const saved = fs.readFileSync(bj, "utf8");
-  fs.writeFileSync(bj, "{");
-  assert.deepEqual((await stopCompanionBroker(s.root)).reason, "registry_unreadable");
-  assert.ok(alive(s.pid));
+  // A linked or oversized broker.json stays fail closed. (A damaged one is set aside instead: see "a damaged
+  // broker.json (cut short, or the wrong shape) is set aside".)
+  for (const make of [() => fs.symlinkSync(target, bj), () => fs.writeFileSync(bj, " ".repeat(5 * 1024 * 1024))]) {
+    fs.rmSync(bj, { force: true });
+    make();
+    assert.deepEqual((await stopCompanionBroker(s.root)).reason, "registry_unreadable");
+    assert.ok(alive(s.pid));
+    assert.ok(fs.readdirSync(path.dirname(bj)).every((n) => !n.startsWith("broker.json.corrupt-")), "never set aside");
+  }
+  fs.rmSync(bj, { force: true });
   fs.writeFileSync(bj, saved);
   assert.equal((await stopCompanionBroker(s.root)).left, 0);
 });
@@ -1358,6 +1365,56 @@ test("C: a legacy snapshot's files are streamed against their cap, never listed 
   } finally {
     t.mock.restoreAll();
   }
+});
+
+test("B: a damaged broker.json (cut short, or the wrong shape) is set aside and the live broker is stopped from the process table", { timeout: 90_000 }, async () => {
+  for (const [i, body] of ['{"endpoint":"unix:/x","pi', JSON.stringify({ pid: "12" })].entries()) {
+    const parent = path.join(dir, `ws-damaged-${i}`);
+    fs.mkdirSync(parent, { mode: 0o700 });
+    const s = await deadSnapshot(parent, { env: { FAKE_BROKER_IGNORE_SHUTDOWN: "1" } });
+    fs.writeFileSync(s.registry, body);
+    const r = await stopCompanionBroker(s.root);
+    assert.deepEqual([r.left, r.unattributed, r.quarantined], [0, 0, 1], JSON.stringify(r));
+    assert.ok(await until(() => !alive(s.pid), 5000), "the broker ps shows running from the snapshot was stopped");
+    const kept = fs.readdirSync(path.dirname(s.registry));
+    assert.ok(!kept.includes("broker.json") && kept.some((n) => n.startsWith("broker.json.corrupt-")), `set aside, never read again: ${kept}`);
+  }
+});
+
+test("R2: a killed round's damaged broker.json does not strand its snapshot: the sweep stops the broker, removes it, and says so", { timeout: 90_000 }, async () => {
+  const left = await killedRound();
+  const state = path.join(left.root, "data", "state");
+  const [slug] = fs.readdirSync(state);
+  fs.writeFileSync(path.join(state, slug, "broker.json"), "{not json");
+  assert.equal(round().code, 0);
+  assert.ok(await until(() => !alive(left.broker.pid), 5000), "the broker is stopped");
+  assert.deepEqual(snapshots(), [], "and the snapshot removed");
+  const f = path.join(env.REVIEW_LOOP_STATE_DIR, "events.jsonl");
+  const q = fs.readFileSync(f, "utf8").split("\n").filter((l) => l.includes('"broker_registry_quarantined"'));
+  assert.equal(q.length, 1, "one hook.error, never silent");
+  assert.deepEqual(validateLine(JSON.parse(q[0])), []);
+  assert.ok(!q[0].includes(dir) && !q[0].includes("broker.json"), "no path in it");
+});
+
+test("C: owner identities are asked once per pid, and a sweep stops at its deadline even when every snapshot is in use", { timeout: 60_000 }, async () => {
+  const parent = path.join(dir, "ws-slow-ident");
+  fs.mkdirSync(parent, { mode: 0o700 });
+  for (const n of ["plugin-Slow01", "plugin-Slow02", "plugin-Slow03", "plugin-Slow04"]) {
+    fs.mkdirSync(path.join(parent, n), { mode: 0o700 });
+    fs.writeFileSync(path.join(parent, n, "owner.json"), liveOwner(process.pid));
+  }
+  const bin = path.join(dir, "slow-ident-ps");
+  fs.mkdirSync(bin, { recursive: true });
+  const log = path.join(bin, "calls");
+  // The identity read (`-o lstart=,command=`) is slow; the table read is not.
+  fs.writeFileSync(path.join(bin, "ps"), `#!/bin/sh\ncase " $* " in *"lstart=,command="*) echo x >> ${log}; /bin/sleep 0.4;; esac\nexec /bin/ps "$@"\n`, { mode: 0o755 });
+  const calls = () => (fs.existsSync(log) ? fs.readFileSync(log, "utf8").split("\n").filter(Boolean).length : 0);
+  const all = await withSeams({ ...psSeam(bin), REVIEW_LOOP_TEST_SWEEP_TICK: "0" }, () => sweepStaleSnapshots(parent, { all: true }));
+  assert.equal(all.skipped.size, 4, JSON.stringify([...all.skipped]));
+  assert.equal(calls(), 1, "one identity read for the one owner pid, however many snapshots name it");
+  fs.rmSync(log);
+  const short = await withSeams({ ...psSeam(bin), REVIEW_LOOP_TEST_SWEEP_TICK: "0" }, () => sweepStaleSnapshots(parent, { deadlineMs: 100 }));
+  assert.deepEqual([short.skipped.size, short.incomplete], [1, true], "judged one, then stopped at the deadline");
 });
 
 test("units: namesUpTo stops reading past its cap instead of listing the whole directory", () => {

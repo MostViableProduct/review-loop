@@ -323,6 +323,7 @@ async function cmdRun(v) {
     // The lock goes whatever the cleanup does: a throw here would otherwise strand it for the next round to reclaim.
     try {
       const stop = plugin ? await stopCompanionBroker(plugin.root, { deadline: performance.now() + STOP_DEADLINE_MS }) : null;
+      if (stop?.quarantined) reportQuarantined(key);
       const kept = stop !== null && (stop.left > 0 || stop.unattributed > 0);
       if (kept) reportStop(key, path.basename(/** @type {{ root: string }} */ (plugin).root), /** @type {import("./lib/pin.mjs").StopResult} */ (stop));
       prep && !prep.nothing && prep.cleanup();
@@ -341,6 +342,17 @@ async function cmdRun(v) {
     } finally {
       lock.release();
     }
+  }
+}
+
+/**
+ * A damaged broker.json was set aside and the stop went on the process table (see brokerRegistry): `hook.error`, so it
+ * is never silent. No path or content; a lost line is said on stderr.
+ * @param {string | null} key
+ */
+function reportQuarantined(key) {
+  if (!emitEvent({ source: "round", event: "hook.error", code: "broker_registry_quarantined", session_id: SESSION, artifact_key: key, data: { stage: "broker_registry_quarantined" } })) {
+    process.stderr.write(`review-loop: event_write_failed ${JSON.stringify({ event: "hook.error", code: "broker_registry_quarantined", artifact_key: key })}\n`);
   }
 }
 
@@ -368,6 +380,7 @@ function reportStop(key, snapshot, s) {
  */
 async function sweepSnapshots(key, opts = {}) {
   const s = await sweepStaleSnapshots(stateSubdir("ws"), opts);
+  if (s.quarantined > 0) reportQuarantined(key);
   for (const st of s.stops) reportStop(st.origin, st.snapshot, st);
   const skipped = [...s.skipped.values()];
   const inUse = skipped.filter((k) => k === "in_use").length;

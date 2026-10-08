@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { ReviewLoopError } from "./errors.mjs";
-import { safeReadFile, sha256hex, atomicWriteJson, readJsonValidated, isObject, MiB } from "./fsutil.mjs";
+import { safeReadFile, sha256hex, atomicWriteJson, readJsonValidated, isObject, MiB, quarantine } from "./fsutil.mjs";
 import { run, onReap, trustedPs, processIdent } from "./proc.mjs";
 import { claudeConfigDir as claudeDir, stateRoot } from "./paths.mjs";
 import { SEVERITIES } from "./scoring.mjs";
@@ -675,7 +675,7 @@ export function namesUpTo(dir, max) {
  * `<data>/state/<slug>-<hash>/broker.json` = { endpoint: "unix:<sock>", pidFile, logFile, sessionDir, pid }).
  * `ok` is false when the registry exists but cannot be read whole: a stop then signals nothing.
  * @param {string} root
- * @returns {{ ok: boolean, sessions: Array<{ pid: number, socket: string | null, sessionDir: string | null }> }}
+ * @returns {{ ok: boolean, sessions: Array<{ pid: number, socket: string | null, sessionDir: string | null }>, quarantined?: number }}
  */
 function brokerRegistry(root) {
   const stateDir = path.join(companionDataDir(root), "state");
@@ -693,6 +693,7 @@ function brokerRegistry(root) {
   }
   if (names === "too_large") return { ok: false, sessions: [] };
   const sessions = [];
+  let quarantined = 0;
   for (const name of names) {
     const file = path.join(stateDir, name, "broker.json");
     try {
@@ -702,17 +703,40 @@ function brokerRegistry(root) {
       if (code === "ENOENT" || code === "ENOTDIR") continue;
       return { ok: false, sessions: [] };
     }
-    let v;
+    let raw;
     try {
-      v = JSON.parse(safeReadFile(file, BROKER_JSON_MAX_BYTES, { symlink: "state_symlink_rejected" }, { within: root }).toString("utf8"));
+      raw = safeReadFile(file, BROKER_JSON_MAX_BYTES, { symlink: "state_symlink_rejected" }, { within: root }).toString("utf8");
     } catch {
       return { ok: false, sessions: [] };
     }
-    if (!isObject(v) || !Number.isInteger(v.pid) || /** @type {number} */ (v.pid) <= 1) return { ok: false, sessions: [] };
+    /** @type {unknown} */
+    let v = null;
+    try {
+      v = JSON.parse(raw);
+    } catch {
+      // Damaged: set aside below.
+    }
+    if (!isObject(v) || !Number.isInteger(v.pid) || /** @type {number} */ (v.pid) <= 1) {
+      // The companion's own write, cut short or garbled: set aside (never read again) and the stop goes on the process
+      // table alone, as for a missing one. A link, an oversized or an unreadable file stays fail closed above.
+      if (quarantine(file, root) === null && present(file)) return { ok: false, sessions: [] };
+      quarantined++;
+      continue;
+    }
     const ep = typeof v.endpoint === "string" && v.endpoint.startsWith("unix:") ? v.endpoint.slice("unix:".length) : null;
     sessions.push({ pid: /** @type {number} */ (v.pid), socket: ep && path.isAbsolute(ep) ? ep : null, sessionDir: typeof v.sessionDir === "string" ? v.sessionDir : null });
   }
-  return { ok: true, sessions };
+  return { ok: true, sessions, quarantined };
+}
+
+/** Whether anything is at `p`, never followed. @param {string} p */
+function present(p) {
+  try {
+    fs.lstatSync(p);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /** @param {unknown} v @returns {v is { pid: number, after?: number }} */
@@ -866,7 +890,7 @@ function signalGroupIfSame(p, sig, guard = () => true) {
   return true;
 }
 
-/** @typedef {{ left: number, unattributed: number, reason: string | null }} StopResult */
+/** @typedef {{ left: number, unattributed: number, reason: string | null, quarantined?: number }} StopResult quarantined: damaged broker.json files set aside */
 
 /**
  * Empties the process groups of the brokers a round's companion started from this snapshot, and says whether any may
@@ -894,6 +918,7 @@ export async function stopCompanionBroker(root, opts = {}) {
     const roots = rootsOf(root);
     const snapshotSec = snapshotSecond(root);
     const reg = brokerRegistry(root);
+    if (reg.quarantined) res.quarantined = reg.quarantined;
     const marker = readCompanionMarker(root);
     const table = readProcs();
     if (table === null) {
@@ -1166,6 +1191,8 @@ function startTimeOf(pid) {
 function processTable() {
   /** @type {Proc[] | null | undefined} */
   let procs;
+  /** @type {Map<number, string | null>} */
+  const idents = new Map();
   return {
     procs() {
       if (procs === undefined) procs = readProcs();
@@ -1178,6 +1205,11 @@ function processTable() {
     args() {
       const p = this.procs();
       return p === null ? null : p.map((r) => r.args);
+    },
+    /** processIdent, asked once per pid per sweep. @param {number} pid */
+    ident(pid) {
+      if (!idents.has(pid)) idents.set(pid, processIdent(pid));
+      return /** @type {string | null} */ (idents.get(pid));
     }
   };
 }
@@ -1217,7 +1249,7 @@ function ownerState(root, table) {
   // Same second: only the full identity can tell the owner from a pid reused within it. An owner.json without one
   // (or with one not shaped as one) cannot be judged further.
   if (typeof v.ident !== "string" || !/^[0-9a-f]{64}$/.test(v.ident)) return "unknown";
-  const ident = processIdent(pid);
+  const ident = table.ident(pid);
   if (ident === null) return "unknown";
   return ident === v.ident ? "alive" : "dead";
 }
@@ -1303,7 +1335,7 @@ function walkSnapshots(parentDir, onName, remaining) {
  * @typedef {{ swept: number, brokersLeft: number, unattributed: number, failed: number, incomplete: boolean,
  *   held: number, partition: number, partitions: number, counted: number,
  *   stops: Array<{ snapshot: string, origin: string | null, reason: string, left: number, unattributed: number }>,
- *   skipped: Map<string, "in_use" | "unverified"> }} SweepResult
+ *   skipped: Map<string, "in_use" | "unverified">, quarantined: number }} SweepResult
  * skipped: the snapshots left alone, by name (a full sweep can visit one more than once): "in_use" (its round is
  * alive, or it is fresh or referenced), "unverified" (not a real directory of ours, or an owner that cannot be read).
  */
@@ -1326,10 +1358,10 @@ export async function sweepStaleSnapshots(parentDir, opts = {}) {
   const tick = sweepTick();
   const part = sweepPart();
   /** @type {SweepResult} */
-  const res = { swept: 0, brokersLeft: 0, unattributed: 0, failed: 0, incomplete: false, held: 0, partition: 0, partitions: 1, counted: 0, stops: [], skipped: new Map() };
+  const res = { swept: 0, brokersLeft: 0, unattributed: 0, failed: 0, incomplete: false, held: 0, partition: 0, partitions: 1, counted: 0, stops: [], skipped: new Map(), quarantined: 0 };
   const table = processTable();
   const anchor = dirIdentity(parentDir);
-  let acted = 0;
+  let judged = 0;
   const count = () => {
     let n = 0;
     const w = walkSnapshots(parentDir, () => n++, remaining);
@@ -1377,17 +1409,19 @@ export async function sweepStaleSnapshots(parentDir, opts = {}) {
       held.sort((a, b) => hashOf(a) - hashOf(b) || (a < b ? -1 : 1));
       const start = held.length ? ((tick % held.length) + held.length) % held.length : 0;
       for (const name of [...held.slice(start), ...held.slice(0, start)]) {
-        if (acted > 0 && remaining() <= 0) {
+        // Every judgment counts (an owner's identity is a ps call), so a partition of live owners cannot run past the
+        // budget either; the first is always judged, so each sweep makes progress.
+        if (judged > 0 && remaining() <= 0) {
           res.incomplete = true;
           break;
         }
-        const r = await sweepOne(path.join(parentDir, name), name, table, remaining, anchor);
+        judged++;
+        const r = await sweepOne(path.join(parentDir, name), name, table, remaining, anchor, (n) => (res.quarantined += n));
         if (r === "in_use" || r === "unverified") {
           res.skipped.set(name, r);
           continue;
         }
         res.skipped.delete(name);
-        acted++;
         if (r === "swept") res.swept++;
         else {
           res.brokersLeft += r.left;
@@ -1467,9 +1501,10 @@ function onlySnapshotFiles(root) {
  * still running (an unexpected error: reason `failed_<step>`, one of BROKER_STOP_REASONS).
  * @param {string} root @param {string} name @param {ReturnType<typeof processTable>} table @param {() => number} remaining
  * @param {{ dev: number, ino: number } | null} anchor the parent's identity when the sweep began
+ * @param {(n: number) => void} tally takes the count of damaged broker.json files the stop set aside
  * @returns {Promise<"in_use" | "unverified" | "swept" | StopResult>}
  */
-async function sweepOne(root, name, table, remaining, anchor) {
+async function sweepOne(root, name, table, remaining, anchor, tally) {
   // The step an unexpected error interrupts, so the snapshot's event says where (a bounded reason, never a message).
   let step = "judge";
   try {
@@ -1482,6 +1517,7 @@ async function sweepOne(root, name, table, remaining, anchor) {
     if (!(await stopSnapshotCompanion(root, procs, remaining))) return { left: 1, unattributed: 0, reason: remaining() <= 0 ? "deadline" : "unknown_rows" };
     step = "broker";
     const stop = await stopCompanionBroker(root, { deadline: performance.now() + Math.max(0, remaining()) });
+    if (stop.quarantined) tally(stop.quarantined);
     if (stop.left > 0 || stop.unattributed > 0) return stop;
     step = "remove";
     // Re-checked just before the remove: still a real directory of ours, never a link swapped in, and nothing runs

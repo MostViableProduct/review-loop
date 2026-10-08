@@ -137,6 +137,7 @@ export const CODES = Object.freeze({
     category: "internal", remedy: "report a bug, naming the failed check (the detail) and the line printed above it",
     details: ["stop_blocks", "pr_gate_denies", "clean_repo_passes", "events_schema_v1", "git_failed", "hook_failed"]
   },
+  broker_registry_quarantined: { category: "internal", remedy: "a review round's Codex companion left a damaged broker.json: it was set aside (broker.json.corrupt-<time>, in that round's snapshot) and the round's brokers were found and stopped from the process table instead; nothing to do unless it recurs, then report a bug" },
   broker_stop_failed: { category: "internal", remedy: "a Codex app-server broker from a review round may still be running: find it with `ps -ax | grep app-server-broker` and stop it, then report a bug" },
   snapshot_sweep_incomplete: { category: "internal", remedy: "a killed round's snapshot under the state dir's ws/ could not be cleaned up yet; the next round retries. Run `node \"$(review-loop engine-path)/review-round.mjs\" sweep` to finish now, then `review-loop doctor`; if it repeats, report a bug" },
   snapshot_owner_unknown: { category: "internal", remedy: "ps could not name this round's process, so no Codex review was started; check that `ps -p $$` works, then re-run the review round" },
@@ -229,7 +230,7 @@ const token = (/** @type {unknown} */ v) => (typeof v === "string" && /^[A-Za-z0
 
 export const GATES = Object.freeze(["stop", "pr", "prompt", "prverify", "merge"]);
 export const OUTCOMES = Object.freeze(["blocked", "warned", "denied", "allowed", "skipped"]);
-export const STAGES = Object.freeze(["detection_failed", "snapshot_degraded", "hook_input_error", "hook_error", "prune_failed", "summary_write_failed", "lock_invalid", "lock_marker_cleanup", "lock_release_deferred", "status_post_failed", "broker_stop_failed", "session", "track", "prompt", "stop", "pr", "prverify"]);
+export const STAGES = Object.freeze(["detection_failed", "snapshot_degraded", "hook_input_error", "hook_error", "prune_failed", "summary_write_failed", "lock_invalid", "lock_marker_cleanup", "lock_release_deferred", "status_post_failed", "broker_stop_failed", "broker_registry_quarantined", "session", "track", "prompt", "stop", "pr", "prverify"]);
 export const COMMANDS_ENUM = Object.freeze(["setup", "config", "doctor", "update", "uninstall", "migrate", "selftest", "engine-path", "version", "help"]);
 export const KINDS = Object.freeze(["spec", "plan", "impl", "pr"]);
 export const DECISION_OPTIONS = Object.freeze(["continue", "more", "accept", "stop", "accept-finding", "waive", "repin", "override", "merge", "pull"]);
