@@ -184,7 +184,8 @@ These are copied from the spec, and every task implicitly includes them.
     snapshot's second before the companion starts (`afterSnapshotSecond`), so a same-second member is never the
     round's own: `unattributed`, never signalled. A `codex app-server` in a leaderless group inside the companion's
     pid window (`companion.json` = `{pid, after}`, written through `run`'s `onSpawn` and right after the companion
-    exits) is `unattributed` too. Known limit: a broker that dies before broker.json AND whose app-server dies too
+    exits) is `unattributed` too; bounds that leave no window (`after <= pid`: a wrapped pid space, or a damaged
+    marker) count every such group, so a snapshot is only ever kept for it (row `marker-equal-bounds`). Known limit: a broker that dies before broker.json AND whose app-server dies too
     leaves its grandchildren unattributed and unreported (no evidence names them; `ps -E` would read every process's
     environment and macOS hides it for platform binaries such as shells and git — author's decision 2026-10-06:
     kept as a documented limit).
@@ -197,7 +198,8 @@ These are copied from the spec, and every task implicitly includes them.
     partial or another token) is never touched: a kill before the token leaves at most an empty dir in the OS temp
     dir, for the OS to clear. It is detached first (atomic rename to `<dir>.rm`, checked to be
     the same device and inode), so a path swapped for a link after the check removes nothing behind it; a removal
-    cut short resumes from `<dir>.rm`.
+    cut short resumes from `<dir>.rm`. Its entries are streamed against `TMP_LIST_MAX` (10 000; `namesUpTo`), never
+    listed whole: a dir past the cap is kept with its snapshot until it is back under (row `tmp-list-capped`).
     The snapshot is kept (`temp_unremoved`) unless the dir is confirmed gone or not ours.
   - **Fail closed.** Anything unverifiable (`ps_unavailable`, `registry_unreadable`, `deadline`, `unknown_rows`,
     `members_left`, `unattributed`, `temp_unremoved`: `BROKER_STOP_REASONS`) signals nothing more and keeps the snapshot; every path that keeps one (the round's own stop, both

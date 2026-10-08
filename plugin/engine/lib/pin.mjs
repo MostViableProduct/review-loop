@@ -258,8 +258,11 @@ function removeShortTmp(v) {
     if (p === v.dir) fs.renameSync(p, hold);
     const h = fs.lstatSync(hold);
     if (!h.isDirectory() || h.dev !== st.dev || h.ino !== st.ino) return false;
+    // Streamed against a cap, never listed whole: one past it is kept, with the snapshot that points to it.
+    const names = namesUpTo(hold, TMP_LIST_MAX);
+    if (names === "too_large") return false;
     // The token goes last: a removal that fails part-way leaves the dir still provably ours for the retry.
-    for (const n of fs.readdirSync(hold)) if (!TOKEN_NAMES.includes(n)) fs.rmSync(path.join(hold, n), { recursive: true, force: true });
+    for (const n of names) if (!TOKEN_NAMES.includes(n)) fs.rmSync(path.join(hold, n), { recursive: true, force: true });
     fs.rmSync(hold, { recursive: true, force: true });
   }
   return true;
@@ -521,6 +524,8 @@ export const SNAPSHOT_NAME = /^plugin-[A-Za-z0-9]{6}$/;
 const TMP_TOKEN_FILE = ".review-loop-tmp";
 /** The token file, and the `.part` it is written to before it is renamed into place. */
 const TOKEN_NAMES = [TMP_TOKEN_FILE, `${TMP_TOKEN_FILE}.part`];
+/** The most entries removeShortTmp lists in a short temp dir; the companion and its broker decide how many there are. */
+export const TMP_LIST_MAX = 10_000;
 const COMPANION_MAX_BYTES = 4096;
 /** A snapshot's companion data holds one state dir per workspace; more than this is not a companion's doing. */
 const REGISTRY_MAX_ENTRIES = 32;
@@ -798,8 +803,8 @@ function leaderlessAppServers(rows, snapshotSec, marker, known) {
   const inWindow = (/** @type {number} */ pgid) => {
     if (marker.state !== "ok") return true;
     if (marker.after === undefined) return pgid > marker.pid;
-    // A PID space that wrapped during the round leaves no usable window.
-    if (marker.after < marker.pid) return true;
+    // A PID space that wrapped during the round, or bounds that are not two pids apart, leave no usable window.
+    if (marker.after <= marker.pid) return true;
     return pgid > marker.pid && pgid < marker.after;
   };
   return rows.filter((p) => p.uid === uid && !known.has(p.pgid) && !led.has(p.pgid) && p.started > snapshotSec && APP_SERVER_ARGS.test(p.args) && inWindow(p.pgid)).length;

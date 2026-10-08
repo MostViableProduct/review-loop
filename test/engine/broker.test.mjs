@@ -14,7 +14,7 @@ import { isRealPid, signalPid } from "../fakes/signal.mjs";
 import { validateLine } from "../../plugin/engine/lib/events.mjs";
 import { processIdent } from "../../plugin/engine/lib/proc.mjs";
 import {
-  afterSnapshotSecond, brokerArgv, deadGroupTargets, namesUpTo, removeSnapshot, SWEEP_LIST_MAX, companionTmp, goneGroupsLeft, hashOf, isHeld, parseProcRow, partitionCount, runCompanion, sameMember, stopCompanionBroker, sweepStaleSnapshots, treeMembers
+  afterSnapshotSecond, brokerArgv, deadGroupTargets, namesUpTo, removeSnapshot, SWEEP_LIST_MAX, TMP_LIST_MAX, companionTmp, goneGroupsLeft, hashOf, isHeld, parseProcRow, partitionCount, runCompanion, sameMember, stopCompanionBroker, sweepStaleSnapshots, treeMembers
 } from "../../plugin/engine/lib/pin.mjs";
 
 const HERE = path.dirname(new URL(import.meta.url).pathname);
@@ -778,6 +778,10 @@ test("B: a broker that died before writing broker.json leaves a codex app-server
   // A pid space that wrapped during the round (after < pid) leaves no window to check, by design.
   assert.ok(Number.isInteger(marker.pid) && Number.isInteger(marker.after), `the companion's pid window was recorded: ${JSON.stringify(marker)}`);
   if (marker.after > marker.pid) assert.ok(marker.pid < b && b < marker.after, `the window holds the broker: ${JSON.stringify(marker)} vs ${b}`);
+  // Equal bounds are no window either: the app-server still keeps the snapshot.
+  fs.writeFileSync(path.join(ws(), snapshots()[0], "companion.json"), JSON.stringify({ pid: marker.pid, after: marker.pid }));
+  const sw = spawnSync(process.execPath, [ROUND, "sweep"], { env, encoding: "utf8" });
+  assert.equal(snapshots().length, 1, `a marker whose bounds are equal hides nothing: ${sw.stdout}`);
   signalPid(k.pid, "SIGKILL");
   assert.ok(await until(() => !alive(k.pid), 5000));
   assert.equal(round().code, 0);
@@ -1767,6 +1771,32 @@ test("units: goneGroupsLeft counts a gone broker's group even when its pid numbe
   assert.equal(goneGroupsLeft(rows, [700], 1500, 501), 1, "pid 700 is held by a process in another group; group 700's later member still counts");
   assert.equal(goneGroupsLeft(rows, [700], 1500, 502), 0, "another user's processes are not ours to count");
   assert.equal(goneGroupsLeft([row(700, 900, 2000)], [700], 1500, 501), 0, "an empty group: nothing left");
+});
+
+test("units: removeSnapshot streams a short temp dir against its cap: one past it is kept, with its snapshot, until it is back under", (t) => {
+  const token = "0123456789abcdef0123456789abcdef";
+  const root = fs.mkdtempSync(path.join(dir, "plugin-"));
+  const short = fs.mkdtempSync(path.join(os.tmpdir(), "rl-"));
+  t.after(() => fs.rmSync(fs.existsSync(short) ? short : `${short}.rm`, { recursive: true, force: true }));
+  fs.writeFileSync(path.join(short, ".review-loop-tmp"), token);
+  for (let i = 0; i < TMP_LIST_MAX; i++) fs.writeFileSync(path.join(short, `f${i}`), "");
+  fs.writeFileSync(path.join(root, "tmp.json"), JSON.stringify({ dir: short, token }));
+  const readdir = fs.readdirSync;
+  // Recorded, not asserted, in the spy: removeSnapshot turns a throw into "kept", which would pass for the cap.
+  /** @type {string[]} */
+  const listed = [];
+  t.mock.method(fs, "readdirSync", (/** @type {Parameters<typeof fs.readdirSync>} */ ...a) => {
+    if (String(a[0]).startsWith(short)) listed.push(String(a[0]));
+    return readdir(...a);
+  });
+  assert.equal(removeSnapshot(root), false, "past the cap: kept");
+  t.mock.restoreAll();
+  assert.deepEqual(listed, [], "the temp dir is never listed whole");
+  const held = fs.existsSync(short) ? short : `${short}.rm`;
+  assert.ok(fs.existsSync(path.join(root, "tmp.json")) && fs.existsSync(path.join(held, ".review-loop-tmp")), "the pointer and the token both stay, for the retry");
+  fs.rmSync(path.join(held, "f0"));
+  assert.equal(removeSnapshot(root), true, "back under the cap: removed");
+  assert.ok(!fs.existsSync(short) && !fs.existsSync(`${short}.rm`) && !fs.existsSync(root));
 });
 
 test("units: companionTmp records the short temp dir before making it", (t) => {
