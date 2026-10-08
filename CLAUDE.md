@@ -168,8 +168,9 @@ These are copied from the spec, and every task implicitly includes them.
     failure, never "no broker".
   - **The stop.** `broker/shutdown`, SIGTERM to the broker, then, on a fresh table, SIGKILL to the whole group
     after `signalGroupIfSame` re-reads the leader (`sameMember`: pid, lstart, pgid, args). Every signal here, the
-    SIGTERM and the signal path's included, is sent only right after `recheck` re-reads its pid and it compares the
-    same (rows `broker-sigterm-recheck`, `broker-leader-recheck`, `reap-recheck-identity`). A verified broker that
+    SIGTERM, each member's SIGKILL (stop-orphan's too, re-read after its leader check so no other ps sits between; the leader itself is signalled last in each pass, since one just SIGKILLed can read as another process while it exits and would pass for a reissue: row `orphan-leader-last`)
+    and the signal path's included, is sent only right after `recheck` re-reads its pid and it compares the same
+    (rows `broker-sigterm-recheck`, `broker-leader-recheck`, `reap-recheck-identity`, `orphan-member-recheck`). A verified broker that
     dies during the stop has its group emptied member by member (`deadGroupTargets`): the group's members started
     strictly after the snapshot's creation second (PPID ignored: grandchildren) AND already there, unchanged, at the
     stop's first read, each re-checked just before its SIGKILL. A broker.json pid already gone at the first read is

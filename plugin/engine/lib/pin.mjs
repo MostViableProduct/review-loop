@@ -1018,7 +1018,7 @@ export async function stopCompanionBroker(root, opts = {}) {
           keep("deadline");
           return res;
         }
-        const now = procRow(m.pid);
+        const now = recheck(m);
         if (now === null) keep("unknown_rows");
         else if (now !== "gone" && sameMember(now, m)) {
           signal(m.pid, "SIGKILL");
@@ -1744,16 +1744,20 @@ export async function stopOrphan(parentDir, o) {
     // reissued while its group lives) and every member now is the newcomer's. A reissue into another group proves
     // nothing about the old group, which is still emptied below.
     if (leaderReissued(table.find((p) => p.pid === first.pid) ?? "gone", first)) return stoppedIfStillGone();
-    const members = table.filter((p) => p.pgid === first.pid && p.uid === uid);
+    // The leader last: one just SIGKILLed can read as another process while it exits, which the next member's leader
+    // check would take for a reissue and end the pass with that member still running.
+    const members = table.filter((p) => p.pgid === first.pid && p.uid === uid).sort((a, b) => Number(a.pid === first.pid) - Number(b.pid === first.pid));
     if (members.length === 0) return "stopped";
     if (performance.now() >= until) return "still_running";
     for (const m of members) {
-      const now = procRow(m.pid);
-      if (now === null) return "unverified";
-      if (now === "gone" || !sameMember(now, m)) continue;
       const lead = procRow(first.pid);
       if (lead === null) return "unverified";
       if (leaderReissued(lead, first)) return stoppedIfStillGone();
+      // The member itself after every other ps, so nothing slow sits between its re-read and the signal: a pid reused
+      // since the table read is never signalled.
+      const now = recheck(m);
+      if (now === null) return "unverified";
+      if (now === "gone" || !sameMember(now, m)) continue;
       // Still an orphan's tree only while its snapshot is still gone, checked last, right at each signal: a restored
       // snapshot makes the tree a round's again.
       restoreSeam("kill");

@@ -607,6 +607,34 @@ test("orphaned_brokers: stop-orphan stops the child a broker leaves even when th
   assert.equal(spawnSync("/bin/ps", ["-o", "pid=", "-g", String(pid)], { encoding: "utf8" }).stdout.trim(), "", "the child it left is gone too");
 });
 
+test("orphaned_brokers: stop-orphan never SIGKILLs a member whose pid reads as another process right before the signal", { timeout: 40_000 }, async () => {
+  const h = healthy();
+  const pid = orphanBroker(h, { termLeavesChild: true });
+  const r = await check("orphaned_brokers").run(ctx());
+  const cmd = /stop-orphan --snapshot (\S+) --pid (\d+) --started (\d+) --args-sha ([0-9a-f]{64})/.exec(r.fix ?? "");
+  assert.ok(cmd, r.fix ?? "");
+  // A ps whose single-pid answers, for a member of the broker's group, read as another command: the table still
+  // lists the member, but its pid is someone else's by the time it would be signalled.
+  const fake = path.join(h, "member-reused-ps");
+  fs.mkdirSync(fake, { recursive: true });
+  const awk = `{ if ($4 == ${pid} && $2 != ${pid}) $0 = $0 " reused"; print }`;
+  // ps's own exit status is kept: a gone pid must still read as gone.
+  fs.writeFileSync(path.join(fake, "ps"), `#!/bin/sh\ncase " $* " in *" -p "*) out=$(/bin/ps "$@"); st=$?; printf '%s\\n' "$out" | /usr/bin/awk '${awk}'; exit $st;; esac\nexec /bin/ps "$@"\n`, { mode: 0o755 });
+  const engine = path.join(process.cwd(), "plugin", "engine", "review-round.mjs");
+  const { spawn } = await import("node:child_process");
+  const child = spawn(process.execPath, [engine, "stop-orphan", "--snapshot", cmd[1], "--pid", cmd[2], "--started", cmd[3], "--args-sha", cmd[4]], { env: { ...process.env, REVIEW_LOOP_TEST_SEAMS: "1", REVIEW_LOOP_TEST_PS_PATH: path.join(fake, "ps") }, stdio: ["ignore", "pipe", "ignore"] });
+  let out = "";
+  child.stdout.on("data", (d) => { out += d; });
+  await new Promise((res) => child.once("exit", res));
+  const left = spawnSync("/bin/ps", ["-o", "pid=", "-g", String(pid)], { encoding: "utf8" }).stdout.trim();
+  try {
+    assert.equal(JSON.parse(out).status, "still_running", out);
+    assert.notEqual(left, "", "the member that read as another process was never SIGKILLed");
+  } finally {
+    for (const m of left.split(/\s+/).filter(Boolean)) spawnSync("/bin/kill", ["-KILL", m]);
+  }
+});
+
 test("orphaned_brokers: stop-orphan signals nothing once the broker's pid is reissued to a process leading a new group of that id", { timeout: 30_000 }, async () => {
   const h = healthy();
   const pid = orphanBroker(h, { termLeavesChild: true });
