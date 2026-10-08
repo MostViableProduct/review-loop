@@ -26,7 +26,7 @@ import {
 } from "./lib/state.mjs";
 import { EXIT, OPTION_LABELS, applyRoundResult, applyDecision, awaitHuman, resetIfNewLoop, withoutWaived, exitForAwaiting } from "./lib/policy.mjs";
 import { scoreFindings, parseDimensionTag } from "./lib/scoring.mjs";
-import { verifyPin, verifyUsage, runCompanion, parseCompanionOutput, companionFailureText, writePin, pinFile, installedTreeDigest, snapshotVerified, stopCompanionBroker, sweepStaleSnapshots, afterSnapshotSecond, countOrphanBrokers, stopOrphan, STOP_DEADLINE_MS, SWEEP_MANUAL_DEADLINE_MS, SNAPSHOT_NAME } from "./lib/pin.mjs";
+import { verifyPin, verifyUsage, runCompanion, parseCompanionOutput, companionFailureText, writePin, pinFile, installedTreeDigest, snapshotVerified, stopCompanionBroker, sweepStaleSnapshots, afterSnapshotSecond, countOrphanBrokers, stopOrphan, STOP_DEADLINE_MS, SWEEP_MANUAL_DEADLINE_MS, SNAPSHOT_NAME, sweepEventData } from "./lib/pin.mjs";
 import { loadRubricSection, buildFocus } from "./lib/rubric.mjs";
 import { prepare, pushBranch, HumanNeeded, NON_RETRYABLE } from "./lib/round.mjs";
 import { repoRoot, headSha, implFingerprint, mergeBaseValidity, readArtifact } from "./lib/git.mjs";
@@ -383,16 +383,10 @@ async function sweepSnapshots(key, opts = {}) {
   // Each under the round that made the snapshot (owner.json's key), never the sweeping round's, as round.broker_stop.
   for (const origin of s.quarantined) reportQuarantined(origin);
   for (const st of s.stops) reportStop(st.origin, st.snapshot, st);
-  const skipped = [...s.skipped.values()];
-  const inUse = skipped.filter((k) => k === "in_use").length;
-  const unverified = skipped.length - inUse;
-  const bad = s.brokersLeft + s.unattributed + s.failed + unverified > 0 || s.incomplete;
+  const data = sweepEventData(s);
+  const bad = data.brokers_left + data.unattributed + data.failed + data.unverified > 0 || data.incomplete === 1;
   // counted is the last count (a full sweep re-counts after acting, down to 0), so held says whether it acted.
   if (s.counted === 0 && s.held === 0 && !bad) return s;
-  const data = {
-    swept: s.swept, brokers_left: s.brokersLeft, failed: s.failed, unattributed: s.unattributed, incomplete: s.incomplete ? 1 : 0, in_use: inUse, unverified,
-    held: s.held, partition: s.partition, partitions: s.partitions
-  };
   // Two literal sites, so scripts/list-codes.mjs (and T-OBS-3) sees the code.
   const ok = bad
     ? emitEvent({ source: "round", event: "round.sweep", code: "snapshot_sweep_incomplete", session_id: SESSION, artifact_key: key, data })

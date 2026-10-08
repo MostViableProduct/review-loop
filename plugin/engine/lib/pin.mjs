@@ -1104,7 +1104,7 @@ const REAP_BUDGET_MS = 3000;
  * to REAP_READS times: a broker the companion forked just before its group was killed can show in the table only after
  * the first read. Each read decides every pid at once: a pid is asked about alone only once a read has matched it to
  * this snapshot's broker leading its own group, never for each pid broker.json names (which is not read here). No read starts after REAP_BUDGET_MS, so the signal is
- * re-raised within that plus one ps timeout for the read in flight and one per broker matched. A read ps could not
+ * re-raised within that plus one ps timeout for the read or re-read in flight, however many brokers match. A read ps could not
  * answer decides nothing, so the next one retries every pid. One still missed keeps the snapshot (the next sweep).
  * @param {string} root
  */
@@ -1123,6 +1123,8 @@ function reapCompanionBroker(root) {
       if (p.pgid !== p.pid) continue;
       // Only a pid the read matched is asked about again, right before the signal: a broker that exited since, its pid
       // reused, is another process now and is never signalled. ps failing here decides nothing; the next read retries.
+      // None starts past the budget either: what is left then is the next sweep's.
+      if (Date.now() >= end) break;
       const now = recheck(p);
       if (now === null) continue;
       done.add(p.pid);
@@ -1495,6 +1497,21 @@ export async function sweepStaleSnapshots(parentDir, opts = {}) {
     }
     ({ n, w } = again);
   }
+}
+
+/**
+ * A sweep's round.sweep counts. A full sweep's add up over its passes (up to three), so each is held to the event
+ * catalog's bound (SWEEP_LIST_MAX), and one that reached it marks the sweep incomplete: its event is never refused.
+ * @param {SweepResult} s
+ */
+export function sweepEventData(s) {
+  const skipped = [...s.skipped.values()];
+  const inUse = skipped.filter((k) => k === "in_use").length;
+  const counts = [s.swept, s.brokersLeft, s.failed, s.unattributed, s.held, inUse, skipped.length - inUse];
+  const capped = counts.some((n) => n > SWEEP_LIST_MAX);
+  const [swept, brokers_left, failed, unattributed, held, in_use, unverified] = counts.map((n) => Math.min(n, SWEEP_LIST_MAX));
+  // In the catalog's key order, which validateLine checks.
+  return { swept, brokers_left, failed, unattributed, incomplete: s.incomplete || capped ? 1 : 0, held, partition: s.partition, partitions: s.partitions, in_use, unverified };
 }
 
 /**

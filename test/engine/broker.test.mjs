@@ -12,9 +12,10 @@ import { spawn, spawnSync } from "node:child_process";
 import { makeRepo, commitFile, writeFile, tmpDir, GIT_ENV } from "./helpers.mjs";
 import { isRealPid, signalPid } from "../fakes/signal.mjs";
 import { validateLine } from "../../plugin/engine/lib/events.mjs";
+import { EVENT_CATALOG } from "../../plugin/engine/lib/codes.mjs";
 import { processIdent } from "../../plugin/engine/lib/proc.mjs";
 import {
-  afterSnapshotSecond, brokerArgv, deadGroupTargets, namesUpTo, removeSnapshot, SWEEP_LIST_MAX, TMP_LIST_MAX, companionTmp, goneGroupsLeft, hashOf, isHeld, parseProcRow, partitionCount, runCompanion, sameMember, stopCompanionBroker, sweepStaleSnapshots, treeMembers
+  afterSnapshotSecond, brokerArgv, deadGroupTargets, namesUpTo, removeSnapshot, SWEEP_LIST_MAX, TMP_LIST_MAX, companionTmp, goneGroupsLeft, hashOf, isHeld, parseProcRow, partitionCount, runCompanion, sameMember, stopCompanionBroker, sweepEventData, sweepStaleSnapshots, treeMembers
 } from "../../plugin/engine/lib/pin.mjs";
 
 const HERE = path.dirname(new URL(import.meta.url).pathname);
@@ -468,6 +469,35 @@ test("H1: the signal path never signals a broker-shaped pid broker.json names th
   } finally {
     if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
     stray?.kill("SIGKILL");
+  }
+});
+
+test("H1: on the signal path no re-read starts past the budget, however many brokers a read matched", { timeout: 60_000 }, async () => {
+  // Each re-read takes 2.5 s (the seam), against a 3 s budget: two start (about 7 s to exit, with the round's own
+  // teardown), the other two are left for the next sweep; one per broker would take about 12 s.
+  const child = spawn(process.execPath, [ROUND, "run", "--kind", "spec", "--path", specRepo()], { env: { ...env, STUB_SLEEP_MS: "30000", REVIEW_LOOP_TEST_SEAMS: "1", REVIEW_LOOP_TEST_RECHECK_DELAY_MS: "2500" }, stdio: "ignore" });
+  /** @type {import("node:child_process").ChildProcess[]} */
+  const strays = [];
+  try {
+    assert.ok(await until(() => fs.existsSync(env.BROKER_READY), 20_000), "the companion started its broker");
+    assert.ok(await until(() => snapshots().length === 1, 5000));
+    const script = path.join(ws(), snapshots()[0], "scripts", "app-server-broker.mjs");
+    // Three more of this snapshot's brokers, each leading its own group: four matches in all.
+    for (let i = 0; i < 3; i++) {
+      const sock = path.join(dir, `many-${i}.sock`);
+      strays.push(spawn(process.execPath, [script, "serve", "--endpoint", `unix:${sock}`], { env: { ...env, BROKER_LOG: path.join(dir, `many-${i}.log`) }, detached: true, stdio: "ignore" }));
+      assert.ok(await until(() => fs.existsSync(sock), 5000));
+    }
+    const exited = new Promise((r) => child.once("exit", (_code, sig) => r(sig)));
+    const t0 = performance.now();
+    child.kill("SIGTERM");
+    assert.equal(await exited, "SIGTERM");
+    const took = performance.now() - t0;
+    assert.ok(took < 9500, `re-raised within the budget plus one re-read, not one re-read per broker: ${Math.round(took)} ms`);
+  } finally {
+    if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+    for (const p of strays) if (p.pid) signalPid(p.pid, "SIGKILL", { group: true });
+    for (const b of brokers()) signalPid(b.pid, "SIGKILL", { group: true });
   }
 });
 
@@ -1813,6 +1843,20 @@ test("units: removeSnapshot streams a short temp dir against its cap: one past i
   fs.rmSync(path.join(held, "f0"));
   assert.equal(removeSnapshot(root), true, "back under the cap: removed");
   assert.ok(!fs.existsSync(short) && !fs.existsSync(`${short}.rm`) && !fs.existsSync(root));
+});
+
+test("units: sweepEventData holds every round.sweep count to the catalog's bound, and one that reached it marks the sweep incomplete", () => {
+  const base = { swept: 0, brokersLeft: 0, unattributed: 0, failed: 0, incomplete: false, held: 0, partition: 0, partitions: 1, counted: 0, stops: [], skipped: new Map(), quarantined: [] };
+  const spec = EVENT_CATALOG["round.sweep"].data;
+  /** @param {Record<string, unknown>} d */
+  const takes = (d) => JSON.stringify(Object.keys(d)) === JSON.stringify(Object.keys(spec)) && Object.entries(spec).every(([k, check]) => check(d[k]) !== null);
+  const ok = sweepEventData({ ...base, swept: 3, held: 5 });
+  assert.deepEqual([ok.swept, ok.held, ok.incomplete], [3, 5, 0]);
+  assert.ok(takes(ok), JSON.stringify(ok));
+  // Three full passes over a directory at the cap hold three times as many names as any one pass.
+  const d = sweepEventData({ ...base, held: 3 * SWEEP_LIST_MAX, failed: SWEEP_LIST_MAX + 1 });
+  assert.deepEqual([d.held, d.failed, d.incomplete], [SWEEP_LIST_MAX, SWEEP_LIST_MAX, 1]);
+  assert.ok(takes(d), `the catalog takes it: ${JSON.stringify(d)}`);
 });
 
 test("units: companionTmp records the short temp dir before making it", (t) => {
