@@ -424,7 +424,8 @@ test("text mode prints a status word per check and a Fix line under each problem
   const text = lines.join("");
   assert.match(text, /FAIL\s+pin/);
   assert.match(text, /WARN\s+live[\s\S]*Fix: review-loop doctor --live/);
-  assert.equal(text.match(/OK/g)?.length, 19);
+  // Status words only, at the start of each check's line: a note can hold a temp path that happens to contain "OK".
+  assert.equal(text.match(/^(?:\u001b\[\d+m)?✓ OK\b/gm)?.length, 19);
   assert.equal(await main(["doctor", "--bogus"], io), 2);
   delete process.env.REVIEW_LOOP_PIN_FILE;
 });

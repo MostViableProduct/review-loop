@@ -252,8 +252,10 @@ These are copied from the spec, and every task implicitly includes them.
     `broker-leader-recheck`, `ps-table-self-row`, `leaderless-app-server-guard`, `companion-pid-onspawn`,
     `owner-marker-required`, `sweep-deadline`, `stop-honours-deadline`, `stop-orphan-recheck`,
     `sweep-stops-companion`. Test seams (all behind `REVIEW_LOOP_TEST_SEAMS=1`): `REVIEW_LOOP_TEST_KILL_NOOP`,
-    `REVIEW_LOOP_TEST_LEADER_RECHECK`, `REVIEW_LOOP_TEST_SWEEP_TICK`, `REVIEW_LOOP_TEST_SWEEP_PART`,
-    `REVIEW_LOOP_TEST_SNAPSHOT_AT_SECOND_START`.
+    `REVIEW_LOOP_TEST_LEADER_RECHECK`, `REVIEW_LOOP_TEST_RECHECK_DELAY_MS`, `REVIEW_LOOP_TEST_SWEEP_TICK`,
+    `REVIEW_LOOP_TEST_SWEEP_PART`, `REVIEW_LOOP_TEST_SNAPSHOT_AT_SECOND_START`. `recheck` can take up to a ps
+    timeout, so every signal with a deadline checks it again after the re-read (row
+    `broker-sigterm-deadline-after-recheck`).
   - The legacy engine outside this repo got its own minimal fix on 2026-10-05 (it stopped one broker tree per round
     from leaking); migrating to the plugin replaces it.
 - `hook.error` carries a `mode` field (Task 7): the hook mode for `hook_input_error` and `hook_error`, validated against the existing STAGES enum.

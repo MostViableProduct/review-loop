@@ -606,12 +606,15 @@ function procRow(pid) {
 
 /**
  * `p`'s pid read again, for every signal to compare with `p` (sameMember) right before it is sent, so a pid reused
- * since `p` was read is never signalled. The test seam makes the pid read as another process.
+ * since `p` was read is never signalled. It can take up to ps's timeout, so a caller with a deadline checks it again
+ * after. The test seams make the pid read as another process, or the re-read slow.
  * @param {Proc} p @returns {Proc | "gone" | null}
  */
 function recheck(p) {
-  const seam = process.env.REVIEW_LOOP_TEST_SEAMS === "1" && process.env.REVIEW_LOOP_TEST_LEADER_RECHECK === "changed";
-  return seam ? { ...p, lstart: "Thu Jan 1 00:00:00 1970" } : procRow(p.pid);
+  const seams = process.env.REVIEW_LOOP_TEST_SEAMS === "1";
+  const delay = seams ? Number(process.env.REVIEW_LOOP_TEST_RECHECK_DELAY_MS) : NaN;
+  if (delay > 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, delay);
+  return seams && process.env.REVIEW_LOOP_TEST_LEADER_RECHECK === "changed" ? { ...p, lstart: "Thu Jan 1 00:00:00 1970" } : procRow(p.pid);
 }
 
 /** The same process, unchanged: a pid that was reused differs in start time, group or args. @param {Proc} a @param {Proc} b */
@@ -989,6 +992,10 @@ export async function stopCompanionBroker(root, opts = {}) {
       const now = recheck(b);
       if (now === null) keep("unknown_rows");
       else if (now !== "gone" && sameMember(now, b)) {
+        if (remaining() <= 0) {
+          keep("deadline");
+          continue;
+        }
         signal(b.pid, "SIGTERM");
         await exitedWithin(b.pid, Math.min(2000, remaining()));
       }
@@ -1012,7 +1019,7 @@ export async function stopCompanionBroker(root, opts = {}) {
       // The same broker still there: its whole group is killed. Any other holder of the pid (a reissue) proves nothing
       // about the group, so it is handled as a gone leader's: only members seen unchanged at the first read.
       if (leaderNow && leaderThen && sameMember(leaderNow, leaderThen)) {
-        if (!signalGroupIfSame(leaderThen, "SIGKILL")) keep("unknown_rows");
+        if (!signalGroupIfSame(leaderThen, "SIGKILL", () => remaining() > 0)) keep(remaining() <= 0 ? "deadline" : "unknown_rows");
         killed = true;
         continue;
       }
@@ -1026,6 +1033,10 @@ export async function stopCompanionBroker(root, opts = {}) {
         const now = recheck(m);
         if (now === null) keep("unknown_rows");
         else if (now !== "gone" && sameMember(now, m)) {
+          if (remaining() <= 0) {
+            keep("deadline");
+            return res;
+          }
           signal(m.pid, "SIGKILL");
           killed = true;
         }
@@ -1147,10 +1158,11 @@ async function stopSnapshotCompanion(root, table, remaining) {
   if (found.some((c) => c.pgid !== c.pid)) return false;
   // No signal once the sweep's budget is spent: the snapshot is kept (reason "deadline") for the next sweep.
   if (remaining() <= 0) return false;
-  for (const c of found) if (!signalGroupIfSame(c, "SIGTERM")) return false;
+  const inTime = () => remaining() > 0;
+  for (const c of found) if (!signalGroupIfSame(c, "SIGTERM", inTime)) return false;
   for (const c of found) await exitedWithin(c.pid, Math.min(2000, remaining()));
   if (remaining() <= 0) return false;
-  for (const c of found) if (isAlive(c.pid) && !signalGroupIfSame(c, "SIGKILL")) return false;
+  for (const c of found) if (isAlive(c.pid) && !signalGroupIfSame(c, "SIGKILL", inTime)) return false;
   for (const c of found) await exitedWithin(c.pid, Math.min(1000, remaining()));
   // A companion that exits on SIGTERM can leave a child in its group, and with the leader gone that group is not
   // signalled again (see above): the snapshot is kept while anything of it remains.

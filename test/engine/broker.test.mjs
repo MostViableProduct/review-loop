@@ -1066,6 +1066,22 @@ test("C: a sweep stops acting at its deadline; the first act always runs", { tim
   for (const m of made) assert.ok(fs.existsSync(m.root), "an unstopped snapshot is kept");
 });
 
+test("B: a re-check that outlasts the stop's deadline sends no SIGTERM after it: the stop is kept as deadline", { timeout: 60_000 }, async () => {
+  const parent = path.join(dir, "ws-recheck-slow");
+  fs.mkdirSync(parent, { mode: 0o700 });
+  const s = await deadSnapshot(parent, { env: { FAKE_BROKER_IGNORE_SHUTDOWN: "1" } });
+  try {
+    // An ignored broker/shutdown waits 2 s and the exit 1 s, so about 1.5 s is left at the pre-check; the 3 s re-read
+    // then spends it, with 1.5 s of margin either way.
+    const r = await withSeams({ REVIEW_LOOP_TEST_RECHECK_DELAY_MS: "3000" }, () => stopCompanionBroker(s.root, { deadline: performance.now() + 4500 }));
+    assert.deepEqual([r.left, r.reason], [1, "deadline"], JSON.stringify(r));
+    assert.ok(!brokerLog().includes("sigterm"), `no SIGTERM once the budget is spent: ${brokerLog()}`);
+    assert.ok(alive(s.pid), "the broker is left for the next sweep");
+  } finally {
+    signalPid(s.pid, "SIGKILL", { group: true });
+  }
+});
+
 test("B: a leader whose re-check differs is not signalled, SIGTERM or SIGKILL, and the stop is unknown", { timeout: 60_000 }, async () => {
   const parent = path.join(dir, "ws-recheck");
   fs.mkdirSync(parent, { mode: 0o700 });
