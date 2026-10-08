@@ -1434,15 +1434,34 @@ export async function sweepStaleSnapshots(parentDir, opts = {}) {
     res.partitions = p;
     const residues = opts.all ? [...Array(p).keys()] : [((tick % p) + p) % p];
     // One pass holds what every residue needs (see isHeld): one partition for a round, all of them for the manual
-    // sweep. A round's partition holding more than 4 × part names stops collecting (vanishingly rare, and loud).
+    // sweep. A round's partition holding more than 4 × part names (vanishingly rare, and loud) keeps the 4 × part
+    // lowest by a hash salted with the tick, so which ones it holds turns each tick and none is left out for good
+    // (directory order never changes, so the first ones seen would be the same every sweep).
     /** @type {Map<number, string[]>} */
     const buckets = new Map(residues.map((k) => [k, []]));
+    /** @type {Map<number, number[]>} */
+    const ranks = new Map(residues.map((k) => [k, []]));
+    const cap = 4 * part;
     let over = false;
     const hw = walkSnapshots(parentDir, (name) => {
-      const held = buckets.get(hashOf(name) % p);
+      const k = hashOf(name) % p;
+      const held = buckets.get(k);
       if (!held) return;
-      if (!opts.all && held.length >= 4 * part) over = true;
-      else held.push(name);
+      if (opts.all) return void held.push(name);
+      const r = /** @type {number[]} */ (ranks.get(k));
+      const rank = hashOf(`${tick}/${name}`);
+      if (held.length < cap) {
+        held.push(name);
+        r.push(rank);
+        return;
+      }
+      over = true;
+      let worst = 0;
+      for (let i = 1; i < r.length; i++) if (r[i] > r[worst]) worst = i;
+      if (rank < r[worst]) {
+        held[worst] = name;
+        r[worst] = rank;
+      }
     }, remaining);
     if (hw !== "done" && hw !== "absent") {
       res.failed++;
@@ -1595,7 +1614,10 @@ async function sweepOne(root, name, table, remaining, anchor, tally) {
     // Re-checked just before the remove: still a real directory of ours, never a link swapped in, and nothing runs
     // from it now (a fresh read; an unreadable table keeps it).
     if (!ownedRealDirectory(root)) return "unverified";
-    if (runsFrom(root)) return { left: 1, unattributed: 0, reason: "members_left" };
+    const run = runsFrom(root);
+    if (run === "ours") return { left: 1, unattributed: 0, reason: "members_left" };
+    // Any other process naming it (one started since the judgment, or one the owner check never looks at) is using it.
+    if (run === "named") return "in_use";
     // The parent too, as it was when the sweep began: one swapped for a link since (a same-user race) would point the
     // remove somewhere else. This narrows that window; Node has no unlinkat to close it.
     const ws = dirIdentity(path.dirname(root));
@@ -1606,12 +1628,17 @@ async function sweepOne(root, name, table, remaining, anchor, tally) {
   }
 }
 
-/** Whether a companion or broker of this user runs from `root` now; true when that cannot be read. @param {string} root */
+/**
+ * What runs from `root` now: "ours" (a companion or broker of this user, or the table could not be read), "named" (any
+ * other process whose args name it), or null.
+ * @param {string} root @returns {"ours" | "named" | null}
+ */
 function runsFrom(root) {
   const procs = readProcs();
-  if (procs === null) return true;
+  if (procs === null) return "ours";
   const roots = rootsOf(root);
-  return procs.some((p) => p.uid === process.getuid?.() && (brokerArgv(p.args, roots) !== null || brokerArgv(p.args, roots, COMPANION_SCRIPT) !== null));
+  if (procs.some((p) => p.uid === process.getuid?.() && (brokerArgv(p.args, roots) !== null || brokerArgv(p.args, roots, COMPANION_SCRIPT) !== null))) return "ours";
+  return procs.some((p) => roots.some((r) => p.args.includes(r))) ? "named" : null;
 }
 
 /** Below every supported platform's sun_path size (macOS 104, Linux 108), less a terminating byte. */

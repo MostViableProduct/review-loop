@@ -240,7 +240,11 @@ These are copied from the spec, and every task implicitly includes them.
     nothing, so `reportStop` emits `hook.error` `broker_stop_failed` for it on the reason alone. A companion stop signals nothing once the budget is spent
     (`deadline`, snapshot kept). Two streaming passes over `ws/` (count, then hold one partition: `partitionCount(n)` is a power
     of two leaving ~16 per partition, `isHeld(hashOf(name), tick, P)` with `tick` = the minute). Powers of two nest,
-    so every snapshot is examined within 2^K minutes however `n` changes. A round's sweep has a 10 s deadline (the
+    so every snapshot is examined within 2^K minutes however `n` changes. A partition past its cap (4 × part) keeps
+    the cap's worth lowest by a tick-salted hash, so which it holds turns each minute and names that directory order
+    puts first never crowd the rest out for good (row `sweep-overflow-turns`). Right at the remove, a fresh table
+    keeps a snapshot any live process's args name as `in_use` (a companion or broker of ours keeps it as
+    `members_left`; row `sweep-remove-named-in-use`). A round's sweep has a 10 s deadline (the
     first act always runs; each stop gets the time left; a round's own stop gets 15 s). A dead owner's companion is
     stopped before its brokers (`stopSnapshotCompanion`).
   - **Operator surface.** `review-round.mjs sweep` (every partition, frozen count, exit 0 clean / 60 incomplete),

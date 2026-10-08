@@ -1082,6 +1082,56 @@ test("C: one partition per sweep, and every dead snapshot is reached within 2^K 
   assert.deepEqual(dead(), [], "every dead snapshot was reached within 64 ticks (P never exceeded 64)");
 });
 
+test("C: a partition past its cap turns which names it holds with the tick: names the first ones seen would always crowd out are still reached", { timeout: 120_000 }, async () => {
+  const parent = path.join(dir, "ws-overflow");
+  fs.mkdirSync(parent, { mode: 0o700 });
+  // 40 snapshots, all in residue 0 of the 16 partitions 40 makes at part 4 (and of every smaller power of two), so one
+  // partition holds 40 against its cap of 16.
+  const names = new Set();
+  while (names.size < 40) {
+    const n = `plugin-${Math.random().toString(36).slice(2, 8).padEnd(6, "0")}`;
+    if (/^plugin-[A-Za-z0-9]{6}$/.test(n) && hashOf(n) % 16 === 0) names.add(n);
+  }
+  const gone = spawnSync(process.execPath, ["-e", ""]).pid;
+  for (const n of names) {
+    fs.mkdirSync(path.join(parent, n, "scripts"), { recursive: true, mode: 0o700 });
+    fs.writeFileSync(path.join(parent, n, "owner.json"), JSON.stringify({ pid: gone, started: "Thu Jan 1 00:00:00 1970" }));
+  }
+  // The first 16 in directory order (the order every sweep reads) get a damaged, fresh owner.json (unverified): under
+  // first-come holding they would fill the partition on every sweep and the other 24, dead rounds', never be judged.
+  const order = [];
+  const d = fs.opendirSync(parent);
+  for (let e = d.readSync(); e !== null; e = d.readSync()) order.push(e.name);
+  d.closeSync();
+  const blockers = order.slice(0, 16);
+  for (const n of blockers) fs.writeFileSync(path.join(parent, n, "owner.json"), "{");
+  let sweeps = 0;
+  for (; sweeps < 20 && fs.readdirSync(parent).length > 16; sweeps++) {
+    await withSeams({ REVIEW_LOOP_TEST_SWEEP_TICK: String(16 * sweeps), REVIEW_LOOP_TEST_SWEEP_PART: "4" }, () => sweepStaleSnapshots(parent, { deadlineMs: 30_000 }));
+  }
+  assert.deepEqual(fs.readdirSync(parent).sort(), [...blockers].sort(), `every dead round's snapshot reached within ${sweeps} sweeps; only the unverified are left`);
+});
+
+test("R2: a dead round's snapshot that another live process names is kept in use at the remove, and swept once that process is gone", { timeout: 60_000 }, async () => {
+  const parent = path.join(dir, "ws-named");
+  fs.mkdirSync(parent, { mode: 0o700 });
+  const s = await deadSnapshot(parent, { broker: false });
+  // Not a companion or broker: some other process whose args name the snapshot.
+  const user = spawn(process.execPath, ["-e", "setTimeout(() => {}, 30000)", s.root], { stdio: "ignore" });
+  try {
+    assert.ok(await until(() => alive(/** @type {number} */ (user.pid)), 5000));
+    const res = await withSeams({ REVIEW_LOOP_TEST_SWEEP_TICK: "0" }, () => sweepStaleSnapshots(parent, { all: true }));
+    assert.equal(res.skipped.get(path.basename(s.root)), "in_use", JSON.stringify([...res.skipped]));
+    assert.ok(fs.existsSync(s.root), "kept while a process names it");
+  } finally {
+    user.kill("SIGKILL");
+  }
+  assert.ok(await until(() => !alive(/** @type {number} */ (user.pid)), 5000));
+  const res = await withSeams({ REVIEW_LOOP_TEST_SWEEP_TICK: "0" }, () => sweepStaleSnapshots(parent, { all: true }));
+  assert.equal(res.swept, 1, JSON.stringify(res));
+  assert.ok(!fs.existsSync(s.root));
+});
+
 test("C: a sweep stops acting at its deadline; the first act always runs", { timeout: 60_000 }, async () => {
   const parent = path.join(dir, "ws-deadline");
   fs.mkdirSync(parent, { mode: 0o700 });
