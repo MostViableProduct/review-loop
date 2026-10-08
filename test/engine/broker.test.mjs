@@ -1034,13 +1034,14 @@ test("C: a sweep stops acting at its deadline; the first act always runs", { tim
   for (const m of made) assert.ok(fs.existsSync(m.root), "an unstopped snapshot is kept");
 });
 
-test("B: a leader whose re-check differs is not signalled, and the stop is unknown", { timeout: 60_000 }, async () => {
+test("B: a leader whose re-check differs is not signalled, SIGTERM or SIGKILL, and the stop is unknown", { timeout: 60_000 }, async () => {
   const parent = path.join(dir, "ws-recheck");
   fs.mkdirSync(parent, { mode: 0o700 });
   const s = await deadSnapshot(parent, { env: { FAKE_BROKER_IGNORE_SHUTDOWN: "1", FAKE_BROKER_IGNORE_SIGTERM: "1" } });
   const r = await withSeams({ REVIEW_LOOP_TEST_LEADER_RECHECK: "changed" }, () => stopCompanionBroker(s.root));
   assert.deepEqual([r.left, r.reason], [1, "unknown_rows"]);
   assert.ok(alive(s.pid), "no group signal on a changed identity");
+  assert.ok(!brokerLog().includes("sigterm"), `no SIGTERM to a pid that reads as another process: ${brokerLog()}`);
   const r2 = await stopCompanionBroker(s.root);
   assert.deepEqual([r2.left, r2.reason], [0, null]);
   assert.ok(await until(() => !alive(s.pid), 3000));

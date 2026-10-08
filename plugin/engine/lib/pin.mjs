@@ -599,6 +599,16 @@ function procRow(pid) {
   return row && row.pid === pid ? row : null;
 }
 
+/**
+ * `p`'s pid read again, for every signal to compare with `p` (sameMember) right before it is sent, so a pid reused
+ * since `p` was read is never signalled. The test seam makes the pid read as another process.
+ * @param {Proc} p @returns {Proc | "gone" | null}
+ */
+function recheck(p) {
+  const seam = process.env.REVIEW_LOOP_TEST_SEAMS === "1" && process.env.REVIEW_LOOP_TEST_LEADER_RECHECK === "changed";
+  return seam ? { ...p, lstart: "Thu Jan 1 00:00:00 1970" } : procRow(p.pid);
+}
+
 /** The same process, unchanged: a pid that was reused differs in start time, group or args. @param {Proc} a @param {Proc} b */
 export const sameMember = (a, b) => a.pid === b.pid && a.lstart === b.lstart && a.pgid === b.pgid && a.args === b.args;
 
@@ -881,8 +891,7 @@ function removeSessionDir(dir) {
  * @param {Proc} p @param {NodeJS.Signals} sig
  */
 function signalGroupIfSame(p, sig, guard = () => true) {
-  const seam = process.env.REVIEW_LOOP_TEST_SEAMS === "1" && process.env.REVIEW_LOOP_TEST_LEADER_RECHECK === "changed";
-  const now = seam ? { ...p, lstart: "Thu Jan 1 00:00:00 1970" } : procRow(p.pid);
+  const now = recheck(p);
   if (now === "gone") return true;
   if (now === null || !sameMember(now, p)) return false;
   // The caller's own precondition, last of all, right before the signal.
@@ -972,7 +981,7 @@ export async function stopCompanionBroker(root, opts = {}) {
         keep("deadline");
         continue;
       }
-      const now = procRow(b.pid);
+      const now = recheck(b);
       if (now === null) keep("unknown_rows");
       else if (now !== "gone" && sameMember(now, b)) {
         signal(b.pid, "SIGTERM");
@@ -1098,7 +1107,7 @@ function reapCompanionBroker(root) {
       if (!registered.has(p.pid) && p.pgid !== p.pid) continue;
       // Only a pid the read matched is asked about again, right before the signal: a broker that exited since, its pid
       // reused, is another process now and is never signalled. ps failing here decides nothing; the next read retries.
-      const now = procRow(p.pid);
+      const now = recheck(p);
       if (now === null) continue;
       done.add(p.pid);
       if (now !== "gone" && sameMember(now, p) && now.uid === uid) signal(p.pid, "SIGTERM");
