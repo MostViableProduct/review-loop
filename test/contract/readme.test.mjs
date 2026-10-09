@@ -4,9 +4,9 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { tmpDir } from "../engine/helpers.mjs";
-import { splice } from "../../scripts/gen-readme-tables.mjs";
+import { splice, eventsTable } from "../../scripts/gen-readme-tables.mjs";
 import { SCHEMA } from "../../plugin/engine/lib/events.mjs";
-import { CODES } from "../../plugin/engine/lib/codes.mjs";
+import { CODES, EVENT_CATALOG } from "../../plugin/engine/lib/codes.mjs";
 import { MIN_CLAUDE } from "../../cli/lib/preflight.mjs";
 
 const GEN = path.resolve("scripts/gen-readme-tables.mjs");
@@ -71,6 +71,14 @@ test("M4: docs/TROUBLESHOOTING.md lists every live-check detail with its fix, an
 test("docs/EVENTS.md names the real event schema and field order", () => {
   assert.ok(EVENTS.includes(`\`${SCHEMA}\``), `EVENTS.md names ${SCHEMA}`);
   assert.ok(EVENTS.includes("`schema, ts, run_id, source, event, code, detail, exit_code, version, session_id, artifact_key, data`"));
+});
+
+test("docs/EVENTS.md lists every event type in the catalog, with its data fields (generated)", () => {
+  for (const [e, spec] of Object.entries(EVENT_CATALOG)) {
+    const fields = Object.keys(spec.data).map((f) => `\`${f}\``).join(", ") || "—";
+    assert.ok(EVENTS.includes(`| \`${e}\` | ${spec.sources.join(", ")} | ${fields} |`), e);
+  }
+  assert.ok(EVENTS.includes(`<!-- events:start -->\n${eventsTable()}\n<!-- events:end -->`), "the committed table is exactly what the generator writes");
 });
 
 test("CONTRIBUTING.md states the Intel CI runner ci.yml uses, and the Rosetta fallback (spec §10.3)", () => {

@@ -3,8 +3,10 @@ import assert from "node:assert/strict";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { spawnSync } from "node:child_process";
 import { tmpDir } from "../engine/helpers.mjs";
 import { makeFakeBin } from "../fakes/fakebin.mjs";
+import { signalPid } from "../fakes/signal.mjs";
 
 const bin = path.join(tmpDir(), "bin");
 process.env.PATH = `${bin}:/usr/bin:/bin`;
@@ -17,6 +19,7 @@ const { ownerSeam } = await import("../../cli/lib/configguard.mjs");
 const { PACKAGE_VERSION } = await import("../../plugin/engine/lib/events.mjs");
 const { CODES } = await import("../../plugin/engine/lib/codes.mjs");
 const { writePin, latestInstalledVersion } = await import("../../plugin/engine/lib/pin.mjs");
+const { processIdent } = await import("../../plugin/engine/lib/proc.mjs");
 const { sha256hex } = await import("../../plugin/engine/lib/fsutil.mjs");
 
 const claudeVersion = { stdout: `${MIN_CLAUDE} (Claude Code)\n` };
@@ -50,6 +53,65 @@ function healthy() {
 
 const writeConfig = (over = {}) => fs.writeFileSync(process.env.REVIEW_LOOP_CONFIG, JSON.stringify({ version: 1, preset: "default", codex: { model: null, effort: null }, rubricPath: null, events: { path: null }, ...over }));
 
+/** Orphan brokers the tests started, reaped at the end whatever the assertions said. @type {number[]} */
+const orphans = [];
+test.after(() => {
+  for (const pid of orphans) signalPid(pid, "SIGKILL", { group: true });
+});
+
+const STUBBORN_CHILD = 'spawn(process.execPath, ["-e", "process.on(\\"SIGTERM\\", () => {}); setInterval(() => {}, 1000)"], { stdio: "ignore" })';
+
+/**
+ * A broker running from a ws/ snapshot that has since been removed (an inherited leak): its args name the snapshot's
+ * broker script, it leads its own group, and it has a child in that group. `ignoreTerm`: the broker ignores SIGTERM;
+ * `termLeavesChild`: on SIGTERM it exits without closing its child; `termSpawnsChild`: on SIGTERM it first starts a
+ * new child (in its group, ignoring SIGTERM), then exits. `appServer`: the child is a `codex app-server` (by its
+ * command line) that ignores SIGTERM. `nonLeader`: the broker runs in its (exited) launcher's group, not its own.
+ * @param {string} h @param {{ ignoreTerm?: boolean, termLeavesChild?: boolean, termSpawnsChild?: boolean, appServer?: boolean, nonLeader?: boolean }} [o]
+ */
+function orphanBroker(h, o = {}) {
+  const root = path.join(h, "state", "ws", "plugin-AbC123");
+  fs.mkdirSync(path.join(root, "scripts"), { recursive: true, mode: 0o700 });
+  // When the broker outlasts or dodges SIGTERM, its child ignores SIGTERM too, so only a per-member SIGKILL ends it.
+  let child = o.termLeavesChild || o.ignoreTerm ? STUBBORN_CHILD : 'spawn("/bin/sleep", ["300"], { stdio: "ignore" })';
+  if (o.appServer) {
+    // `<dir>/codex app-server`: node, run through a link named codex, with the script `app-server` in its cwd.
+    const fake = path.join(h, "fake-codex");
+    fs.mkdirSync(fake, { recursive: true });
+    fs.symlinkSync(process.execPath, path.join(fake, "codex"));
+    fs.writeFileSync(path.join(fake, "app-server"), 'process.on("SIGTERM", () => {}); setInterval(() => {}, 1000);');
+    child = `spawn(${JSON.stringify(path.join(fake, "codex"))}, ["app-server"], { cwd: ${JSON.stringify(fake)}, stdio: "ignore" })`;
+  }
+  const src = `const { spawn } = await import("node:child_process"); ${child};${o.ignoreTerm ? ' process.on("SIGTERM", () => {});' : ""}${o.termLeavesChild ? " process.on(\"SIGTERM\", () => process.exit(0));" : ""}${o.termSpawnsChild ? ` process.on("SIGTERM", () => { ${STUBBORN_CHILD}; setTimeout(() => process.exit(0), 200); });` : ""} setTimeout(() => {}, 120_000);`;
+  fs.writeFileSync(path.join(root, "scripts", "app-server-broker.mjs"), src);
+  // Started through a parent that exits at once, so it is reparented to launchd like a real leftover (and reaped by
+  // it, not left a zombie of this test process).
+  const broker = JSON.stringify(path.join(root, "scripts", "app-server-broker.mjs"));
+  let c;
+  let group;
+  if (o.nonLeader) {
+    // A detached launcher (its own group) starts the broker in that group and exits: the broker leads nothing.
+    const pidFile = path.join(h, "non-leader.pid");
+    const launcher = path.join(h, "launcher.mjs");
+    fs.writeFileSync(launcher, `import { spawn } from "node:child_process"; import fs from "node:fs"; const b = spawn(process.execPath, [${broker}, "serve"], { stdio: "ignore" }); b.unref(); fs.writeFileSync(${JSON.stringify(pidFile)}, String(b.pid)); setTimeout(() => process.exit(0), 300);`);
+    const launch = `const c = require("node:child_process").spawn(process.execPath, [${JSON.stringify(launcher)}], { detached: true, stdio: "ignore" }); c.unref(); process.stdout.write(String(c.pid));`;
+    group = Number(spawnSync(process.execPath, ["-e", launch], { encoding: "utf8" }).stdout);
+    const until = Date.now() + 5000;
+    while (Date.now() < until && !(fs.existsSync(pidFile) && fs.readFileSync(pidFile, "utf8"))) spawnSync("/bin/sleep", ["0.05"]);
+    c = { pid: Number(fs.readFileSync(pidFile, "utf8")) };
+  } else {
+    const launch = `const c = require("node:child_process").spawn(process.execPath, [${broker}, "serve"], { detached: true, stdio: "ignore" }); c.unref(); process.stdout.write(String(c.pid));`;
+    c = { pid: Number(spawnSync(process.execPath, ["-e", launch], { encoding: "utf8" }).stdout) };
+    group = c.pid;
+  }
+  orphans.push(group);
+  // The broker has read its script by the time its child exists; then the snapshot can go.
+  const end = Date.now() + 5000;
+  while (Date.now() < end && spawnSync("/bin/ps", ["-o", "pid=", "-g", String(group)], { encoding: "utf8" }).stdout.trim().split("\n").length < 2 + (o.nonLeader ? 1 : 0)) spawnSync("/bin/sleep", ["0.05"]);
+  fs.rmSync(root, { recursive: true });
+  return /** @type {number} */ (c.pid);
+}
+
 /** One fixture per check id, each driving that check to fail (or warn). A new check without a fixture fails T-DOC-1. */
 const FAIL_FIXTURES = {
   claude: () => makeFakeBin(bin, "claude", { "*": { code: 127 } }),
@@ -71,9 +133,10 @@ const FAIL_FIXTURES = {
   skill_duplicate: (h) => { fs.mkdirSync(path.join(h, ".claude", "skills", "review-loop"), { recursive: true }); fs.writeFileSync(path.join(h, ".claude", "skills", "review-loop", "SKILL.md"), "x"); },
   settings_backup_modified: (h) => { const d = path.join(h, "state", "settings-backups"); fs.mkdirSync(d, { recursive: true, mode: 0o700 }); fs.writeFileSync(path.join(d, "settings.json.2026-01-01T00-00-00-000Z-deadbeef"), "changed"); },
   settings_tmp_leftover: (h) => fs.writeFileSync(path.join(h, ".claude", ".settings.json.review-loop-1-abcdef12.tmp"), "{}"),
+  orphaned_brokers: (h) => { orphanBroker(h); },
   live: () => {}
 };
-const WARN_ONLY = new Set(["gh", "pr_binding", "settings_backup_modified", "settings_tmp_leftover", "live"]);
+const WARN_ONLY = new Set(["gh", "pr_binding", "settings_backup_modified", "settings_tmp_leftover", "orphaned_brokers", "live"]);
 
 test("T-DOC-1: every doctor check has a failing fixture", () => {
   assert.deepEqual(DOCTOR_CHECKS.map((c) => c.id).sort(), Object.keys(FAIL_FIXTURES).sort());
@@ -83,7 +146,7 @@ test("T-DOC-1: the check ids are the spec §6.5 list, in order", () => {
   assert.deepEqual(DOCTOR_CHECKS.map((c) => c.id), [
     "claude", "codex_cli", "codex_auth", "codex_plugin", "gh", "plugin_installed", "version_skew", "legacy_hooks",
     "ask_rules", "config", "rubric", "pin", "pr_binding", "state_dir", "node_for_hooks", "events_writable",
-    "skill_duplicate", "settings_backup_modified", "settings_tmp_leftover", "live"
+    "skill_duplicate", "settings_backup_modified", "settings_tmp_leftover", "orphaned_brokers", "live"
   ]);
 });
 
@@ -361,7 +424,8 @@ test("text mode prints a status word per check and a Fix line under each problem
   const text = lines.join("");
   assert.match(text, /FAIL\s+pin/);
   assert.match(text, /WARN\s+live[\s\S]*Fix: review-loop doctor --live/);
-  assert.equal(text.match(/OK/g)?.length, 18);
+  // Status words only, at the start of each check's line: a note can hold a temp path that happens to contain "OK".
+  assert.equal(text.match(/^(?:\u001b\[\d+m)?✓ OK\b/gm)?.length, 19);
   assert.equal(await main(["doctor", "--bogus"], io), 2);
   delete process.env.REVIEW_LOOP_PIN_FILE;
 });
@@ -465,4 +529,339 @@ test("a note capped at 200 characters never splits a surrogate pair", async () =
   assert.equal(Array.from(capped).length, 200);
   assert.ok(capped.endsWith("😀…"));
   assert.equal(capNote("short"), "short");
+});
+
+test("orphaned_brokers: never signals; the stop-orphan command it prints stops the tree, and refuses a changed process", { timeout: 30_000 }, async () => {
+  const h = healthy();
+  const pid = orphanBroker(h, { ignoreTerm: true });
+  const r = await check("orphaned_brokers").run(ctx());
+  assert.equal(r.status, "warn");
+  assert.ok(process.kill(pid, 0), "doctor signalled nothing");
+  const cmd = /stop-orphan --snapshot (\S+) --pid (\d+) --started (\d+) --args-sha ([0-9a-f]{64})/.exec(r.fix ?? "");
+  assert.ok(cmd, r.fix ?? "");
+  const engine = path.join(process.cwd(), "plugin", "engine", "review-round.mjs");
+  const run = (/** @type {string} */ started) => spawnSync(process.execPath, [engine, "stop-orphan", "--snapshot", cmd[1], "--pid", cmd[2], "--started", started, "--args-sha", cmd[4]], { env: process.env, encoding: "utf8", timeout: 20_000 });
+  const off = run(String(Number(cmd[3]) + 1));
+  assert.equal(off.status, 60, off.stdout);
+  assert.equal(JSON.parse(off.stdout).status, "mismatch");
+  assert.ok(process.kill(pid, 0), "a start time that does not match signals nothing");
+  const bad = spawnSync(process.execPath, [engine, "stop-orphan", "--snapshot", "../x", "--pid", cmd[2], "--started", cmd[3], "--args-sha", cmd[4]], { env: process.env, encoding: "utf8" });
+  assert.equal(bad.status, 30, bad.stdout);
+  assert.equal(JSON.parse(bad.stdout).error.code, "bad_args");
+  const ok = run(cmd[3]);
+  assert.equal(ok.status, 0, ok.stdout);
+  assert.equal(JSON.parse(ok.stdout).status, "stopped");
+  assert.equal(spawnSync("/bin/ps", ["-o", "pid=", "-g", String(pid)], { encoding: "utf8" }).stdout.trim(), "", "the broker and the child that ignored SIGTERM are gone");
+  assert.equal((await check("orphaned_brokers").run(ctx())).status, "pass");
+});
+
+test("orphaned_brokers: a process table that cannot be read is a warning, never a pass", async () => {
+  healthy();
+  makeFakeBin(bin, "ps", { "*": { code: 2 } });
+  // Through the engine's seam: it runs /bin/ps, never the PATH one.
+  process.env.REVIEW_LOOP_TEST_SEAMS = "1";
+  process.env.REVIEW_LOOP_TEST_PS_PATH = path.join(bin, "ps");
+  try {
+    const r = await check("orphaned_brokers").run(ctx());
+    assert.equal(r.status, "warn");
+    assert.match(r.note ?? "", /unverified/);
+  } finally {
+    delete process.env.REVIEW_LOOP_TEST_SEAMS;
+    delete process.env.REVIEW_LOOP_TEST_PS_PATH;
+    fs.rmSync(path.join(bin, "ps"), { force: true });
+  }
+});
+
+test("orphaned_brokers: stop-orphan also stops the child a broker leaves behind when it exits on SIGTERM", { timeout: 30_000 }, async () => {
+  const h = healthy();
+  const pid = orphanBroker(h, { termLeavesChild: true });
+  const r = await check("orphaned_brokers").run(ctx());
+  const cmd = /stop-orphan --snapshot (\S+) --pid (\d+) --started (\d+) --args-sha ([0-9a-f]{64})/.exec(r.fix ?? "");
+  assert.ok(cmd, r.fix ?? "");
+  const engine = path.join(process.cwd(), "plugin", "engine", "review-round.mjs");
+  const ok = spawnSync(process.execPath, [engine, "stop-orphan", "--snapshot", cmd[1], "--pid", cmd[2], "--started", cmd[3], "--args-sha", cmd[4]], { env: process.env, encoding: "utf8", timeout: 20_000 });
+  assert.equal(ok.status, 0, ok.stdout);
+  assert.equal(JSON.parse(ok.stdout).status, "stopped");
+  assert.equal(spawnSync("/bin/ps", ["-o", "pid=", "-g", String(pid)], { encoding: "utf8" }).stdout.trim(), "", "the child it left is gone too");
+});
+
+test("orphaned_brokers: stop-orphan stops the child a broker leaves even when the broker's pid is then held by another process", { timeout: 30_000 }, async () => {
+  const h = healthy();
+  const pid = orphanBroker(h, { termLeavesChild: true });
+  const r = await check("orphaned_brokers").run(ctx());
+  const cmd = /stop-orphan --snapshot (\S+) --pid (\d+) --started (\d+) --args-sha ([0-9a-f]{64})/.exec(r.fix ?? "");
+  assert.ok(cmd, r.fix ?? "");
+  // A ps whose table reads show, for a group whose leader is gone, a row holding the leader's pid in another group.
+  const fake = path.join(h, "reused-ps");
+  fs.mkdirSync(fake, { recursive: true });
+  const awk = `{ print; pid[$2] = 1; if ($4 == ${pid} && $2 != ${pid}) u = $1 } END { if (u != "" && !(${pid} in pid)) printf "%5d %5d     1     1 Thu Jan  1 00:00:00 2026 /usr/bin/true reused\\n", u, ${pid} }`;
+  fs.writeFileSync(path.join(fake, "ps"), `#!/bin/sh\ncase " $* " in *" -A "*) /bin/ps "$@" | /usr/bin/awk '${awk}'; exit 0;; esac\nexec /bin/ps "$@"\n`, { mode: 0o755 });
+  const engine = path.join(process.cwd(), "plugin", "engine", "review-round.mjs");
+  const { spawn } = await import("node:child_process");
+  // Not spawnSync: this process must stay free to reap the broker, so its pid really leaves the table.
+  const child = spawn(process.execPath, [engine, "stop-orphan", "--snapshot", cmd[1], "--pid", cmd[2], "--started", cmd[3], "--args-sha", cmd[4]], { env: { ...process.env, REVIEW_LOOP_TEST_SEAMS: "1", REVIEW_LOOP_TEST_PS_PATH: path.join(fake, "ps") }, stdio: ["ignore", "pipe", "ignore"] });
+  let out = "";
+  child.stdout.on("data", (d) => { out += d; });
+  const code = await new Promise((res) => child.once("exit", res));
+  assert.equal(code, 0, out);
+  assert.equal(JSON.parse(out).status, "stopped");
+  assert.equal(spawnSync("/bin/ps", ["-o", "pid=", "-g", String(pid)], { encoding: "utf8" }).stdout.trim(), "", "the child it left is gone too");
+});
+
+test("orphaned_brokers: stop-orphan never SIGKILLs a member whose pid reads as another process right before the signal", { timeout: 40_000 }, async () => {
+  const h = healthy();
+  const pid = orphanBroker(h, { termLeavesChild: true });
+  const r = await check("orphaned_brokers").run(ctx());
+  const cmd = /stop-orphan --snapshot (\S+) --pid (\d+) --started (\d+) --args-sha ([0-9a-f]{64})/.exec(r.fix ?? "");
+  assert.ok(cmd, r.fix ?? "");
+  // A ps whose single-pid answers, for a member of the broker's group, read as another command: the table still
+  // lists the member, but its pid is someone else's by the time it would be signalled.
+  const fake = path.join(h, "member-reused-ps");
+  fs.mkdirSync(fake, { recursive: true });
+  const awk = `{ if ($4 == ${pid} && $2 != ${pid}) $0 = $0 " reused"; print }`;
+  // ps's own exit status is kept: a gone pid must still read as gone.
+  fs.writeFileSync(path.join(fake, "ps"), `#!/bin/sh\ncase " $* " in *" -p "*) out=$(/bin/ps "$@"); st=$?; printf '%s\\n' "$out" | /usr/bin/awk '${awk}'; exit $st;; esac\nexec /bin/ps "$@"\n`, { mode: 0o755 });
+  const engine = path.join(process.cwd(), "plugin", "engine", "review-round.mjs");
+  const { spawn } = await import("node:child_process");
+  const child = spawn(process.execPath, [engine, "stop-orphan", "--snapshot", cmd[1], "--pid", cmd[2], "--started", cmd[3], "--args-sha", cmd[4]], { env: { ...process.env, REVIEW_LOOP_TEST_SEAMS: "1", REVIEW_LOOP_TEST_PS_PATH: path.join(fake, "ps") }, stdio: ["ignore", "pipe", "ignore"] });
+  let out = "";
+  child.stdout.on("data", (d) => { out += d; });
+  await new Promise((res) => child.once("exit", res));
+  const left = spawnSync("/bin/ps", ["-o", "pid=", "-g", String(pid)], { encoding: "utf8" }).stdout.trim();
+  try {
+    assert.equal(JSON.parse(out).status, "still_running", out);
+    assert.notEqual(left, "", "the member that read as another process was never SIGKILLed");
+  } finally {
+    for (const m of left.split(/\s+/).filter(Boolean)) spawnSync("/bin/kill", ["-KILL", m]);
+  }
+});
+
+test("orphaned_brokers: stop-orphan signals nothing once the broker's pid is reissued to a process leading a new group of that id", { timeout: 30_000 }, async () => {
+  const h = healthy();
+  const pid = orphanBroker(h, { termLeavesChild: true });
+  const r = await check("orphaned_brokers").run(ctx());
+  const cmd = /stop-orphan --snapshot (\S+) --pid (\d+) --started (\d+) --args-sha ([0-9a-f]{64})/.exec(r.fix ?? "");
+  assert.ok(cmd, r.fix ?? "");
+  // A ps whose table reads show the leader's pid held by a newcomer leading its own group of that id (pgid = pid).
+  const fake = path.join(h, "reused-ps");
+  fs.mkdirSync(fake, { recursive: true });
+  const awk = `{ print; pid[$2] = 1; if ($4 == ${pid} && $2 != ${pid}) u = $1 } END { if (u != "" && !(${pid} in pid)) printf "%5d %5d     1 %5d Thu Jan  1 00:00:00 2026 /usr/bin/true reused\\n", u, ${pid}, ${pid} }`;
+  fs.writeFileSync(path.join(fake, "ps"), `#!/bin/sh\ncase " $* " in *" -A "*) /bin/ps "$@" | /usr/bin/awk '${awk}'; exit 0;; esac\nexec /bin/ps "$@"\n`, { mode: 0o755 });
+  const member = Number(spawnSync("/bin/ps", ["-o", "pid=", "-g", String(pid)], { encoding: "utf8" }).stdout.trim().split(/\s+/).find((p) => Number(p) !== pid));
+  const engine = path.join(process.cwd(), "plugin", "engine", "review-round.mjs");
+  const { spawn } = await import("node:child_process");
+  // Not spawnSync: this process must stay free to reap the broker, so its pid really leaves the table.
+  const child = spawn(process.execPath, [engine, "stop-orphan", "--snapshot", cmd[1], "--pid", cmd[2], "--started", cmd[3], "--args-sha", cmd[4]], { env: { ...process.env, REVIEW_LOOP_TEST_SEAMS: "1", REVIEW_LOOP_TEST_PS_PATH: path.join(fake, "ps") }, stdio: ["ignore", "pipe", "ignore"] });
+  let out = "";
+  child.stdout.on("data", (d) => { out += d; });
+  const code = await new Promise((res) => child.once("exit", res));
+  assert.equal(code, 0, out);
+  assert.equal(JSON.parse(out).status, "stopped");
+  // An id is never reissued while its group lives, so the group seen now is the newcomer's: nothing in it is signalled.
+  try {
+    assert.ok(process.kill(member, 0), "no SIGKILL reached a member once the leader's pid led a new group");
+  } finally {
+    signalPid(member, "SIGKILL");
+  }
+});
+
+test("orphaned_brokers: stop-orphan never reports a reissued leader stopped once the snapshot is back", { timeout: 30_000 }, async () => {
+  const h = healthy();
+  const pid = orphanBroker(h, { termLeavesChild: true });
+  const r = await check("orphaned_brokers").run(ctx());
+  const cmd = /stop-orphan --snapshot (\S+) --pid (\d+) --started (\d+) --args-sha ([0-9a-f]{64})/.exec(r.fix ?? "");
+  assert.ok(cmd, r.fix ?? "");
+  // The same reissued leader, and the snapshot restored at that moment (by the ps that first shows the newcomer).
+  const fake = path.join(h, "reused-ps");
+  fs.mkdirSync(fake, { recursive: true });
+  const awk = `{ print; pid[$2] = 1; if ($4 == ${pid} && $2 != ${pid}) u = $1 } END { if (u != "" && !(${pid} in pid)) printf "%5d %5d     1 %5d Thu Jan  1 00:00:00 2026 /usr/bin/true reused\\n", u, ${pid}, ${pid} }`;
+  fs.writeFileSync(path.join(fake, "ps"), `#!/bin/sh\ncase " $* " in *" -A "*) /bin/ps -p ${pid} >/dev/null || /bin/mkdir -p ${JSON.stringify(path.join(h, "state", "ws", cmd[1]))}; /bin/ps "$@" | /usr/bin/awk '${awk}'; exit 0;; esac\nexec /bin/ps "$@"\n`, { mode: 0o755 });
+  const member = Number(spawnSync("/bin/ps", ["-o", "pid=", "-g", String(pid)], { encoding: "utf8" }).stdout.trim().split(/\s+/).find((p) => Number(p) !== pid));
+  const engine = path.join(process.cwd(), "plugin", "engine", "review-round.mjs");
+  const { spawn } = await import("node:child_process");
+  // Not spawnSync: this process must stay free to reap the broker, so its pid really leaves the table.
+  const child = spawn(process.execPath, [engine, "stop-orphan", "--snapshot", cmd[1], "--pid", cmd[2], "--started", cmd[3], "--args-sha", cmd[4]], { env: { ...process.env, REVIEW_LOOP_TEST_SEAMS: "1", REVIEW_LOOP_TEST_PS_PATH: path.join(fake, "ps") }, stdio: ["ignore", "pipe", "ignore"] });
+  let out = "";
+  child.stdout.on("data", (d) => { out += d; });
+  const code = await new Promise((res) => child.once("exit", res));
+  assert.equal(code, 60, out);
+  assert.equal(JSON.parse(out).status, "mismatch");
+  try {
+    assert.ok(process.kill(member, 0), "nothing was signalled");
+  } finally {
+    signalPid(member, "SIGKILL");
+  }
+});
+
+test("orphaned_brokers: stop-orphan sends no SIGKILL once the snapshot is back", { timeout: 30_000 }, async () => {
+  const h = healthy();
+  const pid = orphanBroker(h, { ignoreTerm: true });
+  const r = await check("orphaned_brokers").run(ctx());
+  const cmd = /stop-orphan --snapshot (\S+) --pid (\d+) --started (\d+) --args-sha ([0-9a-f]{64})/.exec(r.fix ?? "");
+  assert.ok(cmd, r.fix ?? "");
+  const engine = path.join(process.cwd(), "plugin", "engine", "review-round.mjs");
+  const { spawn } = await import("node:child_process");
+  const child = spawn(process.execPath, [engine, "stop-orphan", "--snapshot", cmd[1], "--pid", cmd[2], "--started", cmd[3], "--args-sha", cmd[4]], { env: process.env, stdio: ["ignore", "pipe", "ignore"] });
+  let out = "";
+  child.stdout.on("data", (d) => { out += d; });
+  const code = new Promise((res) => child.once("close", res));
+  // While it waits out the broker's ignored SIGTERM, the snapshot comes back.
+  await new Promise((res) => setTimeout(res, 1500));
+  fs.mkdirSync(path.join(h, "state", "ws", cmd[1]), { recursive: true });
+  assert.equal(await code, 60, out);
+  assert.equal(JSON.parse(out).status, "mismatch");
+  assert.ok(process.kill(pid, 0), "the broker was not SIGKILLed");
+  assert.equal(spawnSync("/bin/ps", ["-o", "pid=", "-g", String(pid)], { encoding: "utf8" }).stdout.trim().split("\n").length, 2, "nor its child");
+});
+
+test("orphaned_brokers: stop-orphan also stops a child spawned on SIGTERM, after any one read of the group", { timeout: 40_000 }, async () => {
+  const h = healthy();
+  const pid = orphanBroker(h, { termSpawnsChild: true });
+  const r = await check("orphaned_brokers").run(ctx());
+  const cmd = /stop-orphan --snapshot (\S+) --pid (\d+) --started (\d+) --args-sha ([0-9a-f]{64})/.exec(r.fix ?? "");
+  assert.ok(cmd, r.fix ?? "");
+  const engine = path.join(process.cwd(), "plugin", "engine", "review-round.mjs");
+  const ok = spawnSync(process.execPath, [engine, "stop-orphan", "--snapshot", cmd[1], "--pid", cmd[2], "--started", cmd[3], "--args-sha", cmd[4]], { env: process.env, encoding: "utf8", timeout: 30_000 });
+  assert.equal(ok.status, 0, ok.stdout);
+  assert.equal(JSON.parse(ok.stdout).status, "stopped");
+  assert.equal(spawnSync("/bin/ps", ["-o", "pid=", "-g", String(pid)], { encoding: "utf8" }).stdout.trim(), "", "the late child is gone too");
+});
+
+test("orphaned_brokers: a linked ws/ is never followed; the check is unverified", async () => {
+  const h = healthy();
+  const elsewhere = path.join(h, "elsewhere");
+  fs.mkdirSync(elsewhere);
+  fs.rmSync(path.join(h, "state", "ws"), { recursive: true, force: true });
+  fs.symlinkSync(elsewhere, path.join(h, "state", "ws"));
+  const r = await check("orphaned_brokers").run(ctx());
+  assert.equal(r.status, "warn");
+  assert.match(r.note ?? "", /unverified/);
+});
+
+test("orphaned_brokers: a live broker whose snapshot name now holds a link or a file is unverified, never taken as a snapshot", { timeout: 30_000 }, async () => {
+  const h = healthy();
+  const pid = orphanBroker(h);
+  const entry = path.join(h, "state", "ws", "plugin-AbC123");
+  const elsewhere = path.join(h, "elsewhere-snapshot");
+  fs.mkdirSync(elsewhere);
+  try {
+    for (const make of [() => fs.symlinkSync(elsewhere, entry), () => fs.writeFileSync(entry, "")]) {
+      make();
+      const r = await check("orphaned_brokers").run(ctx());
+      assert.equal(r.status, "warn");
+      assert.match(r.note ?? "", /unverified/);
+      assert.match(r.fix ?? "", /ls -la/);
+      assert.doesNotMatch(r.fix ?? "", /stop-orphan/, "no command acts on a broker whose snapshot cannot be told apart");
+      fs.rmSync(entry, { force: true });
+    }
+  } finally {
+    signalPid(pid, "SIGKILL", { group: true });
+  }
+});
+
+test("orphaned_brokers: stop-orphan re-reads the leader right at its SIGTERM; a changed leader is never signalled", { timeout: 30_000 }, async () => {
+  const h = healthy();
+  const pid = orphanBroker(h);
+  const r = await check("orphaned_brokers").run(ctx());
+  const cmd = /stop-orphan --snapshot (\S+) --pid (\d+) --started (\d+) --args-sha ([0-9a-f]{64})/.exec(r.fix ?? "");
+  assert.ok(cmd, r.fix ?? "");
+  const engine = path.join(process.cwd(), "plugin", "engine", "review-round.mjs");
+  // The seam makes the leader read at the signal differ from the one checked before it.
+  const out = spawnSync(process.execPath, [engine, "stop-orphan", "--snapshot", cmd[1], "--pid", cmd[2], "--started", cmd[3], "--args-sha", cmd[4]], { env: { ...process.env, REVIEW_LOOP_TEST_SEAMS: "1", REVIEW_LOOP_TEST_LEADER_RECHECK: "changed" }, encoding: "utf8", timeout: 20_000 });
+  try {
+    assert.equal(out.status, 60, out.stdout);
+    assert.equal(JSON.parse(out.stdout).status, "mismatch");
+    assert.ok(process.kill(pid, 0), "the group was not signalled");
+  } finally {
+    signalPid(pid, "SIGKILL", { group: true });
+  }
+});
+
+test("orphaned_brokers: a ws/plugin-* entry that is a link or a file, with no broker, is unverified, never a pass", async () => {
+  const h = healthy();
+  const entry = path.join(h, "state", "ws", "plugin-Odd001");
+  fs.mkdirSync(path.dirname(entry), { recursive: true, mode: 0o700 });
+  const elsewhere = path.join(h, "elsewhere-entry");
+  fs.mkdirSync(elsewhere);
+  for (const make of [() => fs.symlinkSync(elsewhere, entry), () => fs.writeFileSync(entry, "")]) {
+    make();
+    const r = await check("orphaned_brokers").run(ctx());
+    assert.equal(r.status, "warn");
+    assert.match(r.note ?? "", /unverified/);
+    assert.match(r.fix ?? "", /ls -la/);
+    fs.rmSync(entry, { force: true });
+  }
+  assert.equal((await check("orphaned_brokers").run(ctx())).status, "pass", "and with it gone, a pass");
+});
+
+test("orphaned_brokers: a leftover broker that does not lead its group is listed to inspect, with no stop-orphan command", { timeout: 30_000 }, async () => {
+  const h = healthy();
+  const pid = orphanBroker(h, { nonLeader: true });
+  const pgid = Number(spawnSync("/bin/ps", ["-o", "pgid=", "-p", String(pid)], { encoding: "utf8" }).stdout.trim());
+  assert.notEqual(pgid, pid, "the fixture's broker leads no group");
+  const r = await check("orphaned_brokers").run(ctx());
+  assert.equal(r.status, "warn");
+  assert.match(r.fix ?? "", new RegExp(`broker ${pid} \\(snapshot plugin-AbC123 removed\\) does not lead its process group[^\\n]*-g ${pgid}`));
+  assert.doesNotMatch(r.fix ?? "", /stop-orphan --snapshot/, "stop-orphan refuses a non-leader, so no command is offered");
+  assert.ok(process.kill(pid, 0), "and nothing was signalled");
+});
+
+test("orphaned_brokers: a snapshot whose owner cannot be judged is unverified, as the manual sweep finds it", async () => {
+  const h = healthy();
+  const snap = path.join(h, "state", "ws", "plugin-Unk001");
+  fs.mkdirSync(snap, { recursive: true, mode: 0o700 });
+  // A live pid with no usable start time: neither alive-and-the-same nor dead.
+  fs.writeFileSync(path.join(snap, "owner.json"), JSON.stringify({ pid: process.pid, started: 0 }));
+  const r = await check("orphaned_brokers").run(ctx());
+  assert.equal(r.status, "warn");
+  assert.match(r.note ?? "", /unverified/);
+  fs.writeFileSync(path.join(snap, "owner.json"), JSON.stringify({ pid: process.pid, started: spawnSync("/bin/ps", ["-o", "lstart=", "-p", String(process.pid)], { encoding: "utf8", env: { PATH: "/usr/bin:/bin", LC_ALL: "C", TZ: "UTC" } }).stdout.trim().replace(/\s+/g, " ") , ident: processIdent(process.pid) }));
+  assert.equal((await check("orphaned_brokers").run(ctx())).status, "pass", "a live owner's snapshot is in use, not a problem");
+});
+
+test("orphaned_brokers: a snapshot restored between a member's check and its SIGKILL stops stop-orphan before the signal", { timeout: 30_000 }, async () => {
+  const h = healthy();
+  const pid = orphanBroker(h, { ignoreTerm: true });
+  const r = await check("orphaned_brokers").run(ctx());
+  const cmd = /stop-orphan --snapshot (\S+) --pid (\d+) --started (\d+) --args-sha ([0-9a-f]{64})/.exec(r.fix ?? "");
+  assert.ok(cmd, r.fix ?? "");
+  const engine = path.join(process.cwd(), "plugin", "engine", "review-round.mjs");
+  const out = spawnSync(process.execPath, [engine, "stop-orphan", "--snapshot", cmd[1], "--pid", cmd[2], "--started", cmd[3], "--args-sha", cmd[4]], { env: { ...process.env, REVIEW_LOOP_TEST_SEAMS: "1", REVIEW_LOOP_TEST_RESTORE_SNAPSHOT: "1" }, encoding: "utf8", timeout: 20_000 });
+  assert.equal(out.status, 60, out.stdout);
+  assert.equal(JSON.parse(out.stdout).status, "mismatch");
+  assert.ok(process.kill(pid, 0), "the broker was not SIGKILLed");
+});
+
+test("orphaned_brokers: a snapshot restored right before stop-orphan's SIGTERM gets no signal at all", { timeout: 30_000 }, async () => {
+  const h = healthy();
+  const pid = orphanBroker(h);
+  const r = await check("orphaned_brokers").run(ctx());
+  const cmd = /stop-orphan --snapshot (\S+) --pid (\d+) --started (\d+) --args-sha ([0-9a-f]{64})/.exec(r.fix ?? "");
+  assert.ok(cmd, r.fix ?? "");
+  const engine = path.join(process.cwd(), "plugin", "engine", "review-round.mjs");
+  const out = spawnSync(process.execPath, [engine, "stop-orphan", "--snapshot", cmd[1], "--pid", cmd[2], "--started", cmd[3], "--args-sha", cmd[4]], { env: { ...process.env, REVIEW_LOOP_TEST_SEAMS: "1", REVIEW_LOOP_TEST_RESTORE_SNAPSHOT: "term" }, encoding: "utf8", timeout: 20_000 });
+  assert.equal(out.status, 60, out.stdout);
+  assert.equal(JSON.parse(out.stdout).status, "mismatch");
+  assert.ok(process.kill(pid, 0), "the broker (which exits on SIGTERM) was not signalled");
+});
+
+test("orphaned_brokers: a broker that exits after doctor listed it: stop-orphan names its group (leader_gone) and signals nothing", { timeout: 40_000 }, async () => {
+  const h = healthy();
+  const pid = orphanBroker(h, { termLeavesChild: true, appServer: true });
+  const r = await check("orphaned_brokers").run(ctx());
+  const cmd = /stop-orphan --snapshot (\S+) --pid (\d+) --started (\d+) --args-sha ([0-9a-f]{64})/.exec(r.fix ?? "");
+  assert.ok(cmd, r.fix ?? "");
+  const member = Number(spawnSync("/bin/ps", ["-o", "pid=", "-g", String(pid)], { encoding: "utf8" }).stdout.trim().split(/\s+/).find((p) => Number(p) !== pid));
+  signalPid(pid, "SIGTERM");
+  const end = Date.now() + 5000;
+  while (Date.now() < end && spawnSync("/bin/ps", ["-o", "pid=", "-p", String(pid)], { encoding: "utf8" }).stdout.trim() !== "") spawnSync("/bin/sleep", ["0.05"]);
+  const engine = path.join(process.cwd(), "plugin", "engine", "review-round.mjs");
+  const out = spawnSync(process.execPath, [engine, "stop-orphan", "--snapshot", cmd[1], "--pid", cmd[2], "--started", cmd[3], "--args-sha", cmd[4]], { env: process.env, encoding: "utf8", timeout: 20_000 });
+  assert.equal(out.status, 60, out.stdout);
+  assert.deepEqual(JSON.parse(out.stdout), { exit: 60, status: "leader_gone", pgid: pid });
+  assert.ok(process.kill(member, 0), "the app-server was not signalled");
+  assert.deepEqual(events(h).filter((e) => e.event === "round.stop_orphan").map((e) => [e.code, e.data.status]), [["orphaned_brokers", "leader_gone"]]);
+  // Nothing ties a leaderless app-server to review-loop rather than another Codex client: doctor does not count it.
+  assert.equal((await check("orphaned_brokers").run(ctx())).status, "pass");
+  signalPid(member, "SIGKILL");
 });

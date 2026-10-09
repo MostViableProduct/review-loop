@@ -106,3 +106,20 @@ console.log(JSON.stringify({ killedQuickly: Date.now() - t < 5000 && killed.code
   assert.equal(code, 0);
   assert.deepEqual(JSON.parse(out), { killedQuickly: true, refused: "spawns_closed" });
 });
+
+test("run's onSpawn gets the child's pid once, before any of its output; a throwing onSpawn kills the child and rejects", { timeout: 10_000 }, async () => {
+  /** @type {number[]} */
+  const seen = [];
+  const r = await run(process.execPath, ["-e", "process.stdout.write(String(process.pid))"], { onSpawn: (pid) => seen.push(pid) });
+  assert.equal(seen.length, 1);
+  assert.equal(String(seen[0]), r.stdout, "the pid onSpawn saw is the child's own");
+  const marker = path.join(tmpDir("rl-onspawn-"), "ran");
+  const err = await run(process.execPath, ["-e", `setTimeout(() => require("fs").writeFileSync(${JSON.stringify(marker)}, "x"), 500)`], {
+    onSpawn: () => {
+      throw new Error("record failed");
+    }
+  }).then(() => null, (e) => e);
+  assert.ok(err instanceof Error && err.message === "record failed");
+  await new Promise((res) => setTimeout(res, 800));
+  assert.ok(!fs.existsSync(marker), "the child was killed before it could act");
+});

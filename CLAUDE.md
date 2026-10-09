@@ -122,9 +122,11 @@ These are copied from the spec, and every task implicitly includes them.
     way, removing the lock only while it still carries that token.
   - Pinned by the `lock section:` tests in `state-policy.test.mjs`, the e2e "fenced before paying" test, and sabotage
     rows `lock-section-exclusive`, `lock-marker-no-expiry`, `lock-ident-fixed-env`, `lock-release-own-only`.
-  - **Known follow-up (Coherence):** the other engine `ps` calls (`pin.mjs` broker verification and snapshot sweep,
-    `settings.mjs` writer check) still resolve `ps` through PATH. Moving them onto `/bin/ps` with a fixed env is a
-    separate change; their tests stub `ps` on PATH and would switch to `REVIEW_LOOP_TEST_PS_PATH`.
+  - Every engine `ps` whose answer decides identity (this lock, and `pin.mjs`'s broker verification and sweep since
+    1.0.4) runs `trustedPs()` (`proc.mjs`: `/bin/ps`, or `REVIEW_LOOP_TEST_PS_PATH` behind `REVIEW_LOOP_TEST_SEAMS`)
+    under a fixed env; pinned by "B: a ps on PATH is never consulted" and sabotage row `trusted-ps`. **Known
+    follow-up (Coherence):** `cli/lib/settings.mjs`'s writer check still resolves `ps` through PATH (it only reports
+    a running Claude, never signals); its tests stub `ps` on PATH.
 - **Symlinks** are rejected on config, rubric, events path, the Codex config read and the state dir.
 - **The literal string of the GitHub CLI PR-create command** must not appear in any shell command you
   run in Claude Code: the author's live PR gate denies it. Build it from parts in scripts
@@ -152,9 +154,119 @@ These are copied from the spec, and every task implicitly includes them.
 - Interim PR-gate `gate.decision` (Task 7, ruling R-T7a): removed in Task 8. `review-gate-hook.mjs` now emits the one `gate.decision` per PR evaluation (see Invariants).
 - AC-6 amendment (Task 10, ruling R-P2; probe P2, `docs/probes/P2-2026-09-28.md`): effort is display-only in v1. The companion's `adversarial-review` has no effort flag (an unknown `--effort` becomes focus text), so `companionArgs` never emits `--effort`; `--model` is still passed when configured. `effort` and `effort_source` are still resolved and recorded in the round record and `round.result`.
 - No `dependencies` in `plugin.json` (Task 11, ruling R-P4; probe P4, `docs/probes/P4-2026-09-28.md`): an unsatisfied plugin dependency stops Claude Code loading the plugin, which would silently turn off every hook. Setup's preflight installs `codex@openai-codex` explicitly and doctor reports it missing. A shape test asserts the key is absent.
-- Companion data dir and broker teardown (final review H1/M2, controller ruling): `runCompanion` sets `CLAUDE_PLUGIN_DATA` to `<snapshot>/data` (0700, inside the `ws/plugin-*` snapshot that cleanup removes), never the Codex plugin's shared `plugins/data/codex-openai-codex` nor its `$TMPDIR/codex-companion` fallback, so Codex's job files are private and deleted with the round (and `uninstall --delete-history` leaves none elsewhere). **Accepted tradeoff: review-loop rounds no longer appear in `/codex:status`.** Companion 1.0.6 starts a detached `app-server-broker.mjs serve` (own session, no idle timeout) per cwd and records it in `<data>/state/<slug>-<hash>/broker.json`; `cmdRun`'s `finally` calls `stopCompanionBroker(root)` before cleanup: `broker/shutdown` over the unix endpoint (2 s bound), then SIGTERM only when `ps -ww -o args=` shows `<root>/scripts/app-server-broker.mjs serve` (root as given or its realpath); broker.json is read bounded and link-refusing; the `cxc-*` session dir is removed only when it is a real directory in the OS temp dir owned by this user. Signal paths reap it too (`proc.mjs` `onReap`, the same pid checks, SIGTERM only). A broker that may still be running logs `hook.error` `broker_stop_failed`. Residual: a signal between the broker's start and the companion's broker.json write leaks that one broker. Pinned by `test/engine/broker.test.mjs` and sabotage rows `broker-stop-finally`, `broker-reap-signal`, `companion-private-data`, `broker-unknown-never-signalled`, `broker-stop-failed-event`. The test seam `REVIEW_LOOP_TEST_COMPANION_TIMEOUT_MS` (with `REVIEW_LOOP_TEST_SEAMS=1`) shortens the companion timeout.
+- Companion data dir and broker teardown (final review H1/M2, controller ruling): `runCompanion` sets `CLAUDE_PLUGIN_DATA` to `<snapshot>/data` (0700, inside the `ws/plugin-*` snapshot that cleanup removes; it and `<snapshot>/tmp` are made with `ensurePrivateDir`, so a link in either's place is refused before the companion starts: rows `companion-data-no-link`, `companion-tmp-no-link`), never the Codex plugin's shared `plugins/data/codex-openai-codex` nor its `$TMPDIR/codex-companion` fallback, so Codex's job files are private and deleted with the round (and `uninstall --delete-history` leaves none elsewhere). **Accepted tradeoff: review-loop rounds no longer appear in `/codex:status`.** Companion 1.0.6 starts a detached `app-server-broker.mjs serve` (own session, no idle timeout) per cwd and records it in `<data>/state/<slug>-<hash>/broker.json`; `cmdRun`'s `finally` calls `stopCompanionBroker(root)` before cleanup (the whole-tree contract is the "Broker trees" bullet below); broker.json is read bounded and link-refusing; a verified broker's `--endpoint` is used for `broker/shutdown` only when its `cxc-*` dir is inside this snapshot's own temp dir (`<snapshot>/tmp` or the short dir tmp.json records; `snapshotTmpDirs`), so a live argv naming another session's socket redirects nothing (author's decision 2026-10-08, row `endpoint-in-snapshot-tmp`), and right before connecting the session dir and its temp dir must each be a real directory of ours (`ownedRealDirectory`), so a link swapped in under it carries nothing (row `endpoint-real-dirs`); no `cxc-*` dir is removed by name: since 1.0.4 it is inside the snapshot's temp dir and goes with it, and a pre-1.0.4 broker's, in the OS temp dir, is left to the OS (that broker still gets SIGTERM). Signal paths reap it too, reading the table up to `REAP_READS` (3) times about 100 ms apart so a broker that shows only after the first read is still found (`proc.mjs` `onReap`, the same pid checks, SIGTERM only); each read decides every pid at once, and a pid is asked about alone (`recheck`, compared with `sameMember` right before the SIGTERM, so a pid reused since the read is never signalled) only once a read matched it to this snapshot's broker leading its own group, as in the stop: broker.json is not read here, so a pid it names is trusted no further (row `reap-leader-only`); a read `ps` cannot answer decides nothing and the next retries every pid, and no read or re-read starts after `REAP_BUDGET_MS` (3 s), so the signal is re-raised within that plus one `ps` timeout however many brokers match; what is left then is the next sweep's (rows `reap-retries-failed-read`, `reap-tables-only`, `reap-recheck-identity`, `reap-budget`, `reap-recheck-budget`). A broker that may still be running logs `hook.error` `broker_stop_failed` (plus `round.broker_stop` with the reason) and keeps the snapshot. Pinned by `test/engine/broker.test.mjs` and sabotage rows `broker-stop-finally`, `broker-reap-signal`, `companion-private-data`, `broker-unknown-never-signalled`, `broker-stop-failed-event`. The test seam `REVIEW_LOOP_TEST_COMPANION_TIMEOUT_MS` (with `REVIEW_LOOP_TEST_SEAMS=1`) shortens the companion timeout.
 - `--json` output shape (final review L11): spec §6.1 says `--json` prints the `cli.exit` event and only doctor embeds it. Every command with a payload prints `{…payload, event}` (`doctor`, `selftest`, `engine-path` (R-D47), `config show`); the rest print the bare event. The README states this rule. `--version`/`--help` print to stdout without `--json` (L6).
-- Stale-snapshot sweep (re-review R2): a round killed before its `finally` (SIGKILL runs no handler) leaves `ws/plugin-*` (with `data/`, Codex's job files), the broker's `cxc-*` dir and possibly the detached broker. `snapshotVerified` writes `<snapshot>/owner.json` (0600, `{pid, started}`; `started` is `ps -o lstart=` with `LC_ALL=C` and `TZ=UTC` pinned on every engine ps call, so pid reuse is detected and a TZ change between rounds never makes a live owner look dead) after the hash check. `cmdRun` calls `sweepStaleSnapshots(ws)` under the artifact lock, just before creating its own snapshot: for each `plugin-*` entry (at most 256 looked at, at most 16 acted on per run) that is a real directory this user owns (lstat; a link is never followed), an owner that is gone (`kill(pid,0)` ESRCH, or a different start time) → `stopCompanionBroker(root)` (the same verified path: pid from that snapshot's broker.json, args naming that snapshot), then the snapshot is re-lstat'd and removed. A broker that may still run keeps its snapshot for the next sweep. An owner alive, or unknown (unreadable/linked/malformed owner file, `ps` failed) → left alone. No owner file (the legacy engine's snapshots, or one mid-creation) → swept only when its mtime is over 24 h old AND `ps -ww -A -o args=` succeeds and no line contains the snapshot path. New event `round.sweep` (data: `swept`, `brokers_left`, `failed`, counts only), code `ok` or `snapshot_sweep_incomplete`, emitted only when something was found. Pinned by the R2 tests in `test/engine/broker.test.mjs` (a real SIGKILLed round) and sabotage rows `snapshot-sweep-call`, `snapshot-sweep-unknown-leaves`, `snapshot-sweep-nofollow`, `snapshot-owner-tz-pin`.
+- Stale-snapshot sweep (re-review R2): a round killed before its `finally` (SIGKILL runs no handler) leaves `ws/plugin-*` (with `data/`, Codex's job files), the broker's `cxc-*` dir and possibly the detached broker. `snapshotVerified` writes `<snapshot>/owner.json` (0600, `{pid, started}`; `started` is `ps -o lstart=` with `LC_ALL=C` and `TZ=UTC` pinned on every engine ps call, so pid reuse is detected and a TZ change between rounds never makes a live owner look dead) after the hash check. `cmdRun` calls `sweepStaleSnapshots(ws)` under the artifact lock, first thing (before any early return): for each `plugin-*` entry of this run's partition (see "Broker trees") that is a real directory this user owns (lstat; a link is never followed), an owner that is gone (`kill(pid,0)` ESRCH, or a different start time) → its companion is stopped, then `stopCompanionBroker(root)`, then the snapshot is re-lstat'd and removed. A broker that may still run keeps its snapshot for the next sweep. An owner alive, or unknown (unreadable/linked/malformed owner file, `ps` failed) → left alone. No owner file (the legacy engine's snapshots, or one mid-creation) → swept only when its mtime is over 24 h old AND `ps -ww -A -o args=` succeeds and no line contains the snapshot path. Event `round.sweep` (counts and the partition only, built by `sweepEventData`: a full sweep's counts add up over its up to three passes, so each is held to `SWEEP_LIST_MAX` and one that reached it marks the sweep incomplete, row `sweep-counts-bounded`), code `ok` or `snapshot_sweep_incomplete`, emitted whenever `ws/` holds a snapshot. Pinned by the R2 tests in `test/engine/broker.test.mjs` (a real SIGKILLed round) and sabotage rows `snapshot-sweep-call`, `snapshot-sweep-unknown-leaves`, `snapshot-sweep-nofollow`, `snapshot-owner-tz-pin`.
+- **Broker trees (1.0.4; a snapshot is deleted only after its broker tree is gone).** On the author's machine 80
+  brokers ran for days from deleted snapshots: the finally deleted a snapshot whose broker survived, a stop gave up
+  after SIGTERM and signalled only the broker's pid, and early-returning rounds never swept. The contract now:
+  - **Which brokers.** The union of broker.json's pids and the process table's rows whose args match
+    `brokerArgv` (`^\S*/node <root>/scripts/app-server-broker.mjs serve`, anchored; root as given or realpath),
+    for this uid, and only while the broker leads its own group (the companion starts it detached; a non-leader is
+    never signalled: `unknown_rows`). The table (`readProcs`, `ps -ww -A -o uid=,pid=,ppid=,pgid=,lstart=,args=`)
+    counts only when every line parses and it holds this process's own row; an exit-0 empty/garbage answer is a
+    failure, never "no broker".
+  - **The stop.** `broker/shutdown`, SIGTERM to the broker, then, on a fresh table, SIGKILL to the whole group
+    after `signalGroupIfSame` re-reads the leader (`sameMember`: pid, lstart, pgid, args). Every signal here, the
+    SIGTERM, each member's SIGKILL (stop-orphan's too, re-read after its leader check so no other ps sits between; the leader itself is signalled last in each pass, since one just SIGKILLed can read as another process while it exits and would pass for a reissue: row `orphan-leader-last`)
+    and the signal path's included, is sent only right after `recheck` re-reads its pid and it compares the same
+    (rows `broker-sigterm-recheck`, `broker-leader-recheck`, `reap-recheck-identity`, `orphan-member-recheck`). A verified broker that
+    dies during the stop has its group emptied member by member (`deadGroupTargets`): the group's members started
+    strictly after the snapshot's creation second (PPID ignored: grandchildren) AND already there, unchanged, at the
+    stop's first read, each re-checked just before its SIGKILL. A broker.json pid already gone at the first read is
+    never a group to signal (author's decision, 2026-10-06: its number may have been reissued): what still runs in
+    it is `unattributed`, the snapshot kept and reported. The same holds for a dead companion's group (sweep). A
+    pid held by a process other than the broker first read is never taken to mean "group gone" (`goneGroupsLeft`, the
+    stop, `stop-orphan`): the group itself is read, whoever holds the number. The one exception: a newcomer
+    leading a group of that very id means the old group had emptied (an id is never reissued while its group
+    lives), so `stop-orphan` stops there and signals nothing more.
+    `cmdRun` waits past the
+    snapshot's second before the companion starts (`afterSnapshotSecond`), so a same-second member is never the
+    round's own: `unattributed`, never signalled. A `codex app-server` in a leaderless group inside the companion's
+    pid window (`companion.json` = `{pid, after}`, written through `run`'s `onSpawn` and right after the companion
+    exits) is `unattributed` too; bounds that leave no window (`after <= pid`: a wrapped pid space, or a damaged
+    marker) count every such group, so a snapshot is only ever kept for it (row `marker-equal-bounds`). Known limit: a broker that dies before broker.json AND whose app-server dies too
+    leaves its grandchildren unattributed and unreported (no evidence names them; `ps -E` would read every process's
+    environment and macOS hides it for platform binaries such as shells and git — author's decision 2026-10-06:
+    kept as a documented limit).
+  - **Temp dir.** The companion runs with `TMPDIR` inside the snapshot (`companionTmp`), so a broker's `cxc-*` dir
+    goes with the snapshot even when no broker.json names it; when that socket path would pass 103 bytes (a long
+    state dir), a short `rl-XXXXXX` under the OS temp dir, recorded in `tmp.json` (`{dir, token}`) before it is
+    made, the token then written into it whole (`.review-loop-tmp`, by rename from `.part`). `removeSnapshot`
+    removes that dir first, token last, only when it holds exactly that token (in the token file, or still in
+    its `.part` after a failed rename or a kill); any other dir (tokenless, empty, a
+    partial or another token) is never touched: a kill before the token leaves at most an empty dir in the OS temp
+    dir, for the OS to clear. It is detached first (atomic rename to `<dir>.rm`, checked to be
+    the same device and inode), so a path swapped for a link after the check removes nothing behind it; a removal
+    cut short resumes from `<dir>.rm`. Its entries are streamed against `TMP_LIST_MAX` (10 000; `namesUpTo`), never
+    listed whole: a dir past the cap is kept with its snapshot until it is back under (row `tmp-list-capped`). Each
+    child is removed by name once the dir is proven ours; a same-user process renaming another dir into it between
+    the listing and the removal is not closed (Node has no unlinkat), the same class as the ws/ swap below (disputed
+    in PR review round 48: no boundary crossed, that process can already delete it).
+    The snapshot is kept (`temp_unremoved`) unless the dir is confirmed gone or not ours.
+  - **Fail closed.** Anything unverifiable (`ps_unavailable`, `registry_unreadable`, `deadline`, `unknown_rows`,
+    `members_left`, `unattributed`, `temp_unremoved`: `BROKER_STOP_REASONS`) signals nothing more and keeps the snapshot; every path that keeps one (the round's own stop, both
+    sweeps) logs `hook.error` `broker_stop_failed` when something may still run (`reportStop`), and `round.broker_stop` (reason, counts, the `plugin-XXXXXX` name; for a swept snapshot, the `artifact_key` of
+    the round that made it, from owner.json's `key`, never the sweeping round's), and a lost line is said on stderr
+    (`event_write_failed`). The owner marker is written whole before the companion can start; when ps cannot name
+    the round, `snapshot_owner_unknown` (exit 30) and no companion. A damaged owner.json in a snapshot older than
+    24 h goes by the legacy rule.
+  - **The sweep.** Only entries named as snapshotVerified names them (`SNAPSHOT_NAME`, `plugin-` + 6 alphanumerics)
+    are snapshots; any other `plugin-*` is not touched (one that happens to fit, such as `plugin-backup`, cannot be
+    told apart by name). An owner-less one is a legacy snapshot only when it holds nothing but a snapshot's files
+    (`onlySnapshotFiles`: every entry a directory or a regular file at a pinned path, `.claude-plugin/plugin.json` or
+    `owner.json` (an aged damaged one, already size-bounded by `ownerState`; row `owner-aged-damaged-legacy`), the
+    companion among them, no links, no other file); any other is unverified and kept, so a sweep only ever removes
+    copies of plugin files. A leftover from a plugin version whose file set differs stays unverified. The walk is
+    streamed against its cap (`namesUpTo`, `lstat` per entry), never a whole listing. Right before each remove,
+    `sweepOne` re-checks `ws/` itself against its device/inode from the sweep's start (`dirIdentity`) and leaves the
+    entry unverified on any change: this narrows, but cannot close, a same-user swap of `ws/` for a link (Node has
+    no `unlinkat`); a same-user process could delete the target itself, so no privilege boundary is crossed (known
+    limit, author's decision 2026-10-07). The round's `finally` releases its lock in an inner `finally`, and a
+    snapshot cleanup that throws is reported as `failed_remove`. A damaged broker.json (unparseable, or not
+    `{pid: int > 1}`) is set aside (`quarantine`, `broker.json.corrupt-<ts>`) and the stop goes on the process table
+    alone, as for a missing one (`hook.error` `broker_registry_quarantined`, under the artifact key of the round
+    that made the snapshot); a linked, oversized or unreadable one
+    stays fail closed (`registry_unreadable`) (author's decision 2026-10-07). The sweep's deadline is checked before
+    every judgment, not only after one acted, and owner identities are read once per pid per sweep (`processTable`). A snapshot it leaves alone is `in_use` (owner alive, fresh, or referenced) or `unverified` (not a
+    real dir of ours, an owner that cannot be read); the manual `sweep` is `clean` only with no `unverified` left, and
+    both counts go in its output and in `round.sweep`. Doctor's `orphaned_brokers` judges each snapshot with the same
+    `judgeSnapshot`, so it is unverified exactly where the sweep is. An owner's `started` is compared only when it is a
+    real `ps` lstart (`isLstart`: every field read back from the parsed date); anything else is unknown, never a
+    mismatch, so a corrupt owner.json never makes a live round read as dead. Within the same second, `ident`
+    (`processIdent`, the locks' start-time-plus-command-line hash, in proc.mjs) decides: another identity is dead, an
+    owner.json without one is unknown. A sweep step that throws is reported on
+    its snapshot as `failed_<judge|companion|broker|remove>` (`BROKER_STOP_REASONS`), never the error's text; it counts
+    nothing, so `reportStop` emits `hook.error` `broker_stop_failed` for it on the reason alone. A companion stop signals nothing once the budget is spent
+    (`deadline`, snapshot kept). Two streaming passes over `ws/` (count, then hold one partition: `partitionCount(n)` is a power
+    of two leaving ~16 per partition, `isHeld(hashOf(name), tick, P)` with `tick` = the minute). Powers of two nest,
+    so every snapshot is examined within 2^K minutes however `n` changes. A partition past its cap (4 × part) keeps
+    the cap's worth lowest by a tick-salted hash, so which it holds turns each minute and names that directory order
+    puts first never crowd the rest out for good (row `sweep-overflow-turns`). Right at the remove, a fresh table
+    keeps a snapshot as `in_use` while any node runs a script inside it (`node`, bare or by path, any flags, then `<snapshot>/...`: row `in-use-node-by-name`; a process that only
+    has the path in its args, an editor or a log tail, does not hold it: author's decision 2026-10-08), and a
+    companion or broker of ours keeps it as `members_left` (rows `sweep-remove-named-in-use`,
+    `sweep-remove-script-only`). A round's sweep has a 10 s deadline (the
+    first act always runs; each stop gets the time left; a round's own stop gets 15 s). A dead owner's companion is
+    stopped before its brokers (`stopSnapshotCompanion`).
+  - **Operator surface.** `review-round.mjs sweep` (every partition, frozen count, exit 0 clean / 60 incomplete),
+    `review-round.mjs stop-orphan` (one broker whose snapshot is gone; re-checks pid, start, args hash, group and
+    the snapshot's absence before each signal), and doctor's `orphaned_brokers` (read-only: counts, prints those
+    commands; never signals). Brokers whose snapshot is gone are never killed automatically (author's decision):
+    without the snapshot only a command line ties them to review-loop.
+  - Pinned by the `A:`/`B:`/`B2:`/`C:`/`D:`/`units:` tests in `test/engine/broker.test.mjs`, the `orphaned_brokers`
+    tests in `test/cli/doctor.test.mjs`, and sabotage rows `round-keeps-unstopped-snapshot`, `broker-group-sigkill`,
+    `broker-leaderless-tree`, `broker-registry-union`, `broker-argv-anchored`, `companion-after-snapshot-second`,
+    `sweep-before-early-returns`, `doctor-read-only`, `sweep-partitions-pow2`, `sweep-partitions-all`,
+    `broker-leader-recheck`, `ps-table-self-row`, `leaderless-app-server-guard`, `companion-pid-onspawn`,
+    `owner-marker-required`, `sweep-deadline`, `stop-honours-deadline`, `stop-orphan-recheck`,
+    `sweep-stops-companion`. Test seams (all behind `REVIEW_LOOP_TEST_SEAMS=1`): `REVIEW_LOOP_TEST_KILL_NOOP`,
+    `REVIEW_LOOP_TEST_LEADER_RECHECK`, `REVIEW_LOOP_TEST_RECHECK_DELAY_MS`, `REVIEW_LOOP_TEST_SWEEP_TICK`,
+    `REVIEW_LOOP_TEST_SWEEP_PART`, `REVIEW_LOOP_TEST_SNAPSHOT_AT_SECOND_START`. `recheck` can take up to a ps
+    timeout, so every signal with a deadline checks it again after the re-read (row
+    `broker-sigterm-deadline-after-recheck`).
+  - The legacy engine outside this repo got its own minimal fix on 2026-10-05 (it stopped one broker tree per round
+    from leaking); migrating to the plugin replaces it.
 - `hook.error` carries a `mode` field (Task 7): the hook mode for `hook_input_error` and `hook_error`, validated against the existing STAGES enum.
 - Post-create verification uses GitHub's current head only (Task 12, ruling R-D15): `prverify` runs a fresh `gh pr view` (or a lookup by head branch when the create response has no PR number) and never compares the head in the create response, deviating from spec T-PR-3(a)/T-PR-11. This closes a create-to-verify race (the branch can advance between creation and the hook). It costs one extra `gh pr view` per PR creation. Verification fails closed: a missing gh, a failed GitHub request, or an exhausted 30 s budget gives `pr_verify_unavailable` (a stop under Default and Balanced), never a crash or a silent pass.
 - Unverified MCP shape (Task 12): the real PostToolUse `tool_response` of a GitHub MCP `create_pull_request` has not been observed (no server was connected). `prverify` accepts a plain object with `number`/`url`/`URL`/`html_url` or an MCP content array (`[{type:"text", text:"<json>"}]`, also under `content`), and otherwise looks the PR up by head branch, proceeding only on exactly one match. Task 27's e2e should record the real shape and pin it.

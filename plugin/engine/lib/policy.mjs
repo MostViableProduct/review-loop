@@ -10,7 +10,8 @@ export const EXIT = Object.freeze({
   HUMAN: 22,
   OP_ERROR: 30,
   PIN: 40,
-  BUSY: 50
+  BUSY: 50,
+  SWEEP_INCOMPLETE: 60
 });
 
 /** The one option set offered at every checkpoint / stall (plan v4+). */
