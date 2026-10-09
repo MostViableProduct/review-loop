@@ -5,6 +5,7 @@
 // with the socket in a `cxc-*` session dir under the OS temp dir. No real Codex runs.
 import { test, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -1029,7 +1030,13 @@ async function deadSnapshot(parent, o = {}) {
   fs.writeFileSync(path.join(root, "owner.json"), JSON.stringify({ pid: gone, started: "Thu Jan 1 00:00:00 1970" }));
   if (o.broker === false) return { root, pid: 0 };
   await afterSnapshotSecond(root);
-  const sessionDir = fs.mkdtempSync(path.join(os.tmpdir(), "cxc-"));
+  // As a 1.0.4 companion leaves it: its temp dir the short rl-* one tmp.json records (a socket path under
+  // <snapshot>/tmp would be too long here), token-marked, with the broker's session dir inside.
+  const short = fs.mkdtempSync(path.join(os.tmpdir(), "rl-"));
+  const token = crypto.randomBytes(16).toString("hex");
+  fs.writeFileSync(path.join(short, ".review-loop-tmp"), token);
+  fs.writeFileSync(path.join(root, "tmp.json"), JSON.stringify({ dir: short, token }));
+  const sessionDir = fs.mkdtempSync(path.join(short, "cxc-"));
   const sock = path.join(sessionDir, "broker.sock");
   const b = spawn(process.execPath, [path.join(root, "scripts", "app-server-broker.mjs"), "serve", "--endpoint", `unix:${sock}`], { detached: true, stdio: "ignore", env: { ...env, ...o.env } });
   b.unref();
@@ -1112,24 +1119,30 @@ test("C: a partition past its cap turns which names it holds with the tick: name
   assert.deepEqual(fs.readdirSync(parent).sort(), [...blockers].sort(), `every dead round's snapshot reached within ${sweeps} sweeps; only the unverified are left`);
 });
 
-test("R2: a dead round's snapshot that another live process names is kept in use at the remove, and swept once that process is gone", { timeout: 60_000 }, async () => {
+test("R2: a dead round's snapshot that a node runs a script from is kept in use at the remove; a process merely naming its path does not hold it", { timeout: 60_000 }, async () => {
   const parent = path.join(dir, "ws-named");
   fs.mkdirSync(parent, { mode: 0o700 });
   const s = await deadSnapshot(parent, { broker: false });
-  // Not a companion or broker: some other process whose args name the snapshot.
-  const user = spawn(process.execPath, ["-e", "setTimeout(() => {}, 30000)", s.root], { stdio: "ignore" });
+  const helper = path.join(s.root, "scripts", "helper.mjs");
+  fs.writeFileSync(helper, "setTimeout(() => {}, 30000);\n");
+  // Not a companion or broker: some other node running a script inside the snapshot, and an editor-like process
+  // that only has the path among its args.
+  const user = spawn(process.execPath, [helper], { stdio: "ignore" });
+  const viewer = spawn(process.execPath, ["-e", "setTimeout(() => {}, 30000)", s.root], { stdio: "ignore" });
   try {
-    assert.ok(await until(() => alive(/** @type {number} */ (user.pid)), 5000));
+    assert.ok(await until(() => alive(/** @type {number} */ (user.pid)) && alive(/** @type {number} */ (viewer.pid)), 5000));
     const res = await withSeams({ REVIEW_LOOP_TEST_SWEEP_TICK: "0" }, () => sweepStaleSnapshots(parent, { all: true }));
     assert.equal(res.skipped.get(path.basename(s.root)), "in_use", JSON.stringify([...res.skipped]));
-    assert.ok(fs.existsSync(s.root), "kept while a process names it");
+    assert.ok(fs.existsSync(s.root), "kept while a node runs a script from it");
+    user.kill("SIGKILL");
+    assert.ok(await until(() => !alive(/** @type {number} */ (user.pid)), 5000));
+    const again = await withSeams({ REVIEW_LOOP_TEST_SWEEP_TICK: "0" }, () => sweepStaleSnapshots(parent, { all: true }));
+    assert.equal(again.swept, 1, `the path in another process's args holds nothing: ${JSON.stringify({ ...again, skipped: [...again.skipped] })}`);
+    assert.ok(!fs.existsSync(s.root));
   } finally {
     user.kill("SIGKILL");
+    viewer.kill("SIGKILL");
   }
-  assert.ok(await until(() => !alive(/** @type {number} */ (user.pid)), 5000));
-  const res = await withSeams({ REVIEW_LOOP_TEST_SWEEP_TICK: "0" }, () => sweepStaleSnapshots(parent, { all: true }));
-  assert.equal(res.swept, 1, JSON.stringify(res));
-  assert.ok(!fs.existsSync(s.root));
 });
 
 test("C: a sweep stops acting at its deadline; the first act always runs", { timeout: 60_000 }, async () => {
@@ -1144,6 +1157,33 @@ test("C: a sweep stops acting at its deadline; the first act always runs", { tim
   assert.equal(res.incomplete, true);
   assert.ok(res.stops.length >= 1, "the first act ran");
   for (const m of made) assert.ok(fs.existsSync(m.root), "an unstopped snapshot is kept");
+});
+
+test("B: a live broker whose argv names another session's socket gets no shutdown request there; that session and its dir are untouched", { timeout: 60_000 }, async () => {
+  const parent = path.join(dir, "ws-argv-endpoint");
+  fs.mkdirSync(parent, { mode: 0o700 });
+  // Another session's broker, serving in its own cxc-* dir in the OS temp dir.
+  const victim = fs.mkdtempSync(path.join(os.tmpdir(), "cxc-"));
+  const victimLog = path.join(dir, "victim.log");
+  fs.writeFileSync(path.join(dir, "victim-broker.mjs"), BROKER);
+  const v = spawn(process.execPath, [path.join(dir, "victim-broker.mjs"), "serve", "--endpoint", `unix:${path.join(victim, "broker.sock")}`], { detached: true, stdio: "ignore", env: { ...env, BROKER_LOG: victimLog } });
+  const s = await deadSnapshot(parent, { broker: false });
+  await afterSnapshotSecond(s.root);
+  fs.writeFileSync(path.join(s.root, "scripts", "app-server-broker.mjs"), "setTimeout(() => {}, 60000);\n");
+  // This snapshot's broker script, running, its argv naming the other session's socket.
+  const b = spawn(process.execPath, [path.join(s.root, "scripts", "app-server-broker.mjs"), "serve", "--endpoint", `unix:${path.join(victim, "broker.sock")}`], { detached: true, stdio: "ignore" });
+  try {
+    assert.ok(await until(() => fs.existsSync(path.join(victim, "broker.sock")), 5000), "the other session serves");
+    const r = await stopCompanionBroker(s.root);
+    assert.deepEqual([r.left, r.reason], [0, null], JSON.stringify(r));
+    assert.ok(await until(() => !alive(/** @type {number} */ (b.pid)), 5000), "this snapshot's broker was stopped by SIGTERM");
+    assert.ok(!fs.existsSync(victimLog), "no broker/shutdown reached the other session");
+    assert.ok(alive(/** @type {number} */ (v.pid)) && fs.existsSync(path.join(victim, "broker.sock")), "the other session and its dir are untouched");
+  } finally {
+    if (b.pid) signalPid(b.pid, "SIGKILL", { group: true });
+    if (v.pid) signalPid(v.pid, "SIGKILL", { group: true });
+    fs.rmSync(victim, { recursive: true, force: true });
+  }
 });
 
 test("B: a re-check that outlasts the stop's deadline sends no SIGTERM after it: the stop is kept as deadline", { timeout: 60_000 }, async () => {

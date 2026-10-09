@@ -278,31 +278,53 @@ function removeShortTmp(v) {
  * @param {string} root
  */
 export function removeSnapshot(root) {
-  const marker = path.join(root, TMP_FILE);
-  let tracked = true;
+  const v = shortTmpMarker(root);
+  if (v === "bad") return false;
   try {
-    fs.lstatSync(marker);
-  } catch (e) {
-    if (/** @type {NodeJS.ErrnoException} */ (e).code !== "ENOENT") return false;
-    tracked = false;
-  }
-  if (tracked) {
-    const tmps = new Set([os.tmpdir()]);
-    try {
-      tmps.add(fs.realpathSync(os.tmpdir()));
-    } catch {
-      // Compared as given.
-    }
-    try {
-      const v = readJsonValidated(marker, isTmpMarker, root, 4096, { readOnly: true });
-      if (!v || !/^rl-[A-Za-z0-9]{6}$/.test(path.basename(v.dir)) || !tmps.has(path.dirname(v.dir))) return false;
-      if (!removeShortTmp(v)) return false;
-    } catch {
-      return false;
-    }
+    if (v && !removeShortTmp(v)) return false;
+  } catch {
+    return false;
   }
   fs.rmSync(root, { recursive: true, force: true });
   return true;
+}
+
+/**
+ * The short temp dir's tmp.json, read bounded and link-refusing and shaped as companionTmp writes it (an `rl-XXXXXX`
+ * directly in the OS temp dir): null when there is none, "bad" when one is there but cannot be taken as that.
+ * @param {string} root @returns {{ dir: string, token: string } | null | "bad"}
+ */
+function shortTmpMarker(root) {
+  const marker = path.join(root, TMP_FILE);
+  try {
+    fs.lstatSync(marker);
+  } catch (e) {
+    return /** @type {NodeJS.ErrnoException} */ (e).code === "ENOENT" ? null : "bad";
+  }
+  const tmps = new Set([os.tmpdir()]);
+  try {
+    tmps.add(fs.realpathSync(os.tmpdir()));
+  } catch {
+    // Compared as given.
+  }
+  try {
+    const v = readJsonValidated(marker, isTmpMarker, root, 4096, { readOnly: true });
+    return v && /^rl-[A-Za-z0-9]{6}$/.test(path.basename(v.dir)) && tmps.has(path.dirname(v.dir)) ? v : "bad";
+  } catch {
+    return "bad";
+  }
+}
+
+/**
+ * Where this snapshot's companion put its temp dir, so where a broker it started keeps its cxc-* session dir:
+ * `<snapshot>/tmp` (under any spelling of the root) or the short dir tmp.json records.
+ * @param {string} root
+ */
+function snapshotTmpDirs(root) {
+  const dirs = new Set(rootsOf(root).map((r) => path.join(r, "tmp")));
+  const v = shortTmpMarker(root);
+  if (v && v !== "bad") dirs.add(v.dir);
+  return dirs;
 }
 
 /**
@@ -873,26 +895,6 @@ function requestShutdown(socket, ms) {
   });
 }
 
-/** Removes the broker's `cxc-*` session dir only when it is a real directory in the OS temp dir that this user owns. @param {string | null} dir */
-function removeSessionDir(dir) {
-  if (!dir || !path.isAbsolute(dir) || !path.basename(dir).startsWith("cxc-")) return;
-  const tmp = os.tmpdir();
-  let realTmp = tmp;
-  try {
-    realTmp = fs.realpathSync(tmp);
-  } catch {
-    // Compared as given.
-  }
-  if (path.dirname(dir) !== tmp && path.dirname(dir) !== realTmp) return;
-  try {
-    const st = fs.lstatSync(dir);
-    if (!st.isDirectory() || st.uid !== process.getuid?.()) return;
-    fs.rmSync(dir, { recursive: true, force: true });
-  } catch {
-    // Gone already, or not ours to remove.
-  }
-}
-
 /**
  * Sends `sig` to `p`'s whole group, but only while a fresh read of `p` is still the very process recorded, so a group
  * id that changed hands is never signalled. Returns false when that could not be confirmed.
@@ -972,9 +974,12 @@ export async function stopCompanionBroker(root, opts = {}) {
     // verified broker's own args name (`--endpoint unix:<dir>/broker.sock`).
     /** @type {Map<number, string>} */
     const ownDirs = new Map();
+    const tmpDirs = snapshotTmpDirs(root);
     for (const b of leaders.values()) {
       const ep = ENDPOINT_ARG.exec(b.args);
-      if (ep) ownDirs.set(b.pid, ep[1]);
+      // Only a session dir inside this snapshot's own temp dir: a live argv naming any other socket redirects nothing
+      // (that broker then gets SIGTERM only; its session dir goes with the snapshot's temp dir).
+      if (ep && tmpDirs.has(path.dirname(ep[1]))) ownDirs.set(b.pid, ep[1]);
     }
 
     for (const b of leaders.values()) {
@@ -1066,12 +1071,8 @@ export async function stopCompanionBroker(root, opts = {}) {
     res.unattributed += leaderlessAppServers(last, snapshotSec, marker, new Set([...groups, ...goneRegistered]));
     if (res.left > 0) res.reason ??= "members_left";
     else if (res.unattributed > 0) res.reason ??= "unattributed";
-    if (res.left === 0) {
-      // Only a dir a live, verified broker's own args name. broker.json's sessionDir binds nothing (it is the broker's
-      // own claim): a gone broker's dir is never removed from it. Since 1.0.4 that dir is inside the snapshot's TMPDIR
-      // (companionTmp) and goes with the snapshot; an older one in the OS temp dir is left to the OS.
-      for (const dir of ownDirs.values()) removeSessionDir(dir);
-    }
+    // No cxc-* dir is removed here: since 1.0.4 it is inside the snapshot's temp dir (companionTmp) and goes with it;
+    // an older one in the OS temp dir is left to the OS. broker.json's sessionDir binds nothing.
   } catch {
     keep("unknown_rows");
   } finally {
@@ -1616,8 +1617,9 @@ async function sweepOne(root, name, table, remaining, anchor, tally) {
     if (!ownedRealDirectory(root)) return "unverified";
     const run = runsFrom(root);
     if (run === "ours") return { left: 1, unattributed: 0, reason: "members_left" };
-    // Any other process naming it (one started since the judgment, or one the owner check never looks at) is using it.
-    if (run === "named") return "in_use";
+    // Any other node running one of its scripts (started since the judgment, or one the owner check never looks at)
+    // is using it. A process that merely has the path in its args (an editor, a log tail) is not.
+    if (run === "script") return "in_use";
     // The parent too, as it was when the sweep began: one swapped for a link since (a same-user race) would point the
     // remove somewhere else. This narrows that window; Node has no unlinkat to close it.
     const ws = dirIdentity(path.dirname(root));
@@ -1629,16 +1631,17 @@ async function sweepOne(root, name, table, remaining, anchor, tally) {
 }
 
 /**
- * What runs from `root` now: "ours" (a companion or broker of this user, or the table could not be read), "named" (any
- * other process whose args name it), or null.
- * @param {string} root @returns {"ours" | "named" | null}
+ * What runs from `root` now: "ours" (a companion or broker of this user, or the table could not be read), "script"
+ * (any other node running a script inside it, `<node> <root>/...`), or null.
+ * @param {string} root @returns {"ours" | "script" | null}
  */
 function runsFrom(root) {
   const procs = readProcs();
   if (procs === null) return "ours";
   const roots = rootsOf(root);
   if (procs.some((p) => p.uid === process.getuid?.() && (brokerArgv(p.args, roots) !== null || brokerArgv(p.args, roots, COMPANION_SCRIPT) !== null))) return "ours";
-  return procs.some((p) => roots.some((r) => p.args.includes(r))) ? "named" : null;
+  const script = roots.map((r) => new RegExp(`^\\S*/node ${escapeRe(r + path.sep)}`));
+  return procs.some((p) => script.some((re) => re.test(p.args))) ? "script" : null;
 }
 
 /** Below every supported platform's sun_path size (macOS 104, Linux 108), less a terminating byte. */
