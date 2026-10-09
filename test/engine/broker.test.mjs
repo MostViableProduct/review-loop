@@ -1128,20 +1128,28 @@ test("R2: a dead round's snapshot that a node runs a script from is kept in use 
   // Not a companion or broker: some other node running a script inside the snapshot, and an editor-like process
   // that only has the path among its args.
   const user = spawn(process.execPath, [helper], { stdio: "ignore" });
+  // The same script as a shell starts it: `node` by name, with a flag before the script.
+  const bare = spawn("node", ["--no-warnings", helper], { stdio: "ignore", env: { ...process.env, PATH: `${path.dirname(process.execPath)}:${process.env.PATH}` } });
   const viewer = spawn(process.execPath, ["-e", "setTimeout(() => {}, 30000)", s.root], { stdio: "ignore" });
+  /** @param {import("node:child_process").ChildProcess} c */
+  const gone = async (c) => {
+    c.kill("SIGKILL");
+    assert.ok(await until(() => !alive(/** @type {number} */ (c.pid)), 5000));
+  };
   try {
-    assert.ok(await until(() => alive(/** @type {number} */ (user.pid)) && alive(/** @type {number} */ (viewer.pid)), 5000));
+    assert.ok(await until(() => [user, bare, viewer].every((c) => alive(/** @type {number} */ (c.pid))), 5000));
     const res = await withSeams({ REVIEW_LOOP_TEST_SWEEP_TICK: "0" }, () => sweepStaleSnapshots(parent, { all: true }));
     assert.equal(res.skipped.get(path.basename(s.root)), "in_use", JSON.stringify([...res.skipped]));
     assert.ok(fs.existsSync(s.root), "kept while a node runs a script from it");
-    user.kill("SIGKILL");
-    assert.ok(await until(() => !alive(/** @type {number} */ (user.pid)), 5000));
+    await gone(user);
+    const held = await withSeams({ REVIEW_LOOP_TEST_SWEEP_TICK: "0" }, () => sweepStaleSnapshots(parent, { all: true }));
+    assert.equal(held.skipped.get(path.basename(s.root)), "in_use", "still held by `node --no-warnings <script>`, started by name");
+    await gone(bare);
     const again = await withSeams({ REVIEW_LOOP_TEST_SWEEP_TICK: "0" }, () => sweepStaleSnapshots(parent, { all: true }));
     assert.equal(again.swept, 1, `the path in another process's args holds nothing: ${JSON.stringify({ ...again, skipped: [...again.skipped] })}`);
     assert.ok(!fs.existsSync(s.root));
   } finally {
-    user.kill("SIGKILL");
-    viewer.kill("SIGKILL");
+    for (const c of [user, bare, viewer]) c.kill("SIGKILL");
   }
 });
 
@@ -1181,6 +1189,31 @@ test("B: a live broker whose argv names another session's socket gets no shutdow
     assert.ok(alive(/** @type {number} */ (v.pid)) && fs.existsSync(path.join(victim, "broker.sock")), "the other session and its dir are untouched");
   } finally {
     if (b.pid) signalPid(b.pid, "SIGKILL", { group: true });
+    if (v.pid) signalPid(v.pid, "SIGKILL", { group: true });
+    fs.rmSync(victim, { recursive: true, force: true });
+  }
+});
+
+test("B: a link swapped in for the broker's session dir under the snapshot's temp dir carries no shutdown request to another session", { timeout: 60_000 }, async () => {
+  const parent = path.join(dir, "ws-endpoint-link");
+  fs.mkdirSync(parent, { mode: 0o700 });
+  const victim = fs.mkdtempSync(path.join(os.tmpdir(), "cxc-"));
+  const victimLog = path.join(dir, "victim-link.log");
+  fs.writeFileSync(path.join(dir, "victim-link-broker.mjs"), BROKER);
+  const v = spawn(process.execPath, [path.join(dir, "victim-link-broker.mjs"), "serve", "--endpoint", `unix:${path.join(victim, "broker.sock")}`], { detached: true, stdio: "ignore", env: { ...env, BROKER_LOG: victimLog } });
+  const s = await deadSnapshot(parent);
+  try {
+    assert.ok(await until(() => fs.existsSync(path.join(victim, "broker.sock")), 5000), "the other session serves");
+    // The broker keeps listening on its moved socket; its endpoint's path now leads, through a link, to the victim's.
+    fs.renameSync(s.sessionDir, `${s.sessionDir}.moved`);
+    fs.symlinkSync(victim, s.sessionDir);
+    const r = await stopCompanionBroker(s.root);
+    assert.deepEqual([r.left, r.reason], [0, null], JSON.stringify(r));
+    assert.ok(await until(() => !alive(s.pid), 5000), "this snapshot's broker was stopped by SIGTERM instead");
+    assert.ok(!fs.existsSync(victimLog), "no broker/shutdown reached the other session through the link");
+    assert.ok(alive(/** @type {number} */ (v.pid)), "the other session is untouched");
+  } finally {
+    signalPid(s.pid, "SIGKILL", { group: true });
     if (v.pid) signalPid(v.pid, "SIGKILL", { group: true });
     fs.rmSync(victim, { recursive: true, force: true });
   }

@@ -988,7 +988,9 @@ export async function stopCompanionBroker(root, opts = {}) {
         continue;
       }
       const dir = ownDirs.get(b.pid);
-      if (dir) await requestShutdown(path.join(dir, "broker.sock"), Math.min(2000, remaining()));
+      // Right before connecting, the session dir and the temp dir holding it must each be a real directory of ours:
+      // a link swapped in under the snapshot's temp dir would carry the request to another session's socket.
+      if (dir && ownedRealDirectory(dir) && ownedRealDirectory(path.dirname(dir))) await requestShutdown(path.join(dir, "broker.sock"), Math.min(2000, remaining()));
       if (await exitedWithin(b.pid, Math.min(1000, remaining()))) continue;
       if (remaining() <= 0) {
         keep("deadline");
@@ -1632,7 +1634,7 @@ async function sweepOne(root, name, table, remaining, anchor, tally) {
 
 /**
  * What runs from `root` now: "ours" (a companion or broker of this user, or the table could not be read), "script"
- * (any other node running a script inside it, `<node> <root>/...`), or null.
+ * (any other node running a script inside it: `node` bare or by path, any flags, then `<root>/...`), or null.
  * @param {string} root @returns {"ours" | "script" | null}
  */
 function runsFrom(root) {
@@ -1640,7 +1642,7 @@ function runsFrom(root) {
   if (procs === null) return "ours";
   const roots = rootsOf(root);
   if (procs.some((p) => p.uid === process.getuid?.() && (brokerArgv(p.args, roots) !== null || brokerArgv(p.args, roots, COMPANION_SCRIPT) !== null))) return "ours";
-  const script = roots.map((r) => new RegExp(`^\\S*/node ${escapeRe(r + path.sep)}`));
+  const script = roots.map((r) => new RegExp(`^(?:\\S*/)?node(?:\\s+-\\S+)*\\s+${escapeRe(r + path.sep)}`));
   return procs.some((p) => script.some((re) => re.test(p.args))) ? "script" : null;
 }
 
