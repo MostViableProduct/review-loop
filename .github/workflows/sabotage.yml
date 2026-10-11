@@ -76,6 +76,7 @@ on:
       - "test/contract/events.test.mjs"
       - "plugin/skills/review-loop/SKILL.md"
       - "test/contract/skill.test.mjs"
+      - "docs/superpowers/specs/2026-10-10-value-triage-design.md"
       # The gate tests: a test edited to keep its name but lose its assertion re-runs the sabotage it must catch.
       - "test/contract/events.test.mjs"
       - "test/contract/content-discipline.test.mjs"
@@ -188,6 +189,7 @@ on:
       - "test/engine/classify-rubric.test.mjs"
       - "plugin/skills/review-loop/SKILL.md"
       - "test/contract/skill.test.mjs"
+      - "docs/superpowers/specs/2026-10-10-value-triage-design.md"
 permissions:
   contents: read
 concurrency:

@@ -257,8 +257,8 @@ fewer findings.
 - The exit-10 step fixes or disputes **blocking** findings only. It lists advisory findings to the user, one line
   each with `why` and likelihood, and doesn't change code for them unless the user asks.
 - The result report shows the `blocking`, `advisory` and `unvalued` counts next to the score.
-- The paging section adds `diminishing_returns` (exit 21): show the triage table from `awaiting.detail`, offer
-  `awaiting.options` with "Accept (logged override) (Recommended)" first. Its `continue` resets the value counter
+- The paging section adds `diminishing_returns` (exit 21): show the triage table from `awaiting.detail`, then offer
+  `awaiting.options` in order, with none marked recommended. Its `continue` resets the value counter
   and keeps the mode, unlike the checkpoint and stall `continue`.
 - A contract test over `SKILL.md` asserts each of these statements is present, so the skill can't fall behind the
   engine silently.
@@ -301,15 +301,20 @@ findings are reported to the user in one line each, never "fixed" by default, an
 
 ### D5. Page on value, not only on score
 
+*Amended 2026-10-11 to the owner's decision at plan review round 2: the counter rule and the page's options below
+replace the first draft's, which reset on `plausible` too (so the page could never fire) and recommended accepting.
+`CLAUDE.md` "Deviations from the spec" has the reasoning.*
+
 - **New pause reason** `diminishing_returns`. It joins `PAUSE_REASONS` (`codes.mjs`) and `OPTIONS` (`policy.mjs`)
-  with the options `["accept", "continue", "stop"]`. Its label for `accept` is "Accept (logged override)
-  (Recommended)", and `exitForAwaiting` maps it to exit 21, like a stall.
+  with the options `["continue", "accept", "stop"]`, labelled "Keep fixing (the round limit stays)", "Accept (logged
+  override)" and "Stop — I'll take over". None is recommended, and `exitForAwaiting` maps it to exit 21, like a stall.
 - **Counter.** The record gains `sinceValue`, an integer starting at 0, reset by `resetIfNewLoop`.
   - After each failing round, `applyRoundResult` sets `sinceValue` to 0 when any blocking finding is critical, is
-    unvalued, has `why: money_data_security`, or has effective likelihood `real_path` or `plausible`. Otherwise it
-    adds 1. So the page, whose first option recommends accepting, never fires while a security, money or data
-    finding is blocking, or while the reviewer's output is malformed: those keep the loop fixing, and reach the owner
-    through the existing checkpoint and stall pages, which make no recommendation.
+    unvalued, has `why: money_data_security`, or has effective likelihood `real_path`. Otherwise it adds 1, so a round
+    in which only plausible, lower-stakes findings block counts toward the page. The page never fires while a
+    critical, security, money or data finding is blocking, while something on a real path blocks, or while the
+    reviewer's output is malformed: those keep the loop fixing, and reach the owner through the existing checkpoint
+    and stall pages. What the page's rounds blocked on is still realistic, so it recommends no option.
   - At 2, the round pages `diminishing_returns`, checked before the checkpoint and stall checks.
   - A passing round needs no counter.
   - The existing score-based stall check is kept unchanged.
@@ -393,7 +398,7 @@ file the engine doesn't execute.
 | `awaiting.context` | `string \| null` | `awaitHuman` | the context digest current when the page was raised |
 | `history[].context` | `string \| null` | `cmdRun` | the sha of the context bytes the focus held |
 | `classes` | array, max 50 | `cmdRun`, after scoring | every label came from a valued finding of an earlier or this round |
-| `sinceValue` | int ≥ 0 | `applyRoundResult`, `applyDecision`, `resetIfNewLoop` | 0 after any round with a realistic or critical blocking finding |
+| `sinceValue` | int ≥ 0 | `applyRoundResult`, `applyDecision`, `resetIfNewLoop` | 0 after any failing round with a critical, unvalued, money/data/security or `real_path` blocking finding |
 | `lastFindings[].class`, `.blocking` | `string \| null`, boolean | `cmdRun` | `blocking` is what `classify` returned for that finding |
 | `disputes[].class`, `waivers[].class` | `string \| null` | `cmdDispute`, `applyDecision` | copied from the named `lastFindings` entry |
 
@@ -497,7 +502,7 @@ Every item below is a `node --test` case. "(sabotage)" means it also gets a regi
    - a PR round reads its context at the base `prepareBranch` resolved, not the marker's older base: move the base
      between the gate's denial and the round, with a different context file at each, and the round uses the new one
      (sabotage: read the marker's base);
-   - it pages after two failing rounds with no realistic or critical blocking finding;
+   - it pages after two failing rounds in which only plausible, lower-stakes findings blocked;
    - a critical in round 2 resets the counter;
    - `continue` resets it to 0. (sabotage: a threshold of 3)
    - a capped record paged with `diminishing_returns` stays capped after `continue`, with `nextCheckpoint` unchanged

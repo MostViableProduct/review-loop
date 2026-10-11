@@ -29,3 +29,12 @@ test("SKILL.md: the diminishing_returns page, with no recommendation, and its ow
   ]) assert.ok(SKILL.includes(s), s);
   assert.ok(OPTIONS.diminishing_returns.every((o) => !optionLabel("diminishing_returns", o).includes("Recommended")), "the engine recommends none, as the skill says");
 });
+
+test("the spec's D5 describes the value page the engine serves: options in order, their labels, none recommended", () => {
+  const spec = fs.readFileSync("docs/superpowers/specs/2026-10-10-value-triage-design.md", "utf8").replace(/\s+/g, " ");
+  const d5 = spec.slice(spec.indexOf("### D5."), spec.indexOf("### D6."));
+  const order = `with the options \`${JSON.stringify(OPTIONS.diminishing_returns).replaceAll(",", ", ")}\``;
+  assert.ok(d5.includes(order), order);
+  for (const o of OPTIONS.diminishing_returns) assert.ok(d5.includes(`"${optionLabel("diminishing_returns", o)}"`), o);
+  assert.ok(!d5.includes("(Recommended)") && !spec.includes("Accept (logged override) (Recommended)"), "the spec recommends no option on this page");
+});

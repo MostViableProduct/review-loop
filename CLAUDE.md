@@ -394,7 +394,9 @@ These are copied from the spec, and every task implicitly includes them.
   `critical`, `unvalued`, `money_data_security` or an effective `real_path`, so a round with only `plausible`,
   non-security, non-money/data findings blocking counts toward the page, and the page recommends no option (Keep
   fixing / Accept (logged override) / Stop), since what blocks is still realistic (owner's decision 2026-10-11, plan
-  review round 2). Pinned by `value-page-blocking-reset` and the `state-policy` diminishing-returns tests.
+  review round 2). Pinned by `value-page-blocking-reset` and the `state-policy` diminishing-returns tests. The
+  spec's D5 is amended to match (PR review round 4), and `skill.test.mjs` fails if the two disagree again (row
+  `spec-value-page`).
 - Value-triage D1 default sentence (plan review round 8): the spec's default focus line says "assume a small team,
   trusted maintainers, and internet-facing users", while the same default has no trusted actors, so Codex could
   label a maintainer-only finding `requires_out_of_model_actor` and the engine would floor it to `plausible`. The line
