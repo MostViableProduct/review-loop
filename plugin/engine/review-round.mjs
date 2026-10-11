@@ -246,7 +246,9 @@ async function cmdRun(v) {
       projectRoot: prep.projectRoot,
       instructions: prep.instructions,
       disputes: rec.disputes.map((d) => ({ title: d.title, file: d.file ?? undefined, reason: d.reason })),
-      rubric: loadRubricSection()
+      rubric: loadRubricSection(),
+      context,
+      classes: rec.classes.map((c) => ({ label: c.label, dimension: c.dimension, rounds: c.rounds, disposition: c.disposition }))
     });
     const eff = effectiveCodex({ report: true });
     const seamTimeout = process.env.REVIEW_LOOP_TEST_SEAMS === "1" ? Number(process.env.REVIEW_LOOP_TEST_COMPANION_TIMEOUT_MS) : NaN;

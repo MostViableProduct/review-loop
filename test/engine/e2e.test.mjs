@@ -1263,3 +1263,19 @@ test("push after a pass, with only the base context changed: push_not_reviewed, 
   assert.equal(g(bare, "rev-parse", "refs/heads/feature"), before, "nothing was pushed");
   assert.equal(statusCalls().length, posted, "no success status was posted");
 });
+
+test("the focus Codex receives holds the context file verbatim, or the default sentence; no event carries the context", () => {
+  const repo = specRepo();
+  const spec = writeFile(repo, "docs/specs/feature.md", "x");
+  const CTX = "Small internal tool, secret-word-5521.\nTrusted: admins\n";
+  writeFile(repo, ".claude/review-context.md", CTX);
+  const run = () => cli(["run", "--kind", "spec", "--path", spec, "--project-root", repo]);
+  respond([]);
+  assert.equal(run().code, 0);
+  const focusOf = (/** @type {number} */ i) => stubCalls()[i].args.find((/** @type {string} */ a) => a.startsWith("ARTIFACT UNDER REVIEW"));
+  assert.ok(focusOf(0)?.includes(`<<<CONTEXT\n${CTX}CONTEXT>>>`), "verbatim between the delimiters");
+  assert.doesNotMatch(fs.readFileSync(path.join(env.REVIEW_LOOP_STATE_DIR, "events.jsonl"), "utf8"), /secret-word-5521/);
+  fs.rmSync(path.join(repo, ".claude", "review-context.md"));
+  assert.equal(run().code, 0);
+  assert.ok(focusOf(1)?.includes("OPERATING CONTEXT: (none stated; assume a small team and internet-facing users, and trust no actor)"));
+});
