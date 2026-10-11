@@ -67,7 +67,7 @@ const STUBBORN_CHILD = 'spawn(process.execPath, ["-e", "process.on(\\"SIGTERM\\"
  * `termLeavesChild`: on SIGTERM it exits without closing its child; `termSpawnsChild`: on SIGTERM it first starts a
  * new child (in its group, ignoring SIGTERM), then exits. `appServer`: the child is a `codex app-server` (by its
  * command line) that ignores SIGTERM. `nonLeader`: the broker runs in its (exited) launcher's group, not its own.
- * @param {string} h @param {{ ignoreTerm?: boolean, termLeavesChild?: boolean, termSpawnsChild?: boolean, appServer?: boolean, nonLeader?: boolean }} [o]
+ * @param {string} h @param {{ ignoreTerm?: boolean, termLeavesChild?: boolean, termSpawnsChild?: boolean, appServer?: boolean, nonLeader?: boolean, heldZombie?: boolean }} [o]
  */
 function orphanBroker(h, o = {}) {
   const root = path.join(h, "state", "ws", "plugin-AbC123");
@@ -99,6 +99,18 @@ function orphanBroker(h, o = {}) {
     const until = Date.now() + 5000;
     while (Date.now() < until && !(fs.existsSync(pidFile) && fs.readFileSync(pidFile, "utf8"))) spawnSync("/bin/sleep", ["0.05"]);
     c = { pid: Number(fs.readFileSync(pidFile, "utf8")) };
+  } else if (o.heldZombie) {
+    // A holder that stays the broker's parent and does not reap it until a second after it dies (its event loop is
+    // blocked; the spawnSync ps calls reap only their own child): a SIGKILLed leader is a zombie for that second.
+    const pidFile = path.join(h, "held.pid");
+    const holder = path.join(h, "holder.cjs");
+    fs.writeFileSync(holder, `const { spawn, spawnSync } = require("node:child_process"); const fs = require("node:fs"); const b = spawn(process.execPath, [${broker}, "serve"], { detached: true, stdio: "ignore" }); fs.writeFileSync(${JSON.stringify(pidFile)}, String(b.pid)); const nap = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); const until = Date.now() + 60000; while (Date.now() < until && !/Z/.test(spawnSync("/bin/ps", ["-o", "stat=", "-p", String(b.pid)], { encoding: "utf8" }).stdout)) nap(20); nap(1000); setTimeout(() => process.exit(0), 200);`);
+    const launch = `const c = require("node:child_process").spawn(process.execPath, [${JSON.stringify(holder)}], { detached: true, stdio: "ignore" }); c.unref(); process.stdout.write(String(c.pid));`;
+    orphans.push(Number(spawnSync(process.execPath, ["-e", launch], { encoding: "utf8" }).stdout));
+    const until = Date.now() + 5000;
+    while (Date.now() < until && !(fs.existsSync(pidFile) && fs.readFileSync(pidFile, "utf8"))) spawnSync("/bin/sleep", ["0.05"]);
+    c = { pid: Number(fs.readFileSync(pidFile, "utf8")) };
+    group = c.pid;
   } else {
     const launch = `const c = require("node:child_process").spawn(process.execPath, [${broker}, "serve"], { detached: true, stdio: "ignore" }); c.unref(); process.stdout.write(String(c.pid));`;
     c = { pid: Number(spawnSync(process.execPath, ["-e", launch], { encoding: "utf8" }).stdout) };
@@ -533,7 +545,9 @@ test("a note capped at 200 characters never splits a surrogate pair", async () =
 
 test("orphaned_brokers: never signals; the stop-orphan command it prints stops the tree, and refuses a changed process", { timeout: 30_000 }, async () => {
   const h = healthy();
-  const pid = orphanBroker(h, { ignoreTerm: true });
+  // Its SIGKILLed leader stays a zombie for a second: killed before its member, it would read as reissued at the
+  // member's leader check and end the stop with the member alive.
+  const pid = orphanBroker(h, { ignoreTerm: true, heldZombie: true });
   const r = await check("orphaned_brokers").run(ctx());
   assert.equal(r.status, "warn");
   assert.ok(process.kill(pid, 0), "doctor signalled nothing");
@@ -551,7 +565,11 @@ test("orphaned_brokers: never signals; the stop-orphan command it prints stops t
   const ok = run(cmd[3]);
   assert.equal(ok.status, 0, ok.stdout);
   assert.equal(JSON.parse(ok.stdout).status, "stopped");
-  assert.equal(spawnSync("/bin/ps", ["-o", "pid=", "-g", String(pid)], { encoding: "utf8" }).stdout.trim(), "", "the broker and the child that ignored SIGTERM are gone");
+  // The zombie leader is reaped a second after its death; the member that ignored SIGTERM must be gone with it.
+  const group = () => spawnSync("/bin/ps", ["-o", "pid=", "-g", String(pid)], { encoding: "utf8" }).stdout.trim();
+  const end = Date.now() + 5000;
+  while (Date.now() < end && group() !== "") spawnSync("/bin/sleep", ["0.05"]);
+  assert.equal(group(), "", "the broker and the child that ignored SIGTERM are gone");
   assert.equal((await check("orphaned_brokers").run(ctx())).status, "pass");
 });
 

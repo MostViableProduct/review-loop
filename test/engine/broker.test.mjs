@@ -393,10 +393,11 @@ test("H1: the signal path asks ps about a pid alone only once a table read match
   fs.mkdirSync(bin, { recursive: true });
   const arm = path.join(bin, "arm");
   const calls = path.join(bin, "calls");
-  // Once armed, every ps call is logged and each table read takes 1.5 s (under ps's 2 s timeout): a second read ends
-  // past the 3 s budget, so a third must never start.
-  fs.writeFileSync(path.join(bin, "ps"), `#!/bin/sh\nif [ -e ${arm} ]; then echo "$*" >> ${calls}; case " $* " in *" -A "*) /bin/sleep 1.5;; esac; fi\nexec /bin/ps "$@"\n`, { mode: 0o755 });
-  const child = spawn(process.execPath, [ROUND, "run", "--kind", "spec", "--path", specRepo()], { env: { ...env, ...psSeam(bin), STUB_SLEEP_MS: "30000" }, stdio: "ignore" });
+  // Once armed, every ps call is logged. A 1.5 s gap between table reads (the seam), against the 3 s budget: the second
+  // read starts at about 1.6 s and a third would start at about 3.2 s, so it must never start. Slow ps sleeps instead
+  // ran into ps's own 2 s timeout on a slow runner.
+  fs.writeFileSync(path.join(bin, "ps"), `#!/bin/sh\nif [ -e ${arm} ]; then echo "$*" >> ${calls}; fi\nexec /bin/ps "$@"\n`, { mode: 0o755 });
+  const child = spawn(process.execPath, [ROUND, "run", "--kind", "spec", "--path", specRepo()], { env: { ...env, ...psSeam(bin), STUB_SLEEP_MS: "30000", REVIEW_LOOP_TEST_REAP_GAP_MS: "1500" }, stdio: "ignore" });
   try {
     assert.ok(await until(() => fs.existsSync(env.BROKER_READY), 20_000), "the companion started its broker");
     assert.ok(await until(() => snapshots().length === 1, 5000));
