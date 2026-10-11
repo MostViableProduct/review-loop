@@ -30,7 +30,7 @@ const observe = (/** @type {string} */ file) => {
   const st = fs.lstatSync(file);
   return { raw: fs.readFileSync(file, "utf8"), mtimeMs: st.mtimeMs, ino: st.ino };
 };
-import { applyRoundResult, applyDecision, resetIfNewLoop, awaitHuman, sameFinding, withoutWaived, EXIT } from "../../plugin/engine/lib/policy.mjs";
+import { applyRoundResult, applyDecision, resetIfNewLoop, awaitHuman, sameFinding, withoutWaived, EXIT, optionLabel, updateClasses, refreshDispositions } from "../../plugin/engine/lib/policy.mjs";
 import { scoreFindings } from "../../plugin/engine/lib/scoring.mjs";
 import { tmpDir } from "./helpers.mjs";
 import { sha256hex } from "../../plugin/engine/lib/fsutil.mjs";
@@ -45,7 +45,9 @@ beforeEach(() => {
 
 const ID = { kind: "spec", path: "/r/docs/specs/a.md" };
 const low = (t = "[Usability] x") => ({ severity: "low", title: t, file: "a.md" });
-const round = (rec, findings, fp = "fp", context = "default") => applyRoundResult(rec, scoreFindings(findings), findings, fp, { context });
+/** Every finding unvalued and blocking: what a round of findings with no VALUE line is. @param {unknown[]} findings */
+const unvaluedTriage = (findings) => ({ blocking: findings.length, advisory: 0, unvalued: findings.length, why: { critical: 0, unvalued: findings.length, accepted_risk: 0, money_data_security: 0, repeat_class: 0, realistic: 0, low_value: 0 }, likelihoods: findings.map(() => null) });
+const round = (rec, findings, fp = "fp", context = "default", triage = unvaluedTriage(findings)) => applyRoundResult(rec, scoreFindings(findings), findings, fp, { context, triage });
 
 test("a pending summary with any item field the prompt hook reads missing or mistyped is quarantined and read as absent", () => {
   const good = { key: "k", kind: "spec", label: "spec x", status: "pending", reason: null, command: "node x" };
@@ -1152,4 +1154,83 @@ test("accept and override are refused when the context changed since the page; s
   assert.equal(pin.awaiting?.context, null, "a page with no score records no context");
   applyDecision(pin, "override", "fp", "c".repeat(64));
   assert.equal(pin.reviewedContext, "c".repeat(64), "override binds the context current at the decision");
+});
+
+/** @param {Record<string, number>} why @param {Array<string | null>} likelihoods */
+const tri = (why, likelihoods, advisory = 0) => {
+  const w = { critical: 0, unvalued: 0, accepted_risk: 0, money_data_security: 0, repeat_class: 0, realistic: 0, low_value: 0, ...why };
+  return { blocking: likelihoods.length, advisory, unvalued: w.unvalued, why: w, likelihoods };
+};
+const MED = [{ severity: "medium", title: "[Reliability] retry storm" }];
+const PLAUSIBLE = () => tri({ realistic: 1 }, ["plausible"]);
+
+test("diminishing_returns: two failing rounds with only plausible blocking findings page, with no option recommended", () => {
+  const r = newRecord(ID);
+  assert.equal(round(r, MED, "fp", "default", PLAUSIBLE()), EXIT.NEEDS_FIXES);
+  assert.equal(r.sinceValue, 1);
+  assert.equal(round(r, MED, "fp", "default", PLAUSIBLE()), EXIT.STALL);
+  assert.equal(r.awaiting?.reason, "diminishing_returns");
+  assert.deepEqual(r.awaiting?.options, ["continue", "accept", "stop"]);
+  assert.deepEqual(r.awaiting?.options.map((o) => optionLabel("diminishing_returns", o)), ["Keep fixing (the round limit stays)", "Accept (logged override)", "Stop — I'll take over"]);
+  assert.equal(optionLabel("checkpoint", "accept"), "Accept current score (logged override)");
+  assert.deepEqual(r.awaiting?.detail, { rounds: [{ round: 1, blocking: 1, advisory: 0, unvalued: 0, likelihoods: ["plausible"] }, { round: 2, blocking: 1, advisory: 0, unvalued: 0, likelihoods: ["plausible"] }] });
+});
+
+test("diminishing_returns never fires while a security, money or data finding, or a malformed one, is blocking", () => {
+  for (const t of [tri({ money_data_security: 1 }, ["requires_misconfig"]), tri({ unvalued: 1 }, [null])]) {
+    const r = newRecord(ID);
+    round(r, MED, "fp", "default", t);
+    assert.equal(round(r, MED, "fp", "default", t), EXIT.NEEDS_FIXES);
+    assert.equal(r.sinceValue, 0);
+  }
+});
+
+test("diminishing_returns: a critical or a real_path finding resets the counter", () => {
+  const r = newRecord(ID);
+  round(r, MED, "fp", "default", PLAUSIBLE());
+  round(r, [{ severity: "critical", title: "[Safety] x" }], "fp", "default", tri({ critical: 1 }, ["plausible"]));
+  assert.equal(r.sinceValue, 0);
+  round(r, MED, "fp", "default", PLAUSIBLE());
+  round(r, MED, "fp", "default", tri({ realistic: 1 }, ["real_path"]));
+  assert.deepEqual([r.sinceValue, r.status], [0, "needs_fixes"]);
+});
+
+test("diminishing_returns: continue resets the counter and keeps a capped loop capped, its checkpoint unchanged", () => {
+  const r = newRecord(ID);
+  round(r, MED, "fp", "default", PLAUSIBLE());
+  round(r, MED, "fp", "default", PLAUSIBLE());
+  assert.equal(r.awaiting?.reason, "diminishing_returns");
+  applyDecision(r, "continue", "fp", "default");
+  assert.deepEqual([r.status, r.mode, r.nextCheckpoint, r.sinceValue, r.uncappedStart], ["needs_fixes", "capped", 10, 0, null]);
+});
+
+test("a checkpoint answered 'more' resets the value counter: no value page one round later", () => {
+  const r = newRecord(ID);
+  r.round = 8;
+  round(r, MED, "fp", "default", tri({ realistic: 1 }, ["real_path"]));
+  round(r, MED, "fp", "default", PLAUSIBLE());
+  assert.deepEqual([r.awaiting?.reason, r.sinceValue], ["checkpoint", 1]);
+  applyDecision(r, "more", "fp", "default");
+  assert.equal(r.sinceValue, 0);
+  assert.equal(round(r, MED, "fp", "default", PLAUSIBLE()), EXIT.NEEDS_FIXES);
+});
+
+test("classes: rounds accumulate per key, the newest 50 are kept, and disputes and waivers set the disposition", () => {
+  const r = newRecord(ID);
+  r.round = 1;
+  updateClasses(r, [{ dimension: "Safety", label: "Token Handling" }, { dimension: "Safety", label: "token  handling" }]);
+  r.round = 3;
+  updateClasses(r, [{ dimension: "Safety", label: "token handling" }]);
+  assert.deepEqual(r.classes, [{ label: "Token Handling", key: "Safety:token handling", dimension: "Safety", rounds: [1, 3], disposition: "raised" }]);
+  r.disputes.push({ title: "t", file: null, reason: "r", raisedAgain: 0, class: "Safety:token handling" });
+  refreshDispositions(r);
+  assert.equal(r.classes[0].disposition, "disputed");
+  r.waivers.push({ title: "t", file: null, at: "2026-10-10T00:00:00.000Z", class: "Safety:token handling" });
+  refreshDispositions(r);
+  assert.equal(r.classes[0].disposition, "waived", "waived outranks disputed");
+  r.round = 4;
+  updateClasses(r, Array.from({ length: 60 }, (_, i) => ({ dimension: "Usability", label: `copy ${i}` })));
+  assert.equal(r.classes.length, 50);
+  assert.equal(r.classes.at(-1)?.label, "copy 59");
+  assert.ok(!r.classes.some((c) => c.key === "Safety:token handling"), "the least recently raised class goes first");
 });

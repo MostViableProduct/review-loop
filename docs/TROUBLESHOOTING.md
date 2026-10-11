@@ -49,8 +49,11 @@ https://github.com/MostViableProduct/review-loop/issues with the code and the li
 | `decision_stale` | 1 | re-run the review round to get a fresh page |  |
 | `detection_failed` | 4 | run `review-loop doctor`; if it persists, report a bug |  |
 | `diff_too_large` | 1 | split the change into smaller reviews |  |
+| `diminishing_returns` | 1 | answer Claude's question; to see it again, resume the review loop in Claude (the review-loop:review-loop skill) |  |
+| `dispute_advisory` | 2 | only a blocking finding can be disputed: an advisory one doesn't hold the gate, so leave it (or fix it if the user asks) |  |
 | `dispute_deadlock` | 1 | decide the disputed finding when Claude asks; to see the question again, resume the review loop in Claude (the review-loop:review-loop skill) |  |
 | `doctor_failed` | 1 | fix each check marked FAIL (each prints its fix), then re-run |  |
+| `event_shape_invalid` | 4 | run `review-loop doctor`; if it persists, report a bug |  |
 | `events_path_rejected` | 1 | choose an events path that is a regular file you own (or does not exist yet) in a real directory you own; symlinks, directories and missing parents are refused |  |
 | `events_unwritable` | 1 | run `review-loop config set events.path <file>` |  |
 | `fetch_failed` | 1 | check your network and git remote access, then re-run the review round |  |

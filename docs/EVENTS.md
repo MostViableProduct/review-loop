@@ -42,7 +42,7 @@ that does not pass its check is written as `null`.
 |---|---|---|
 | `cli.exit` | cli | `command`, `duration_ms` |
 | `gate.decision` | hook | `gate`, `outcome`, `preset`, `pending_count` |
-| `round.result` | round | `kind`, `round`, `pass`, `mean`, `dims`, `model`, `effort`, `effort_source`, `preset`, `duration_ms` |
+| `round.result` | round | `kind`, `round`, `pass`, `mean`, `dims`, `model`, `effort`, `effort_source`, `preset`, `duration_ms`, `scored`, `context`, `context_digest`, `blocking`, `advisory`, `unvalued`, `why_critical`, `why_unvalued`, `why_accepted_risk`, `why_money_data_security`, `why_repeat_class`, `why_realistic`, `why_low_value`, `actor_not_trusted`, `theoretical_floored`, `unknown_accepted_risk`, `accepted_risk_out_of_scope`, `likelihoods`, `impacts`, `severities`, `dimensions`, `advisory_dimensions` |
 | `round.decision` | round | `kind`, `option`, `reason` |
 | `round.dispute` | round | `kind` |
 | `round.push` | round | — |

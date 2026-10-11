@@ -1,6 +1,7 @@
 // The single registry of codes, event types and CLI exit codes (spec §8.3). README tables are generated from it.
 import { PRESET_NAMES } from "./presets.mjs";
-import { DIMENSIONS } from "./scoring.mjs";
+import { DIMENSIONS, SEVERITIES } from "./scoring.mjs";
+import { LIKELIHOODS, IMPACTS, WHYS } from "./value.mjs";
 
 export const CLI_EXIT = Object.freeze({ ok: 0, user_action: 1, usage: 2, cancelled: 3, internal: 4 });
 
@@ -125,6 +126,7 @@ export const CODES = Object.freeze({
   command_failed: { category: "internal", remedy: DOCTOR },
   output_too_large: { category: "internal", remedy: DOCTOR },
   codex_output_invalid: { category: "internal", remedy: DOCTOR },
+  event_shape_invalid: { category: "internal", remedy: DOCTOR },
   unknown_page_reason: { category: "internal", remedy: DOCTOR },
   hook_input_invalid: { category: "internal", remedy: DOCTOR },
   hook_input_too_large: { category: "internal", remedy: DOCTOR },
@@ -202,6 +204,7 @@ export const CODES = Object.freeze({
   rubric_source_mismatch: { category: "user_action", remedy: "restore the rubric file, or point rubricPath at a different one" },
   rubric_source_missing: { category: "user_action", remedy: "restore the rubric file, or point rubricPath at a different one" },
   review_context_invalid: { category: "user_action", remedy: "fix or remove the project's `.claude/review-context.md` as the error says (a context file that can't be read whole is never used), then re-run the review round" },
+  dispute_advisory: { category: "usage", remedy: "only a blocking finding can be disputed: an advisory one doesn't hold the gate, so leave it (or fix it if the user asks)" },
   state_dir_insecure: { category: "user_action", remedy: "a state or repo path is not readable/writable by you, is owned by someone else, or is group/world-accessible: make the review-loop state directory yours with mode 700 (`chmod 700`) and repo paths accessible, then re-run" },
   state_missing: { category: "user_action", remedy: "run `review-loop setup`" },
   state_symlink_rejected: { category: "user_action", remedy: "replace the linked path in the state directory with a real directory" },
@@ -210,6 +213,7 @@ export const CODES = Object.freeze({
   // engine: reasons a round pauses for the human
   checkpoint: { category: "user_action", remedy: "answer Claude's question; to see it again, resume the review loop in Claude (the review-loop:review-loop skill)" },
   stall: { category: "user_action", remedy: "answer Claude's question; to see it again, resume the review loop in Claude (the review-loop:review-loop skill)" },
+  diminishing_returns: { category: "user_action", remedy: "answer Claude's question; to see it again, resume the review loop in Claude (the review-loop:review-loop skill)" },
   dispute_deadlock: { category: "user_action", remedy: "decide the disputed finding when Claude asks; to see the question again, resume the review loop in Claude (the review-loop:review-loop skill)" },
   criss_cross: { category: "user_action", remedy: `merge the base into the branch, then ${RERUN}` },
   push_rejected: { category: "user_action", remedy: `pull the remote changes, then ${RERUN}` },
@@ -245,7 +249,35 @@ export const BROKER_STOP_REASONS = Object.freeze([
 const SWEEP_COUNT_MAX = 65_536;
 /** `review-round.mjs stop-orphan`'s outcomes (only "stopped" is a success). */
 export const STOP_ORPHAN_STATUSES = Object.freeze(["stopped", "mismatch", "still_running", "unverified", "leader_gone"]);
-export const PAUSE_REASONS = Object.freeze(["checkpoint", "stall", "dispute_deadlock", "criss_cross", "push_rejected", "head_diverged", "plugin_pin"]);
+export const PAUSE_REASONS = Object.freeze(["checkpoint", "stall", "diminishing_returns", "dispute_deadlock", "criss_cross", "push_rejected", "head_diverged", "plugin_pin"]);
+
+const tally = int(0, 10_000);
+const hex12 = (/** @type {unknown} */ v) => (typeof v === "string" && /^[0-9a-f]{12}$/.test(v) ? v : null);
+/** round.result's histograms (spec D7): each holds exactly its enum's values as keys. */
+export const ROUND_HISTOGRAMS = Object.freeze({
+  likelihoods: Object.freeze([...LIKELIHOODS, "none"]),
+  // IMPACTS already holds "none", which an unvalued finding is also counted under.
+  impacts: IMPACTS,
+  severities: SEVERITIES,
+  dimensions: DIMENSIONS,
+  advisory_dimensions: DIMENSIONS
+});
+/** @param {readonly string[]} keys */
+const histOf = (keys) => (/** @type {unknown} */ v) => {
+  if (typeof v !== "object" || v === null || Array.isArray(v)) return null;
+  const rec = /** @type {Record<string, unknown>} */ (v);
+  return Object.keys(rec).length === keys.length && keys.every((k) => tally(rec[k]) !== null) ? rec : null;
+};
+const ROUND_COUNTS = Object.freeze(["blocking", "advisory", "unvalued", ...WHYS.map((w) => `why_${w}`), "actor_not_trusted", "theoretical_floored", "unknown_accepted_risk", "accepted_risk_out_of_scope"]);
+/** Every field a scored round.result must carry, and an unscored one must not. */
+export const ROUND_COUNT_FIELDS = Object.freeze([...ROUND_COUNTS, ...Object.keys(ROUND_HISTOGRAMS)]);
+/** What every round.result says: which round ran, under which preset, and for how long. */
+const ROUND_BASE_FIELDS = Object.freeze(["kind", "round", "pass", "preset", "duration_ms"]);
+// A scored round also says what it scored and where its Codex settings came from. model and effort stay nullable:
+// null is Codex's own default, which review-loop can't see (codexcfg.mjs effectiveCodex).
+const ROUND_SCORE_FIELDS = Object.freeze(["mean", "dims", "effort_source"]);
+// Never on an unscored round, not even as null: it has no score, and made no Codex call whose settings it could report.
+const ROUND_SCORED_ONLY = Object.freeze([...ROUND_SCORE_FIELDS, "model", "effort", ...ROUND_COUNT_FIELDS]);
 
 /** @param {unknown} v */
 function dimsOf(v) {
@@ -269,7 +301,10 @@ export const EVENT_CATALOG = Object.freeze({
     sources: ["round"],
     data: {
       kind: oneOf(KINDS), round: int(0, 10_000), pass: bool, mean: num(0, 10), dims: dimsOf, model: token, effort: token,
-      effort_source: oneOf(["config", "codex-inherited"]), preset: oneOf(PRESET_NAMES), duration_ms: int(0, 86_400_000)
+      effort_source: oneOf(["config", "codex-inherited"]), preset: oneOf(PRESET_NAMES), duration_ms: int(0, 86_400_000),
+      scored: bool, context: oneOf(["file", "default", "none"]), context_digest: hex12,
+      ...Object.fromEntries(ROUND_COUNTS.map((f) => [f, tally])),
+      ...Object.fromEntries(Object.entries(ROUND_HISTOGRAMS).map(([f, keys]) => [f, histOf(keys)]))
     }
   },
   "round.decision": { sources: ["round"], data: { kind: oneOf(KINDS), option: oneOf(DECISION_OPTIONS), reason: oneOf(PAUSE_REASONS) } },
@@ -291,6 +326,36 @@ export const EVENT_CATALOG = Object.freeze({
   override: { sources: ["hook", "round", "cli"], data: { kind: oneOf(["branch", "artifact"]), action: oneOf(["kill_switch", "kill_switch_ignored", "manual", "skip_review"]) } },
   event_unregistered: { sources: ["cli", "hook", "round"], data: {} }
 });
+
+/**
+ * round.result's cross-field rule (spec D7). The per-field validators turn a missing value into null, which can't tell
+ * "this round scored nothing" from "a count went missing", so the raw data is checked before that.
+ * @param {Record<string, unknown>} d
+ * @returns {string[]} problems; empty when valid
+ */
+export function roundResultProblems(d) {
+  if (typeof d.scored !== "boolean") return ["scored"];
+  const spec = EVENT_CATALOG["round.result"].data;
+  const required = d.scored ? [...ROUND_BASE_FIELDS, ...ROUND_SCORE_FIELDS] : ROUND_BASE_FIELDS;
+  const problems = required.filter((f) => d[f] === undefined || spec[f](d[f]) === null);
+  // model and effort may be null (Codex's own default) but must be said: a missing key is a caller that forgot them.
+  if (d.scored) problems.push(...["model", "effort"].filter((f) => !Object.hasOwn(d, f) || (d[f] !== null && spec[f](d[f]) === null)));
+  if (d.scored) problems.push(...ROUND_COUNT_FIELDS.filter((f) => d[f] === undefined || spec[f](d[f]) === null));
+  else problems.push(...ROUND_SCORED_ONLY.filter((f) => Object.hasOwn(d, f)));
+  // A scored round always read a context: which one it was is part of the evidence. An unscored one may have ended
+  // before reading it (null), but never names a kind outside the enum.
+  if (d.scored ? spec.context(d.context) === null : d.context !== undefined && d.context !== null && spec.context(d.context) === null) problems.push("context");
+  if (d.context === "file" ? spec.context_digest(d.context_digest) === null : d.context_digest !== undefined && d.context_digest !== null) problems.push("context_digest");
+  if (!d.scored || problems.length) return problems;
+  const n = /** @type {Record<string, number>} */ (d);
+  const sum = (/** @type {unknown} */ o) => Object.values(/** @type {Record<string, number>} */ (o)).reduce((s, x) => s + x, 0);
+  const total = n.blocking + n.advisory;
+  if (n.unvalued > n.blocking) problems.push("unvalued");
+  if (WHYS.reduce((s, w) => s + n[`why_${w}`], 0) !== total) problems.push("why");
+  for (const h of ["likelihoods", "impacts", "severities", "dimensions"]) if (sum(d[h]) !== total) problems.push(h);
+  if (sum(d.advisory_dimensions) !== n.advisory) problems.push("advisory_dimensions");
+  return problems;
+}
 
 /** @param {string} code @returns {Category} */
 export function categoryOf(code) {

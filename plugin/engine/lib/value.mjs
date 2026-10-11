@@ -158,7 +158,7 @@ const zeros = (keys) => /** @type {Record<string, number>} */ (Object.fromEntrie
 export function triageCounts(rows) {
   const why = zeros(WHYS);
   const likelihoods = zeros([...LIKELIHOODS, "none"]);
-  const impacts = zeros([...IMPACTS, "none"]);
+  const impacts = zeros(IMPACTS);
   const severities = zeros(SEVERITIES);
   const dimensions = zeros(DIMENSIONS);
   const advisoryDimensions = zeros(DIMENSIONS);

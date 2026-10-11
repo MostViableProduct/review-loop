@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { CODES, EVENT_CATALOG } from "./codes.mjs";
+import { CODES, EVENT_CATALOG, ROUND_HISTOGRAMS, roundResultProblems } from "./codes.mjs";
 import { readConfig } from "./config.mjs";
 import { ReviewLoopError } from "./errors.mjs";
 import { ensurePrivateDir, MiB } from "./fsutil.mjs";
@@ -117,6 +117,11 @@ function assertStateDir() {
 
 /** @param {EventInput} e */
 function build(e) {
+  // Checked on the raw data: the per-field validators below would turn a missing count into null (spec D7).
+  if (e.event === "round.result") {
+    const problems = roundResultProblems(e.data ?? {});
+    if (problems.length) throw new ReviewLoopError("event_shape_invalid", `round.result: ${problems.join(", ")}`);
+  }
   const known = Object.hasOwn(EVENT_CATALOG, e.event);
   const spec = known ? EVENT_CATALOG[e.event] : EVENT_CATALOG.event_unregistered;
   const code = Object.hasOwn(CODES, e.code) ? e.code : "unregistered_code";
@@ -154,7 +159,15 @@ export function buildEvent(e) {
 export function emitEvent(e) {
   try {
     return writeEvent(build(e));
-  } catch {
+  } catch (err) {
+    // A malformed round.result is our bug: said on stderr (the event's name, never its data), never written.
+    if (err instanceof ReviewLoopError && err.code === "event_shape_invalid") {
+      try {
+        process.stderr.write(`review-loop: event_shape_invalid ${Object.hasOwn(EVENT_CATALOG, e.event) ? e.event : "event_unregistered"}\n`);
+      } catch {
+        // A closed stderr must not escape either: emitEvent never throws, so a logging failure never changes a decision.
+      }
+    }
     return false;
   }
 }
@@ -215,7 +228,9 @@ export function maxLineBytes(name) {
   const spec = EVENT_CATALOG[name];
   /** @type {Record<string, unknown>} */
   const data = {};
-  for (const k of Object.keys(spec.data)) data[k] = k === "dims" ? Object.fromEntries(Array.from({ length: 11 }, (_, i) => [`Dimension${i}Name`, 10.0])) : X64;
+  for (const k of Object.keys(spec.data)) {
+    data[k] = k === "dims" ? Object.fromEntries(Array.from({ length: 11 }, (_, i) => [`Dimension${i}Name`, 10.0])) : Object.hasOwn(ROUND_HISTOGRAMS, k) ? Object.fromEntries(ROUND_HISTOGRAMS[/** @type {keyof typeof ROUND_HISTOGRAMS} */ (k)].map((x) => [x, 10_000])) : X64;
+  }
   const worst = { schema: SCHEMA, ts: new Date().toISOString(), run_id: RUN_ID, source: "round", event: name, code: X64, detail: X64, exit_code: 255, version: "999.999.999", session_id: X64, artifact_key: "f".repeat(24), data };
   return Buffer.byteLength(JSON.stringify(worst) + "\n");
 }

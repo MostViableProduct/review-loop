@@ -24,7 +24,8 @@ import {
   stateSubdir,
   assertKey
 } from "./lib/state.mjs";
-import { EXIT, OPTION_LABELS, applyRoundResult, applyDecision, awaitHuman, resetIfNewLoop, withoutWaived, exitForAwaiting } from "./lib/policy.mjs";
+import { EXIT, optionLabel, updateClasses, refreshDispositions, applyRoundResult, applyDecision, awaitHuman, resetIfNewLoop, withoutWaived, exitForAwaiting } from "./lib/policy.mjs";
+import { parseValue, classify, triageCounts, classKey } from "./lib/value.mjs";
 import { scoreFindings, parseDimensionTag } from "./lib/scoring.mjs";
 import { verifyPin, verifyUsage, runCompanion, parseCompanionOutput, companionFailureText, writePin, pinFile, installedTreeDigest, snapshotVerified, stopCompanionBroker, sweepStaleSnapshots, afterSnapshotSecond, countOrphanBrokers, stopOrphan, STOP_DEADLINE_MS, SWEEP_MANUAL_DEADLINE_MS, SNAPSHOT_NAME, sweepEventData } from "./lib/pin.mjs";
 import { loadRubricSection, buildFocus } from "./lib/rubric.mjs";
@@ -102,7 +103,7 @@ function clearMarker(key, identity) {
 function awaitingView(rec) {
   if (!rec.awaiting) return null;
   const options = /** @type {string[]} */ (rec.awaiting.options ?? []);
-  return { reason: rec.awaiting.reason, detail: rec.awaiting.detail ?? {}, options: options.map((id) => ({ id, label: OPTION_LABELS[/** @type {keyof typeof OPTION_LABELS} */ (id)] ?? id })) };
+  return { reason: rec.awaiting.reason, detail: rec.awaiting.detail ?? {}, options: options.map((id) => ({ id, label: optionLabel(rec.awaiting?.reason ?? "", id) })) };
 }
 
 /**
@@ -178,6 +179,7 @@ async function cmdRun(v) {
   let prep = null;
   /** @type {{ root: string, cleanup: () => void } | null} */
   let plugin = null;
+  /** @type {import("./lib/context.mjs").Context | null} */ let roundContext = null;
   try {
     // First, before any early return: a round that has nothing to review still clears what killed rounds left.
     await sweepSnapshots(key);
@@ -195,6 +197,7 @@ async function cmdRun(v) {
     // the base prepareBranch just resolved, never the marker's (it can be older than the base the diff is against).
     const context = await readContext(identity, prep.projectRoot, { baseSha: prep.baseSha });
     const contextTag = contextDigest(context);
+    roundContext = context;
     resetIfNewLoop(rec, prep.fingerprint, contextTag);
     if ((rec.status === "passed" || rec.status === "overridden") && rec.reviewedFingerprint === prep.fingerprint && rec.reviewedContext === contextTag) {
       clearMarker(key, identity);
@@ -227,7 +230,7 @@ async function cmdRun(v) {
         prep.fingerprint
       );
       writeRecord(rec);
-      roundResult(errorCode(err), key, identity, rec, EXIT.PIN, timing);
+      roundResult(errorCode(err), key, identity, rec, EXIT.PIN, timing, roundContext);
       return out({ ...base, status: rec.status, awaiting: awaitingView(rec) }, EXIT.PIN);
     }
 
@@ -267,7 +270,7 @@ async function cmdRun(v) {
       if (!PIN_CODES.has(errorCode(err))) throw err;
       awaitHuman(rec, "plugin_pin", { code: errorCode(err), message: /** @type {Error} */ (err).message, tree: installedTreeDigest() });
       writeRecord(rec);
-      roundResult(errorCode(err), key, identity, rec, EXIT.PIN, timing);
+      roundResult(errorCode(err), key, identity, rec, EXIT.PIN, timing, roundContext);
       return out({ ...base, status: rec.status, awaiting: awaitingView(rec) }, EXIT.PIN);
     }
     if (parsed.kind === "codex_error") throw new ReviewLoopError("codex_output_invalid", parsed.message);
@@ -277,9 +280,23 @@ async function cmdRun(v) {
     }
 
     const findings = withoutWaived(parsed.findings, rec.waivers);
-    const scored = scoreFindings(findings);
-    const exit = applyRoundResult(rec, scored, findings, prep.fingerprint, { context: contextTag });
-    rec.lastFindings = findings.map((f) => ({ title: f.title, file: f.file, severity: f.severity }));
+    // Split before scoring (spec D3): scoreFindings sees only what blocks, so the bands and the 9.2 bar keep their meaning.
+    const triageCtx = {
+      trustedActors: new Set(context.kind === "file" ? context.trusted : []),
+      acceptedRisks: context.kind === "file" ? context.accepted : new Map(),
+      priorClasses: new Set(rec.classes.map((c) => c.key))
+    };
+    const rows = findings.map((f) => {
+      const parsedValue = parseValue(f.body);
+      const value = parsedValue.ok ? parsedValue.value : null;
+      return { finding: f, severity: f.severity, dimension: parseDimensionTag(f.title).dimension, value, triage: classify({ severity: f.severity, title: f.title, value }, triageCtx) };
+    });
+    const blocking = rows.filter((r) => r.triage.blocking).map((r) => r.finding);
+    const counts = triageCounts(rows);
+    const scored = scoreFindings(blocking);
+    const exit = applyRoundResult(rec, scored, blocking, prep.fingerprint, { context: contextTag, triage: counts.history });
+    rec.lastFindings = rows.map((r) => ({ title: r.finding.title, file: r.finding.file, severity: r.finding.severity, class: r.value ? classKey(r.dimension, r.value.class) : null, blocking: r.triage.blocking }));
+    updateClasses(rec, rows.flatMap((r) => (r.value ? [{ dimension: r.dimension, label: r.value.class }] : [])));
     rec.meta = { ...(rec.meta ?? {}), codex: { model: eff.model, effort: eff.effort, source: eff.source } };
     writeRecord(rec);
     if (exit === EXIT.PASS) clearMarker(key, identity);
@@ -305,7 +322,10 @@ async function cmdRun(v) {
         effort: eff.effort,
         effort_source: eff.source,
         preset: timing.preset,
-        duration_ms: Date.now() - started
+        duration_ms: Date.now() - started,
+        scored: true,
+        ...contextFields(context),
+        ...counts.event
       }
     });
 
@@ -323,18 +343,25 @@ async function cmdRun(v) {
           arithmetic: scored.arithmetic,
           pass: scored.pass,
           untagged: scored.untagged,
+          blocking: counts.history.blocking,
+          advisory: counts.history.advisory,
+          unvalued: counts.history.unvalued,
           dimensions: scored.dimensions.map((d) => ({ name: d.name, score: d.score, worst: d.worst, count: d.count }))
         },
-        findings: findings.map((f, i) => ({
+        findings: rows.map((r, i) => ({
           i,
-          dimension: parseDimensionTag(f.title).dimension,
-          severity: f.severity,
-          title: f.title,
-          file: f.file,
-          lines: `${f.line_start}-${f.line_end}`,
-          confidence: f.confidence,
-          body: f.body,
-          recommendation: f.recommendation
+          dimension: r.dimension,
+          severity: r.finding.severity,
+          title: r.finding.title,
+          file: r.finding.file,
+          lines: `${r.finding.line_start}-${r.finding.line_end}`,
+          confidence: r.finding.confidence,
+          body: r.finding.body,
+          recommendation: r.finding.recommendation,
+          value: r.value,
+          blocking: r.triage.blocking,
+          why: r.triage.why,
+          accepted_risk_text: r.triage.why === "accepted_risk" && r.value ? triageCtx.acceptedRisks.get(r.value.accepted_risk)?.text ?? null : null
         })),
         waived: parsed.findings.length - findings.length,
         disputes: rec.disputes,
@@ -347,7 +374,7 @@ async function cmdRun(v) {
     if (err instanceof HumanNeeded) {
       awaitHuman(rec, err.reason, { ...err.detail, message: err.message });
       writeRecord(rec);
-      roundResult(err.reason, key, identity, rec, exitForAwaiting(err.reason), timing);
+      roundResult(err.reason, key, identity, rec, exitForAwaiting(err.reason), timing, roundContext);
       return out({ ...base, status: rec.status, awaiting: awaitingView(rec) }, exitForAwaiting(err.reason));
     }
     const code = errorCode(err);
@@ -355,7 +382,7 @@ async function cmdRun(v) {
     rec.lastError = { code, message: /** @type {Error} */ (err).message, at: new Date().toISOString() };
     rec.errorAttempts = (rec.errorAttempts ?? 0) + 1;
     writeRecord(rec);
-    roundResult(code, key, identity, rec, EXIT.OP_ERROR, timing);
+    roundResult(code, key, identity, rec, EXIT.OP_ERROR, timing, roundContext);
     const output = err instanceof ReviewLoopError && typeof err.details.output === "string" && err.details.output ? { output: err.details.output } : {};
     return out({ ...base, status: "op_error", error: { code, message: /** @type {Error} */ (err).message, retryable: !NON_RETRYABLE.has(code), attempts: rec.errorAttempts, ...output } }, EXIT.OP_ERROR);
   } finally {
@@ -489,12 +516,15 @@ async function cmdStopOrphan(v) {
 /** @param {{ kind: string }} identity */
 const eventKind = (identity) => (identity.kind === "branch" ? "pr" : identity.kind);
 
+/** The event's context fields: the kind, and a 12-hex prefix of a file's digest (no readable content). @param {import("./lib/context.mjs").Context | null} c */
+const contextFields = (c) => ({ context: c ? c.kind : null, context_digest: c && c.kind === "file" ? c.digest.slice(0, 12) : null });
+
 /**
- * A round that ended without a score: a pause for the human, or an operational error.
+ * A round that ended without a score: a pause for the human, or an operational error. It carries no counts.
  * @param {string} code @param {string} key @param {{ kind: string }} identity @param {{ round: number }} rec @param {number} exit
- * @param {{ started: number, preset: string }} timing
+ * @param {{ started: number, preset: string }} timing @param {import("./lib/context.mjs").Context | null} context null before it was read
  */
-function roundResult(code, key, identity, rec, exit, timing) {
+function roundResult(code, key, identity, rec, exit, timing, context) {
   emitEvent({
     source: "round",
     event: "round.result",
@@ -502,7 +532,7 @@ function roundResult(code, key, identity, rec, exit, timing) {
     artifact_key: key,
     session_id: SESSION,
     exit_code: exit,
-    data: { kind: eventKind(identity), round: rec.round, pass: false, preset: timing.preset, duration_ms: Date.now() - timing.started }
+    data: { kind: eventKind(identity), round: rec.round, pass: false, preset: timing.preset, duration_ms: Date.now() - timing.started, scored: false, ...contextFields(context) }
   });
 }
 
@@ -557,10 +587,13 @@ async function cmdDispute(v) {
     throw new ReviewLoopError("bad_args", "--finding <index from the last round> and --reason <evidence> are required");
   }
   return withLockedRecord(v, async (rec, key, identity) => {
-    const f = /** @type {Array<{ title: string, file: string }>} */ (rec.lastFindings ?? [])[idx];
+    const f = /** @type {Array<{ title: string, file: string, class?: string | null, blocking?: boolean }>} */ (rec.lastFindings ?? [])[idx];
     if (!f) throw new ReviewLoopError("bad_args", `no finding #${idx} in the last round`);
+    // An advisory finding doesn't hold the gate, so there is nothing to dispute (spec D3); nothing is written.
+    if (f.blocking === false) throw new ReviewLoopError("dispute_advisory", `finding #${idx} is advisory: it doesn't block the gate, so it can't be disputed`);
     rec.disputes = rec.disputes.filter((d) => d.title !== f.title || d.file !== f.file);
-    rec.disputes.push({ title: f.title, file: f.file, reason: /** @type {string} */ (v.reason).trim(), raisedAgain: 0 });
+    rec.disputes.push({ title: f.title, file: f.file, reason: /** @type {string} */ (v.reason).trim(), raisedAgain: 0, class: f.class ?? null });
+    refreshDispositions(rec);
     writeRecord(rec);
     emitEvent({ source: "round", event: "round.dispute", code: "ok", artifact_key: key, session_id: SESSION, data: { kind: eventKind(identity) } });
     out({ key, disputes: rec.disputes }, EXIT.PASS);
