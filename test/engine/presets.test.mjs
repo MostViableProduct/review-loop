@@ -235,6 +235,7 @@ test("pr: a reviewed PR logs exactly one allowed decision (code reviewed)", () =
     const r = newRecord({ kind: "branch", baseRepo: "me/proj", baseBranch: "main", headRepo: "me/proj", headBranch: "feature" });
     r.status = "passed";
     r.reviewedFingerprint = `${s.head}:${s.base}`;
+    r.reviewedContext = "default";
     writeRecord(r);
   } finally {
     if (prev === undefined) delete process.env.REVIEW_LOOP_STATE_DIR;

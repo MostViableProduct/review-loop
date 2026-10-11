@@ -3,10 +3,11 @@ import { fileURLToPath } from "node:url";
 import { parseMerge, parsePrCreate } from "./cmdparse.mjs";
 import { ReviewLoopError, errorCode } from "./errors.mjs";
 import { ghBranchSha, ghInstalled, ghPrView } from "./github.mjs";
-import { commitExists, fetchExactRef, githubRemotes, mergeBaseValidity, repoRoot } from "./git.mjs";
+import { commitExists, fetchExactRef, fetchSource, mergeBaseValidity, repoRoot } from "./git.mjs";
 import { killSwitchForSession, resolveBaseSlug } from "./prgate.mjs";
 import { advisoryText, gateOutcome } from "./presets.mjs";
 import { identityKey, isClearedAt, readRecord } from "./state.mjs";
+import { gateContextDigest } from "./context.mjs";
 
 const SHA = /^[0-9a-f]{40}$/;
 // The hook's timeout is 40 s (hooks.json); every gh and git call of one evaluation ends inside this.
@@ -48,11 +49,6 @@ function createsPr(command) {
     if (errorCode(err) === "pr_via_api_unsupported") return true;
     throw err;
   }
-}
-
-/** A configured remote for the repo, so the user's own git auth applies; else its https URL. @param {string} root @param {string} slug @param {number} deadlineAt */
-async function fetchSource(root, slug, deadlineAt) {
-  return (await githubRemotes(root, deadlineAt)).find((r) => r.slug === slug)?.name ?? `https://github.com/${slug}.git`;
 }
 
 /**
@@ -179,8 +175,12 @@ async function bound(root, target, deadlineAt) {
   if (!(await commitExists(root, bind, deadlineAt))) await fetch(pr.headRepo, pr.headRefName);
   const v = await mergeBaseValidity(root, bind, baseTip, deadlineAt);
   if (!v.ok) return deny(UNVERIFIABLE, `the merge-base of ${short(bind)} with PR #${n}'s base can't be computed (${v.reason})`);
-  if (!isClearedAt(identity, `${bind}:${v.mergeBase}`)) {
-    return deny("pr_merge_unbound", `commit ${short(bind)} was reviewed against a different base than PR #${n}'s current one; run the review-loop for PR #${n} again`);
+  const mergeContext = await gateContextDigest(identity, root, { baseSha: baseTip, deadlineAt });
+  if (mergeContext === "error") {
+    return deny("review_context_invalid", `${pr.baseRefName}'s .claude/review-context.md can't be read (a link, not a regular file, over 8 KiB, or an invalid line); fix or remove it there, then run the review-loop for PR #${n} again`);
+  }
+  if (!isClearedAt(identity, `${bind}:${v.mergeBase}`, mergeContext)) {
+    return deny("pr_merge_unbound", `commit ${short(bind)} was reviewed against a different base, or under a different .claude/review-context.md, than PR #${n}'s current one; run the review-loop for PR #${n} again`);
   }
 
   if (pr.state === "MERGED") return deny("pr_merge_not_open", `PR #${n} is already merged`);

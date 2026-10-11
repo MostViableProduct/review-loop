@@ -24,6 +24,8 @@ Enforced Codex adversarial review inside Claude Code, packaged as a Homebrew CLI
 | `plugin/engine/review-round.mjs`, `review-gate-hook.mjs`, `lib/*.mjs` | the engine (moved in Task 1) | 1, 6–14 |
 | `plugin/engine/lib/config.mjs` | `configPath`, `isConfig`, `readConfig`, `writeConfig`, `DEFAULT_CONFIG` | 6 |
 | `plugin/engine/lib/codes.mjs` | code registry, `EVENT_CATALOG`, `CLI_EXIT` | 7 |
+| `plugin/engine/lib/value.mjs` | value triage: the enums and their `*_TEXT` definitions, `RULES`, `TRUSTED_ACTORS`, `parseValue` (the `VALUE` trailer), `classify`, `triageCounts`, `normalizeLabel`, `classKey`. Imports only `scoring.mjs` | value triage 1 |
+| `plugin/engine/lib/context.mjs` | the one reader of `.claude/review-context.md`: `readContext` (working tree, or a PR's base commit via `ls-tree`/`cat-file`), `parseContext`, `contextDigest`, `gateContextDigest` | value triage 2 |
 | `plugin/engine/lib/events.mjs` | `emitEvent(input)` (= `writeEvent(buildEvent(input))`), `buildEvent`, `writeEvent`, `eventsPath`, `eventsPathProblem`, `stateDirProblem`, `validateLine`, `maxLineBytes`, `PACKAGE_VERSION`: the schema-v1 writer (replaces `appendEvent`); the two `*Problem` predicates are the writer's own rules, shared with `config set` and doctor | 7, 19, 20 |
 | `plugin/engine/lib/paths.mjs` | `stateRoot`, `stateSubdir` (re-exported by `state.mjs`), `claudeConfigDir` (`CLAUDE_CONFIG_DIR` or `~/.claude`; used by `pin.mjs`, `settings.mjs`, doctor) | 7, 20 |
 | `scripts/list-codes.mjs` | `listCodes(root)`: every code literal the source can emit; T-OBS-3 uses it | 7 |
@@ -145,6 +147,17 @@ These are copied from the spec, and every task implicitly includes them.
 - **A piped test command must not hide a failure.** Every `npm test … | tail/grep` in this plan is
   wrapped as `(set -o pipefail; …)`, so its exit status is the test run's. Keep that when adding
   commands. A gate reads the status **and** the `# fail 0` line.
+- **Value triage (1.1.0; spec `docs/superpowers/specs/2026-10-10-value-triage-design.md`).** `cmdRun` classifies
+  each finding (`classify`, rule order in `value.mjs` `RULES`) before scoring, and `scoreFindings` sees only the
+  blocking ones; `blocking + advisory` is every finding after waivers, and a finding with no valid `VALUE` line is
+  unvalued and blocks. A pass binds `reviewedContext` (a file's sha256, `"default"` or `"none"`; never `"error"`),
+  and every gate compares it: `isClearedAt(identity, fingerprint, context)` for the Stop, PR and merge gates,
+  `prverify` and `cmdPush` at the base each already resolves. A PR's context is read at its base commit, never the
+  head. The Stop gate re-opens a passed artifact whose record's `reviewedContext` differs from the current file,
+  whatever the session baseline says. `diminishing_returns` (exit 21) pages after `VALUE_PAGE_ROUNDS` (2) failing
+  rounds with only plausible, lower-stakes findings blocking, and recommends no option. Events carry counts, enums and a 12-hex digest prefix only, and a
+  `round.result` whose counts don't agree (`roundResultProblems`) is never written (stderr names
+  `event_shape_invalid`).
 
 ## Deviations from the spec
 
@@ -375,6 +388,37 @@ These are copied from the spec, and every task implicitly includes them.
   - The `<owner>` placeholder: `release.test.mjs` lists every file in Task 28's sed scope that holds it, split into files to substitute and files where it is literal text (`plugin/engine/lib/cmdparse.mjs`, `scripts/content-gate.mjs`, each pinned to its exact lines), which Task 28 must exclude from its sed. A new occurrence anywhere, including a new line in a literal file, fails the test until it is classified.
   - Workflow credentials: the release checkout has `persist-credentials: false`; only the `GitHub release` and `Plugin tag` steps get `github.token`, and every clone or push authenticates through `GIT_CONFIG_COUNT`/`GIT_CONFIG_KEY_0=http.https://github.com/.extraheader`/`GIT_CONFIG_VALUE_0` (env, masked), never a token in a URL, argv or `.git/config`. The tap CI job sets `HOMEBREW_NO_AUTO_UPDATE: 1`. The formula needs Homebrew >= 6.0.3 (`formula_opt_bin`).
   - The marketplace is not pinned to a git ref (`MARKETPLACE_SOURCE` has none; the entry's source is `./plugin`), so branch protection on `main` is the control (spec §9). `docs/SECURITY.md` says so, and `readme.test.mjs` fails if either half changes without it.
+- Value-triage D5 counter (implementation plan, Task 6): the spec resets `sinceValue` on any blocking finding with
+  likelihood `real_path` or `plausible`, but every blocking `why` is `critical`, `unvalued`, `money_data_security`
+  or `realistic` (which needs one of those two likelihoods), so the page could never fire. The counter resets on
+  `critical`, `unvalued`, `money_data_security` or an effective `real_path`, so a round with only `plausible`,
+  non-security, non-money/data findings blocking counts toward the page, and the page recommends no option (Keep
+  fixing / Accept (logged override) / Stop), since what blocks is still realistic (owner's decision 2026-10-11, plan
+  review round 2). Pinned by `value-page-blocking-reset` and the `state-policy` diminishing-returns tests. The
+  spec's D5 is amended to match (PR review round 4), and `skill.test.mjs` fails if the two disagree again (row
+  `spec-value-page`).
+- Value-triage D1 default sentence (plan review round 8): the spec's default focus line says "assume a small team,
+  trusted maintainers, and internet-facing users", while the same default has no trusted actors, so Codex could
+  label a maintainer-only finding `requires_out_of_model_actor` and the engine would floor it to `plausible`. The line
+  reads "assume a small team and internet-facing users, and trust no actor", matching the empty trusted set.
+- Value-triage verification item 12: a `checkpoint` page comes from a scored round, so the unscored-page test uses
+  `plugin_pin`, the unscored page an e2e test can raise.
+- Value-triage final review (fixes to the plan, each pinned by the sabotage row named):
+  - Rule 5 skips a finding that `sameFinding`-matches a blocking entry of the previous round's `lastFindings`
+    (`classify`'s `blockedLastRound`). D4 aims rule 5 at "another instance of a listed class"; without this, a
+    plausible blocker left unfixed turned advisory one round later and the gate could pass with it. The focus adds
+    "A finding from the last round that is still present is not another instance: raise it again as before".
+    Rows `classify-unfixed-exempt`, `round-unfixed-exempt`, `focus-unfixed-reraise`.
+  - The Stop gate's context check skips `~/.claude/plans`: those plans are listed whatever the project, so each
+    project's context re-opened every untouched plan reviewed under another's (the spec assumed such a plan has no
+    project root). A plan the session edits is still reviewed. Row `plans-context-scope`.
+  - A linked `.claude` with no context file behind it is the default (the plan refused it, failing every review and
+    override in a repo whose `.claude` is shared). Nothing is read, and the default trusts no actor; a file behind the
+    link is still refused. Row `context-linked-dir-default`.
+  - `parseValue` also bounds the class label as normalized, the form `isClassKey` checks: lower-casing can lengthen a
+    label, and an over-long key quarantined the record. Row `class-label-normalized`.
+  - `parseContext` rejects a near-miss `Trusted:` or accepted-risk line (case, spacing, indent, another bullet) instead
+    of skipping it. Rows `context-near-miss-trusted`, `context-near-miss-ar`.
 
 ## Probes
 

@@ -49,8 +49,11 @@ https://github.com/MostViableProduct/review-loop/issues with the code and the li
 | `decision_stale` | 1 | re-run the review round to get a fresh page |  |
 | `detection_failed` | 4 | run `review-loop doctor`; if it persists, report a bug |  |
 | `diff_too_large` | 1 | split the change into smaller reviews |  |
+| `diminishing_returns` | 1 | answer Claude's question; to see it again, resume the review loop in Claude (the review-loop:review-loop skill) |  |
+| `dispute_advisory` | 2 | only a blocking finding can be disputed: an advisory one doesn't hold the gate, so leave it (or fix it if the user asks) |  |
 | `dispute_deadlock` | 1 | decide the disputed finding when Claude asks; to see the question again, resume the review loop in Claude (the review-loop:review-loop skill) |  |
 | `doctor_failed` | 1 | fix each check marked FAIL (each prints its fix), then re-run |  |
+| `event_shape_invalid` | 4 | run `review-loop doctor`; if it persists, report a bug |  |
 | `events_path_rejected` | 1 | choose an events path that is a regular file you own (or does not exist yet) in a real directory you own; symlinks, directories and missing parents are refused |  |
 | `events_unwritable` | 1 | run `review-loop config set events.path <file>` |  |
 | `fetch_failed` | 1 | check your network and git remote access, then re-run the review round |  |
@@ -127,7 +130,8 @@ https://github.com/MostViableProduct/review-loop/issues with the code and the li
 | `push_rejected` | 1 | pull the remote changes, then re-run the review round |  |
 | `push_target_protected` | 1 | push to a feature branch, not a protected one |  |
 | `repo_lookup_failed` | 1 | check that gh is signed in and the repository exists, then retry |  |
-| `review_pending` | 1 | let Claude finish the pending review (the review-loop:review-loop skill), then retry |  |
+| `review_context_invalid` | 1 | fix or remove the project's `.claude/review-context.md` as the error says (a context file that can't be read whole is never used), then re-run the review round |  |
+| `review_pending` | 1 | let Claude finish the pending review (the review-loop:review-loop skill), then retry | `review_context_invalid`, `context_changed` |
 | `rollback_skipped_modified` | 1 | the named file changed after migration; clear it and run `review-loop migrate --rollback` again to finish, or restore it by hand from the backup |  |
 | `rubric_source_mismatch` | 1 | restore the rubric file, or point rubricPath at a different one |  |
 | `rubric_source_missing` | 1 | restore the rubric file, or point rubricPath at a different one |  |
@@ -190,6 +194,60 @@ fix:
 | `live_check_failed` | `unparseable` | report a bug, with the output above |
 | `live_check_failed` | `unknown` | report a bug, with the output above |
 <!-- live-check:end -->
+
+## Why didn't this finding block?
+
+Codex ends every finding with a `VALUE` line: how likely it is, who it harms, what it costs to fix and what kind of
+defect it is. review-loop, not Codex, decides from that line whether the finding blocks. Only blocking findings
+count toward the score. The rest are advisory: Claude lists them for you and doesn't change code for them unless you
+ask.
+
+Two floors come first. A finding that needs an actor counts as `plausible` unless the actor is one your
+`.claude/review-context.md` lists after `Trusted:`. A `theoretical` finding that harms money, data or security counts
+as `plausible` too. So with no context file, nobody is trusted and nothing that harms money, data or security is
+waved through. Then the first matching rule decides:
+
+<!-- triage:start -->
+| # | When (the first rule that matches decides) | Result | `why` |
+|---|---|---|---|
+| 1 | severity is critical | blocks | `critical` |
+| 2 | the finding has no valid VALUE line | blocks | `unvalued` |
+| 3 | it cites an accepted risk whose dimension and class both equal its own | advisory | `accepted_risk` |
+| 4 | impact is money_or_data or security, and likelihood is real_path, plausible or requires_misconfig | blocks | `money_data_security` |
+| 5 | its dimension and class were raised in an earlier round, it is not last round's blocking finding raised again, and likelihood is not real_path | advisory | `repeat_class` |
+| 6 | severity is high or medium, and likelihood is real_path or plausible | blocks | `realistic` |
+| 7 | anything else | advisory | `low_value` |
+
+| Field | Value | Meaning |
+|---|---|---|
+| severity | `critical` | exploitable security, data loss, irreversible harm, or a core deliverable non-functional |
+| severity | `high` | a stated requirement unmet, or a wrong result on a real path |
+| severity | `medium` | a real defect, bounded or edge-triggered |
+| severity | `low` | defensive, polish, or rare and bounded, with no user-visible harm |
+| likelihood | `real_path` | normal use hits it |
+| likelihood | `plausible` | an ordinary mistake or race that a real user or operator could cause |
+| likelihood | `requires_misconfig` | only with a configuration the docs don't support |
+| likelihood | `requires_out_of_model_actor` | needs an actor the operating context lists as trusted; never an unauthenticated user or another member |
+| likelihood | `theoretical` | no concrete trigger |
+| impact | `money_or_data` | money is lost or charged wrongly, or data is lost, corrupted or exposed |
+| impact | `security` | an access, secret or integrity boundary is crossed |
+| impact | `user_visible` | an end user sees a wrong result or a failure |
+| impact | `operator_visible` | only an operator or maintainer sees it (logs, tooling, CI) |
+| impact | `none` | no one is affected |
+| fix_cost | `trivial` | a line or two |
+| fix_cost | `small` | a contained change in one place |
+| fix_cost | `design` | a design change across modules |
+| trusted actor | `maintainers` | the project's own developers |
+| trusted actor | `admins` | the application's administrators |
+| trusted actor | `operators` | the people who run the deployment |
+| trusted actor | `ci_runner` | the CI system running the project's own workflows |
+| trusted actor | `deploy_pipeline` | the project's own deploy tooling |
+| trusted actor | `hosting_provider` | the platform the project runs on |
+| trusted actor | `same_user_processes` | other processes running as the same OS user |
+<!-- triage:end -->
+
+A round's output gives each finding's `blocking`, `why` and `value`, and the score's `blocking`, `advisory` and
+`unvalued` counts. The context file's format is in the README ("Telling Codex about your project").
 
 ## Not in the tables
 

@@ -4,7 +4,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { tmpDir } from "../engine/helpers.mjs";
-import { splice, eventsTable } from "../../scripts/gen-readme-tables.mjs";
+import { splice, eventsTable, triageTable } from "../../scripts/gen-readme-tables.mjs";
+import { RULES } from "../../plugin/engine/lib/value.mjs";
 import { SCHEMA } from "../../plugin/engine/lib/events.mjs";
 import { CODES, EVENT_CATALOG } from "../../plugin/engine/lib/codes.mjs";
 import { MIN_CLAUDE } from "../../cli/lib/preflight.mjs";
@@ -37,12 +38,13 @@ test("T-OBS-8 (−): a hand-edited remedy fails --check", () => {
 
 test("T-OBS-8: adjacent markers fill on the first run, and regenerating is idempotent", () => {
   const copy = path.join(tmpDir(), "TROUBLESHOOTING.md");
-  fs.writeFileSync(copy, "# x\n<!-- exit-codes:start -->\n<!-- exit-codes:end -->\n<!-- troubleshooting:start --><!-- troubleshooting:end -->\n<!-- live-check:start --><!-- live-check:end -->\n");
+  fs.writeFileSync(copy, "# x\n<!-- exit-codes:start -->\n<!-- exit-codes:end -->\n<!-- troubleshooting:start --><!-- troubleshooting:end -->\n<!-- live-check:start --><!-- live-check:end -->\n<!-- triage:start --><!-- triage:end -->\n");
   assert.equal(gen("--file", copy).status, 0);
   const once = fs.readFileSync(copy, "utf8");
   assert.match(once, /\| 4 \| `internal` \|/);
   assert.match(once, /\| `node_missing` \| 1 \| brew install node \|/);
   assert.match(once, /\| `live_check_failed` \| `codex_auth` \| codex login \|/);
+  assert.match(once, /\| 1 \| severity is critical \| blocks \| `critical` \|/);
   assert.equal(gen("--file", copy).status, 0);
   assert.equal(fs.readFileSync(copy, "utf8"), once);
   assert.equal(gen("--check", "--file", copy).status, 0);
@@ -171,4 +173,25 @@ test("the docs, the hooks and the skill call skipping review the same thing: the
   const skill = fs.readFileSync("plugin/skills/review-loop/SKILL.md", "utf8");
   assert.ok(hook.includes("kill switch") && skill.includes("kill switch") && README.includes("## The kill switch"), "one name in all three");
   for (const doc of USER_DOCS) assert.doesNotMatch(fs.readFileSync(doc, "utf8"), /skip switch|off switch/i, `${doc} uses another name`);
+});
+
+test("the triage block is generated from value.mjs: every rule in order, every definition", () => {
+  const block = TROUBLE.match(/<!-- triage:start -->\n([\s\S]*?)\n<!-- triage:end -->/)?.[1];
+  assert.equal(block, triageTable());
+  RULES.forEach((r, i) => assert.ok(block?.includes(`| ${i + 1} | ${r.when} | ${r.blocking ? "blocks" : "advisory"} | \`${r.why}\` |`), r.why));
+  assert.ok(block?.includes("| trusted actor | `same_user_processes` | other processes running as the same OS user |"));
+  assert.ok(TROUBLE.indexOf("## Why didn't this finding block?") < TROUBLE.indexOf("<!-- triage:start -->"));
+});
+
+test("a stale or missing triage block fails --check; the current page passes", () => {
+  const copy = path.join(tmpDir(), "TROUBLESHOOTING.md");
+  fs.writeFileSync(copy, TROUBLE.replace("| 1 | severity is critical | blocks |", "| 1 | severity is high | blocks |"));
+  const stale = gen("--check", "--file", copy);
+  assert.deepEqual([stale.status, /stale/.test(stale.stdout)], [1, true], stale.stdout);
+  fs.writeFileSync(copy, TROUBLE.replace(/<!-- triage:start -->[\s\S]*?<!-- triage:end -->/, ""));
+  const missing = gen("--check", "--file", copy);
+  assert.equal(missing.status, 1);
+  assert.match(missing.stdout, /missing the triage markers/);
+  fs.writeFileSync(copy, TROUBLE);
+  assert.equal(gen("--check", "--file", copy).status, 0, "the exit-code, troubleshooting and live-check blocks still pass");
 });

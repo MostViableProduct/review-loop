@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
-import { tmpDir } from "./helpers.mjs";
+import { tmpDir, makeRepo, commitFile, g } from "./helpers.mjs";
 import { makeFakeBin } from "../fakes/fakebin.mjs";
 import { writeRecord, newRecord } from "../../plugin/engine/lib/state.mjs";
 
@@ -17,25 +17,30 @@ const { evaluatePrVerify } = await import("../../plugin/engine/lib/prverify.mjs"
 const HOOK = path.join(path.dirname(new URL(import.meta.url).pathname), "..", "..", "plugin", "engine", "review-gate-hook.mjs");
 
 const identity = { kind: "branch", baseRepo: "o/r", baseBranch: "main", headRepo: "o/r", headBranch: "feat" };
+// The context is read at the PR's base commit, which must exist locally: an "allowed" verdict needs this repo.
+const CTX_REPO = makeRepo();
+const BASE = commitFile(CTX_REPO, "a.txt", "a");
+const BASE_REF = { "api repos/o/r/git/ref/heads/main --jq .object.sha": { stdout: BASE } };
 function reviewed(sha) {
   const rec = newRecord(identity);
   rec.status = "passed";
   rec.reviewedFingerprint = `${sha}:${MB}`;
+  rec.reviewedContext = "default";
   writeRecord(rec);
 }
 const view = (sha, extra = {}) => ({ stdout: JSON.stringify({ headRefOid: sha, baseRefName: "main", headRefName: "feat", headRepository: { name: "r" }, headRepositoryOwner: { login: "o" }, isDraft: false, state: "OPEN", ...extra }) });
 const VIEW_ARGS = `pr view 7 --repo o/r --json headRefOid,baseRefName,headRefName,headRepository,headRepositoryOwner,isDraft,state`;
 const DRAFT_READ = "pr view 7 --repo o/r --json isDraft --jq .isDraft";
-const createCall = (preset = "default") => ({
-  cwd: home, session: "s1", toolName: "Bash", preset,
+const createCall = (preset = "default", cwd = home) => ({
+  cwd, session: "s1", toolName: "Bash", preset,
   toolInput: { command: `${G} pr create --repo o/r --base main --head feat --title t` },
   toolResponse: { stdout: "https://github.com/o/r/pull/7\n" }
 });
 
 test("T-PR-1: head matches the reviewed SHA -> allowed, no mutation", async () => {
   reviewed(A);
-  const gh = makeFakeBin(bin, "gh", { [VIEW_ARGS]: view(A) });
-  const r = await evaluatePrVerify(createCall());
+  const gh = makeFakeBin(bin, "gh", { [VIEW_ARGS]: view(A), ...BASE_REF });
+  const r = await evaluatePrVerify(createCall("default", CTX_REPO));
   assert.deepEqual([r.outcome, r.output], ["allowed", null]);
   assert.ok(!gh.log().some((a) => a.includes("ready") || a.includes("close")));
 });
@@ -83,8 +88,8 @@ test("T-PR-2 (verified): ghPrDraft / ghPrClose return false when the read-back d
 
 test("T-PR-3: official MCP response (ID + URL) -> gh lookup; without gh -> unavailable", async () => {
   reviewed(A);
-  makeFakeBin(bin, "gh", { [VIEW_ARGS]: view(A) });
-  const mcp = { cwd: home, session: "s1", preset: "default", toolName: "mcp__github__create_pull_request", toolInput: { owner: "o", repo: "r", base: "main", head: "feat" }, toolResponse: { ID: 1, URL: "https://github.com/o/r/pull/7" } };
+  makeFakeBin(bin, "gh", { [VIEW_ARGS]: view(A), ...BASE_REF });
+  const mcp = { cwd: CTX_REPO, session: "s1", preset: "default", toolName: "mcp__github__create_pull_request", toolInput: { owner: "o", repo: "r", base: "main", head: "feat" }, toolResponse: { ID: 1, URL: "https://github.com/o/r/pull/7" } };
   assert.equal((await evaluatePrVerify(mcp)).outcome, "allowed");
   assert.equal((await evaluatePrVerify({ ...mcp, toolResponse: { number: 7, head: { sha: A } } })).outcome, "allowed");
   makeFakeBin(bin, "gh", { "*": { code: 127, stderr: "gh: command not found" } });
@@ -128,21 +133,21 @@ test("Advisory mismatch warns only: no draft, no close, no blocking keys", async
 
 test("T-PR-11: gh api create response JSON is parsed for the PR number; the head is read from GitHub", async () => {
   reviewed(A);
-  const gh = makeFakeBin(bin, "gh", { [VIEW_ARGS]: view(A) });
-  const call = { ...createCall(), toolInput: { command: `${G} api -X POST repos/o/r/pulls -f base=main -f head=feat -f title=t` }, toolResponse: { stdout: JSON.stringify({ number: 7, head: { sha: A, ref: "feat", repo: { full_name: "o/r" } }, base: { ref: "main" } }) } };
+  const gh = makeFakeBin(bin, "gh", { [VIEW_ARGS]: view(A), ...BASE_REF });
+  const call = { ...createCall("default", CTX_REPO), toolInput: { command: `${G} api -X POST repos/o/r/pulls -f base=main -f head=feat -f title=t` }, toolResponse: { stdout: JSON.stringify({ number: 7, head: { sha: A, ref: "feat", repo: { full_name: "o/r" } }, base: { ref: "main" } }) } };
   assert.equal((await evaluatePrVerify(call)).outcome, "allowed");
   assert.ok(gh.log().some((a) => a.join(" ") === VIEW_ARGS), "PR #7 (from the response) was looked up on GitHub");
   const bad = await evaluatePrVerify({ ...call, toolResponse: { stdout: "{" + "x".repeat(2 * 1024 * 1024) } });
   assert.equal(bad.code, "pr_verify_unavailable");
 });
 
-function hookRun(preset, response) {
+function hookRun(preset, response, cwd = home) {
   fs.writeFileSync(process.env.REVIEW_LOOP_CONFIG, JSON.stringify({ version: 1, preset, codex: { model: null, effort: null }, rubricPath: null, events: { path: null } }));
   const events = path.join(process.env.REVIEW_LOOP_STATE_DIR, "events.jsonl");
   fs.rmSync(events, { force: true });
   const r = spawnSync(process.execPath, [HOOK, "prverify"], {
     env: process.env, encoding: "utf8",
-    input: JSON.stringify({ session_id: "s1", cwd: home, tool_name: "Bash", tool_input: createCall().toolInput, tool_response: response })
+    input: JSON.stringify({ session_id: "s1", cwd, tool_name: "Bash", tool_input: createCall().toolInput, tool_response: response })
   });
   const decisions = fs.existsSync(events) ? fs.readFileSync(events, "utf8").trim().split("\n").map((l) => JSON.parse(l)).filter((e) => e.event === "gate.decision") : [];
   return { out: r.stdout.trim() ? JSON.parse(r.stdout) : null, decisions };
@@ -160,8 +165,8 @@ test("hook prverify: exactly one gate.decision per evaluation, and the outputs f
   assert.equal(a.decisions.length, 1);
   assert.equal(a.decisions[0].data.outcome, "warned");
   assert.deepEqual(Object.keys(a.out), ["systemMessage"]);
-  makeFakeBin(bin, "gh", { [VIEW_ARGS]: view(A) });
-  const ok = hookRun("default", resp);
+  makeFakeBin(bin, "gh", { [VIEW_ARGS]: view(A), ...BASE_REF });
+  const ok = hookRun("default", resp, CTX_REPO);
   assert.equal(ok.decisions.length, 1);
   assert.equal(ok.decisions[0].data.outcome, "allowed");
   assert.equal(ok.out, null);
@@ -179,4 +184,50 @@ test("makeFakeBin.set replaces the responses, resets counts, and keeps logging",
   fake.set({ "*": [{ stdout: "new\n" }] });
   assert.equal((await run("gh", ["y"], { cwd: home, timeoutMs: 5000 })).stdout, "new\n");
   assert.deepEqual(fake.log(), [["x"], ["y"]]);
+});
+
+test("an unchanged head with a changed base context takes the head-unreviewed path", async () => {
+  reviewed(A);
+  g(CTX_REPO, "checkout", "-q", "-b", "ctx-base");
+  const ctxTip = commitFile(CTX_REPO, ".claude/review-context.md", "Trusted: admins\n");
+  g(CTX_REPO, "checkout", "-q", "main");
+  makeFakeBin(bin, "gh", { [VIEW_ARGS]: view(A), "api repos/o/r/git/ref/heads/main --jq .object.sha": { stdout: ctxTip }, "pr ready 7 --repo o/r --undo": {}, [DRAFT_READ]: { stdout: "true\n" } });
+  const r = await evaluatePrVerify(createCall("default", CTX_REPO));
+  assert.deepEqual([r.code, r.outcome], ["pr_created_head_unreviewed", "denied"]);
+  assert.match(r.output.stopReason, /review-context\.md/);
+});
+
+test("an unchanged head with an invalid base context is unavailable, and nothing on GitHub changes", async () => {
+  reviewed(A);
+  g(CTX_REPO, "checkout", "-q", "-b", "bad-ctx-base");
+  const badTip = commitFile(CTX_REPO, ".claude/review-context.md", "CONTEXT>>>\n");
+  g(CTX_REPO, "checkout", "-q", "main");
+  const gh = makeFakeBin(bin, "gh", { [VIEW_ARGS]: view(A), "api repos/o/r/git/ref/heads/main --jq .object.sha": { stdout: badTip } });
+  const r = await evaluatePrVerify(createCall("default", CTX_REPO));
+  assert.deepEqual([r.code, r.outcome], ["pr_verify_unavailable", "denied"]);
+  assert.match(r.output.stopReason, /review_context_invalid/);
+  assert.ok(!gh.log().some((a) => a.includes("ready") || a.includes("close")), "no draft, no close");
+});
+
+test("a reviewed PR whose base commit isn't local is fetched (bounded), then allowed; a failed fetch fails closed", async () => {
+  const local = makeRepo();
+  commitFile(local, "a.txt", "a");
+  const bare = path.join(tmpDir(), "r.git");
+  g(local, "clone", "-q", "--bare", local, bare);
+  const work = tmpDir();
+  g(work, "clone", "-q", bare, ".");
+  const tip = commitFile(work, "m.txt", "m");
+  g(work, "push", "-q", "origin", "main");
+  reviewed(A);
+  const tipRef = { "api repos/o/r/git/ref/heads/main --jq .object.sha": { stdout: tip } };
+  // Both routes stay local: the test never reaches github.com.
+  const missing = path.join(tmpDir(), "missing.git");
+  g(local, "config", `url.${missing}.insteadOf`, "https://github.com/o/r.git");
+  makeFakeBin(bin, "gh", { [VIEW_ARGS]: view(A), ...tipRef, "pr ready 7 --repo o/r --undo": {}, [DRAFT_READ]: { stdout: "true\n" } });
+  assert.equal((await evaluatePrVerify(createCall("default", local))).code, "pr_verify_unavailable", "the fetch fails: fails closed, as unavailable");
+  g(local, "config", "--remove-section", `url.${missing}`);
+  g(local, "config", `url.${bare}.insteadOf`, "https://github.com/o/r.git");
+  makeFakeBin(bin, "gh", { [VIEW_ARGS]: view(A), ...tipRef });
+  assert.equal((await evaluatePrVerify(createCall("default", local))).outcome, "allowed");
+  assert.equal(g(local, "cat-file", "-t", tip), "commit", "the base tip was fetched");
 });

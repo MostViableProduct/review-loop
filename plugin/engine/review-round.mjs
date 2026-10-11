@@ -24,7 +24,8 @@ import {
   stateSubdir,
   assertKey
 } from "./lib/state.mjs";
-import { EXIT, OPTION_LABELS, applyRoundResult, applyDecision, awaitHuman, resetIfNewLoop, withoutWaived, exitForAwaiting } from "./lib/policy.mjs";
+import { EXIT, optionLabel, updateClasses, refreshDispositions, applyRoundResult, applyDecision, awaitHuman, resetIfNewLoop, withoutWaived, exitForAwaiting, sameFinding } from "./lib/policy.mjs";
+import { parseValue, classify, triageCounts, classKey } from "./lib/value.mjs";
 import { scoreFindings, parseDimensionTag } from "./lib/scoring.mjs";
 import { verifyPin, verifyUsage, runCompanion, parseCompanionOutput, companionFailureText, writePin, pinFile, installedTreeDigest, snapshotVerified, stopCompanionBroker, sweepStaleSnapshots, afterSnapshotSecond, countOrphanBrokers, stopOrphan, STOP_DEADLINE_MS, SWEEP_MANUAL_DEADLINE_MS, SNAPSHOT_NAME, sweepEventData } from "./lib/pin.mjs";
 import { loadRubricSection, buildFocus } from "./lib/rubric.mjs";
@@ -32,6 +33,7 @@ import { prepare, pushBranch, HumanNeeded, NON_RETRYABLE } from "./lib/round.mjs
 import { repoRoot, headSha, implFingerprint, mergeBaseValidity, readArtifact } from "./lib/git.mjs";
 import { pendingForSession, identityForTouchedPath } from "./lib/detect.mjs";
 import { ghBranchSha } from "./lib/github.mjs";
+import { readContext, contextDigest } from "./lib/context.mjs";
 import { postVerdict } from "./lib/status.mjs";
 
 const SESSION = process.env.CLAUDE_SESSION_ID ?? null;
@@ -55,6 +57,14 @@ async function resolveIdentity(v) {
     const marker = readMarker(v.key);
     const identity = rec?.identity ?? marker?.identity;
     if (!identity) throw new ReviewLoopError("unknown_key", `no record or marker for key ${v.key}`);
+    // A stored root (a marker's, or a 1.0.x record's from an older --project-root) never picks another project's context:
+    // an impl is its own root, and an in-repo spec or plan has its repository's.
+    if (identity.kind === "impl") return { identity, projectRoot: identity.path };
+    if (identity.kind === "spec" || identity.kind === "plan") {
+      const dir = path.dirname(identity.path);
+      const own = fs.existsSync(dir) ? await repoRoot(dir) : null;
+      if (own) return { identity, projectRoot: own };
+    }
     return { identity, projectRoot: marker?.projectRoot ?? /** @type {string | null} */ (rec?.meta?.projectRoot ?? null) };
   }
   const kind = v.kind;
@@ -74,7 +84,9 @@ async function resolveIdentity(v) {
   if (identity?.kind !== kind) {
     throw new ReviewLoopError("bad_args", `${abs} is not a ${kind} (specs/**/*.md, *-design.md, *-spec.md; plans/**/*.md, *-plan.md, ~/.claude/plans/*.md)`);
   }
-  const projectRoot = typeof v["project-root"] === "string" ? path.resolve(v["project-root"]) : root;
+  // In a repository the artifact's own root is the project root: the context file under it decides what blocks, so
+  // --project-root may name a root only for a plan outside any repository (~/.claude/plans), as the hooks print it.
+  const projectRoot = root ?? (typeof v["project-root"] === "string" ? path.resolve(v["project-root"]) : null);
   return { identity, projectRoot };
 }
 
@@ -91,24 +103,46 @@ function clearMarker(key, identity) {
 function awaitingView(rec) {
   if (!rec.awaiting) return null;
   const options = /** @type {string[]} */ (rec.awaiting.options ?? []);
-  return { reason: rec.awaiting.reason, detail: rec.awaiting.detail ?? {}, options: options.map((id) => ({ id, label: OPTION_LABELS[/** @type {keyof typeof OPTION_LABELS} */ (id)] ?? id })) };
+  return { reason: rec.awaiting.reason, detail: rec.awaiting.detail ?? {}, options: options.map((id) => ({ id, label: optionLabel(rec.awaiting?.reason ?? "", id) })) };
 }
 
 /**
  * Current fingerprint without running a review (for accept/override).
- * @param {import("./lib/state.mjs").Identity} identity @param {string} key @param {ReturnType<typeof newRecord>} rec
+ * @param {import("./lib/state.mjs").Identity} identity
+ * @param {string | null} projectRoot what resolveIdentity resolved: the artifact's own repository, never a stored root
+ * @param {{ root: string, baseSha: string } | null} base a PR's, from branchBaseNow; null for any other kind
  */
-async function fingerprintNow(identity, key, rec) {
-  const projectRoot = typeof rec.meta?.projectRoot === "string" ? rec.meta.projectRoot : null;
+async function fingerprintNow(identity, projectRoot, base) {
   if (identity.kind === "spec" || identity.kind === "plan") return sha256hex(readArtifact(identity.path, projectRoot));
   if (identity.kind === "impl") return (await implFingerprint(identity.path))?.fingerprint ?? null;
-  const marker = readMarker(key);
-  const root = marker?.projectRoot;
-  const baseSha = /** @type {{ baseSha?: string }} */ (marker?.extra ?? {}).baseSha;
-  if (!root || !baseSha) return null;
-  const head = await headSha(root);
-  const v = head ? await mergeBaseValidity(root, head, baseSha) : null;
+  if (!base) return null;
+  const head = await headSha(base.root);
+  const v = head ? await mergeBaseValidity(base.root, head, base.baseSha) : null;
   return v?.ok ? `${head}:${v.mergeBase}` : null;
+}
+
+/**
+ * A PR's base as of now, resolved once per decision: the branch's current commit on GitHub, as prepareBranch resolves
+ * it for a round. The fingerprint and the context are both checked against it, so they describe one comparison.
+ * @param {{ kind: "branch", baseRepo: string, baseBranch: string }} identity @param {string} key @param {string | null} projectRoot
+ * @returns {Promise<{ root: string, baseSha: string }>}
+ */
+async function branchBaseNow(identity, key, projectRoot) {
+  const root = readMarker(key)?.projectRoot ?? projectRoot;
+  if (!root) throw new ReviewLoopError("pr_base_unverifiable", "no repository is recorded for this PR, so its base can't be read; re-run the round");
+  return { root, baseSha: await ghBranchSha(identity.baseRepo, identity.baseBranch, root, { notFound: "pr_base_unverifiable", failed: "pr_base_unverifiable" }) };
+}
+
+/**
+ * The context now, for accept/override (spec D1). A PR's is read at `base`, the commit branchBaseNow resolved. An
+ * unreadable context throws review_context_invalid, so no decision ever binds one that wasn't read.
+ * @param {import("./lib/state.mjs").Identity} identity @param {string | null} projectRoot what resolveIdentity resolved
+ * @param {{ root: string, baseSha: string } | null} base a PR's, from branchBaseNow; null for any other kind
+ */
+async function contextNow(identity, projectRoot, base) {
+  if (identity.kind !== "branch") return contextDigest(await readContext(identity, projectRoot));
+  if (!base) throw new ReviewLoopError("pr_base_unverifiable", "the PR's base was not resolved; re-run the round");
+  return contextDigest(await readContext(identity, base.root, { baseSha: base.baseSha }));
 }
 
 /**
@@ -145,6 +179,7 @@ async function cmdRun(v) {
   let prep = null;
   /** @type {{ root: string, cleanup: () => void } | null} */
   let plugin = null;
+  /** @type {import("./lib/context.mjs").Context | null} */ let roundContext = null;
   try {
     // First, before any early return: a round that has nothing to review still clears what killed rounds left.
     await sweepSnapshots(key);
@@ -158,8 +193,13 @@ async function cmdRun(v) {
       clearMarker(key, identity);
       return out({ ...base, status: "nothing_to_review" }, EXIT.PASS);
     }
-    resetIfNewLoop(rec, prep.fingerprint);
-    if ((rec.status === "passed" || rec.status === "overridden") && rec.reviewedFingerprint === prep.fingerprint) {
+    // Read once, before any page or Codex call, so everything this round decides uses one context. A PR's is read at
+    // the base prepareBranch just resolved, never the marker's (it can be older than the base the diff is against).
+    const context = await readContext(identity, prep.projectRoot, { baseSha: prep.baseSha });
+    const contextTag = contextDigest(context);
+    roundContext = context;
+    resetIfNewLoop(rec, prep.fingerprint, contextTag);
+    if ((rec.status === "passed" || rec.status === "overridden") && rec.reviewedFingerprint === prep.fingerprint && rec.reviewedContext === contextTag) {
       clearMarker(key, identity);
       return out({ ...base, status: rec.status, round: rec.round, coveredScope: prep.coveredScope }, EXIT.PASS);
     }
@@ -167,7 +207,7 @@ async function cmdRun(v) {
     // clears it and a further-changed one is re-paged with the tree as it is now (a repin binds to that tree).
     if (rec.status === "awaiting_human" && rec.awaiting && rec.awaiting.reason !== "plugin_pin") {
       // Still the same page — but say so when the artifact moved on: accept/override on it will be refused.
-      const stale = rec.awaiting.fingerprint !== prep.fingerprint;
+      const stale = rec.awaiting.fingerprint !== prep.fingerprint || (typeof rec.awaiting.context === "string" && rec.awaiting.context !== contextTag);
       return out({ ...base, status: rec.status, round: rec.round, awaiting: { ...awaitingView(rec), stale } }, exitForAwaiting(rec.awaiting.reason));
     }
 
@@ -190,7 +230,7 @@ async function cmdRun(v) {
         prep.fingerprint
       );
       writeRecord(rec);
-      roundResult(errorCode(err), key, identity, rec, EXIT.PIN, timing);
+      roundResult(errorCode(err), key, identity, rec, EXIT.PIN, timing, roundContext);
       return out({ ...base, status: rec.status, awaiting: awaitingView(rec) }, EXIT.PIN);
     }
 
@@ -209,7 +249,9 @@ async function cmdRun(v) {
       projectRoot: prep.projectRoot,
       instructions: prep.instructions,
       disputes: rec.disputes.map((d) => ({ title: d.title, file: d.file ?? undefined, reason: d.reason })),
-      rubric: loadRubricSection()
+      rubric: loadRubricSection(),
+      context,
+      classes: rec.classes.map((c) => ({ label: c.label, dimension: c.dimension, rounds: c.rounds, disposition: c.disposition }))
     });
     const eff = effectiveCodex({ report: true });
     const seamTimeout = process.env.REVIEW_LOOP_TEST_SEAMS === "1" ? Number(process.env.REVIEW_LOOP_TEST_COMPANION_TIMEOUT_MS) : NaN;
@@ -228,7 +270,7 @@ async function cmdRun(v) {
       if (!PIN_CODES.has(errorCode(err))) throw err;
       awaitHuman(rec, "plugin_pin", { code: errorCode(err), message: /** @type {Error} */ (err).message, tree: installedTreeDigest() });
       writeRecord(rec);
-      roundResult(errorCode(err), key, identity, rec, EXIT.PIN, timing);
+      roundResult(errorCode(err), key, identity, rec, EXIT.PIN, timing, roundContext);
       return out({ ...base, status: rec.status, awaiting: awaitingView(rec) }, EXIT.PIN);
     }
     if (parsed.kind === "codex_error") throw new ReviewLoopError("codex_output_invalid", parsed.message);
@@ -238,9 +280,25 @@ async function cmdRun(v) {
     }
 
     const findings = withoutWaived(parsed.findings, rec.waivers);
-    const scored = scoreFindings(findings);
-    const exit = applyRoundResult(rec, scored, findings, prep.fingerprint);
-    rec.lastFindings = findings.map((f) => ({ title: f.title, file: f.file, severity: f.severity }));
+    // Split before scoring (spec D3): scoreFindings sees only what blocks, so the bands and the 9.2 bar keep their meaning.
+    const triageCtx = {
+      trustedActors: new Set(context.kind === "file" ? context.trusted : []),
+      acceptedRisks: context.kind === "file" ? context.accepted : new Map(),
+      priorClasses: new Set(rec.classes.map((c) => c.key))
+    };
+    const rows = findings.map((f) => {
+      const parsedValue = parseValue(f.body);
+      const value = parsedValue.ok ? parsedValue.value : null;
+      // Read before rec.lastFindings is replaced below: a finding left unfixed must not turn into a repeat of its own class.
+      const blockedLastRound = (rec.lastFindings ?? []).some((p) => p.blocking && sameFinding(p, f));
+      return { finding: f, severity: f.severity, dimension: parseDimensionTag(f.title).dimension, value, triage: classify({ severity: f.severity, title: f.title, value, blockedLastRound }, triageCtx) };
+    });
+    const blocking = rows.filter((r) => r.triage.blocking).map((r) => r.finding);
+    const counts = triageCounts(rows);
+    const scored = scoreFindings(blocking);
+    const exit = applyRoundResult(rec, scored, blocking, prep.fingerprint, { context: contextTag, triage: counts.history });
+    rec.lastFindings = rows.map((r) => ({ title: r.finding.title, file: r.finding.file, severity: r.finding.severity, class: r.value ? classKey(r.dimension, r.value.class) : null, blocking: r.triage.blocking }));
+    updateClasses(rec, rows.flatMap((r) => (r.value ? [{ dimension: r.dimension, label: r.value.class }] : [])));
     rec.meta = { ...(rec.meta ?? {}), codex: { model: eff.model, effort: eff.effort, source: eff.source } };
     writeRecord(rec);
     if (exit === EXIT.PASS) clearMarker(key, identity);
@@ -266,7 +324,10 @@ async function cmdRun(v) {
         effort: eff.effort,
         effort_source: eff.source,
         preset: timing.preset,
-        duration_ms: Date.now() - started
+        duration_ms: Date.now() - started,
+        scored: true,
+        ...contextFields(context),
+        ...counts.event
       }
     });
 
@@ -284,18 +345,25 @@ async function cmdRun(v) {
           arithmetic: scored.arithmetic,
           pass: scored.pass,
           untagged: scored.untagged,
+          blocking: counts.history.blocking,
+          advisory: counts.history.advisory,
+          unvalued: counts.history.unvalued,
           dimensions: scored.dimensions.map((d) => ({ name: d.name, score: d.score, worst: d.worst, count: d.count }))
         },
-        findings: findings.map((f, i) => ({
+        findings: rows.map((r, i) => ({
           i,
-          dimension: parseDimensionTag(f.title).dimension,
-          severity: f.severity,
-          title: f.title,
-          file: f.file,
-          lines: `${f.line_start}-${f.line_end}`,
-          confidence: f.confidence,
-          body: f.body,
-          recommendation: f.recommendation
+          dimension: r.dimension,
+          severity: r.finding.severity,
+          title: r.finding.title,
+          file: r.finding.file,
+          lines: `${r.finding.line_start}-${r.finding.line_end}`,
+          confidence: r.finding.confidence,
+          body: r.finding.body,
+          recommendation: r.finding.recommendation,
+          value: r.value,
+          blocking: r.triage.blocking,
+          why: r.triage.why,
+          accepted_risk_text: r.triage.why === "accepted_risk" && r.value ? triageCtx.acceptedRisks.get(r.value.accepted_risk)?.text ?? null : null
         })),
         waived: parsed.findings.length - findings.length,
         disputes: rec.disputes,
@@ -308,7 +376,7 @@ async function cmdRun(v) {
     if (err instanceof HumanNeeded) {
       awaitHuman(rec, err.reason, { ...err.detail, message: err.message });
       writeRecord(rec);
-      roundResult(err.reason, key, identity, rec, exitForAwaiting(err.reason), timing);
+      roundResult(err.reason, key, identity, rec, exitForAwaiting(err.reason), timing, roundContext);
       return out({ ...base, status: rec.status, awaiting: awaitingView(rec) }, exitForAwaiting(err.reason));
     }
     const code = errorCode(err);
@@ -316,7 +384,7 @@ async function cmdRun(v) {
     rec.lastError = { code, message: /** @type {Error} */ (err).message, at: new Date().toISOString() };
     rec.errorAttempts = (rec.errorAttempts ?? 0) + 1;
     writeRecord(rec);
-    roundResult(code, key, identity, rec, EXIT.OP_ERROR, timing);
+    roundResult(code, key, identity, rec, EXIT.OP_ERROR, timing, roundContext);
     const output = err instanceof ReviewLoopError && typeof err.details.output === "string" && err.details.output ? { output: err.details.output } : {};
     return out({ ...base, status: "op_error", error: { code, message: /** @type {Error} */ (err).message, retryable: !NON_RETRYABLE.has(code), attempts: rec.errorAttempts, ...output } }, EXIT.OP_ERROR);
   } finally {
@@ -450,12 +518,15 @@ async function cmdStopOrphan(v) {
 /** @param {{ kind: string }} identity */
 const eventKind = (identity) => (identity.kind === "branch" ? "pr" : identity.kind);
 
+/** The event's context fields: the kind, and a 12-hex prefix of a file's digest (no readable content). @param {import("./lib/context.mjs").Context | null} c */
+const contextFields = (c) => ({ context: c ? c.kind : null, context_digest: c && c.kind === "file" ? c.digest.slice(0, 12) : null });
+
 /**
- * A round that ended without a score: a pause for the human, or an operational error.
+ * A round that ended without a score: a pause for the human, or an operational error. It carries no counts.
  * @param {string} code @param {string} key @param {{ kind: string }} identity @param {{ round: number }} rec @param {number} exit
- * @param {{ started: number, preset: string }} timing
+ * @param {{ started: number, preset: string }} timing @param {import("./lib/context.mjs").Context | null} context null before it was read
  */
-function roundResult(code, key, identity, rec, exit, timing) {
+function roundResult(code, key, identity, rec, exit, timing, context) {
   emitEvent({
     source: "round",
     event: "round.result",
@@ -463,7 +534,7 @@ function roundResult(code, key, identity, rec, exit, timing) {
     artifact_key: key,
     session_id: SESSION,
     exit_code: exit,
-    data: { kind: eventKind(identity), round: rec.round, pass: false, preset: timing.preset, duration_ms: Date.now() - timing.started }
+    data: { kind: eventKind(identity), round: rec.round, pass: false, preset: timing.preset, duration_ms: Date.now() - timing.started, scored: false, ...contextFields(context) }
   });
 }
 
@@ -474,7 +545,7 @@ async function withLockedRecord(v, fn) {
   const lock = acquireLock(key, SESSION);
   try {
     const rec = readRecord(key) ?? newRecord(identity, { projectRoot });
-    return await fn(rec, key, identity);
+    return await fn(rec, key, identity, projectRoot);
   } finally {
     lock.release();
   }
@@ -484,12 +555,15 @@ async function withLockedRecord(v, fn) {
 async function cmdDecide(v) {
   if (typeof v.option !== "string") throw new ReviewLoopError("bad_args", "--option is required");
   const option = v.option;
-  return withLockedRecord(v, async (rec, key, identity) => {
-    const fp = option === "accept" || option === "override" ? await fingerprintNow(identity, key, rec) : rec.fingerprint;
+  return withLockedRecord(v, async (rec, key, identity, projectRoot) => {
+    const binding = option === "accept" || option === "override";
+    const base = binding && identity.kind === "branch" ? await branchBaseNow(identity, key, projectRoot) : null;
+    const fp = binding ? await fingerprintNow(identity, projectRoot, base) : rec.fingerprint;
     // applyDecision validates that this record is awaiting a page that offers `option`; only then may repin bless
     // the changed plugin files (the page showed them via awaiting.detail).
     const tree = /** @type {{ tree?: { version: string, digest: string } | null }} */ (rec.awaiting?.detail ?? {}).tree;
-    const reason = applyDecision(rec, option, fp);
+    const ctx = binding ? await contextNow(identity, projectRoot, base) : null;
+    const reason = applyDecision(rec, option, fp, ctx);
     if (option === "repin") {
       if (!tree) throw new ReviewLoopError("decision_stale", "the pin page recorded no plugin tree to approve; re-run the round");
       writePin(tree.version, tree);
@@ -515,10 +589,13 @@ async function cmdDispute(v) {
     throw new ReviewLoopError("bad_args", "--finding <index from the last round> and --reason <evidence> are required");
   }
   return withLockedRecord(v, async (rec, key, identity) => {
-    const f = /** @type {Array<{ title: string, file: string }>} */ (rec.lastFindings ?? [])[idx];
+    const f = /** @type {Array<{ title: string, file: string, class?: string | null, blocking?: boolean }>} */ (rec.lastFindings ?? [])[idx];
     if (!f) throw new ReviewLoopError("bad_args", `no finding #${idx} in the last round`);
+    // An advisory finding doesn't hold the gate, so there is nothing to dispute (spec D3); nothing is written.
+    if (f.blocking === false) throw new ReviewLoopError("dispute_advisory", `finding #${idx} is advisory: it doesn't block the gate, so it can't be disputed`);
     rec.disputes = rec.disputes.filter((d) => d.title !== f.title || d.file !== f.file);
-    rec.disputes.push({ title: f.title, file: f.file, reason: /** @type {string} */ (v.reason).trim(), raisedAgain: 0 });
+    rec.disputes.push({ title: f.title, file: f.file, reason: /** @type {string} */ (v.reason).trim(), raisedAgain: 0, class: f.class ?? null });
+    refreshDispositions(rec);
     writeRecord(rec);
     emitEvent({ source: "round", event: "round.dispute", code: "ok", artifact_key: key, session_id: SESSION, data: { kind: eventKind(identity) } });
     out({ key, disputes: rec.disputes }, EXIT.PASS);
@@ -528,11 +605,14 @@ async function cmdDispute(v) {
 /** "skip review" / kill switch: a visible, logged override at the current fingerprint. */
 async function cmdOverride(v) {
   const reason = typeof v.reason === "string" && v.reason.trim() ? v.reason.trim() : "user said skip review";
-  return withLockedRecord(v, async (rec, key, identity) => {
-    const fp = await fingerprintNow(identity, key, rec);
+  return withLockedRecord(v, async (rec, key, identity, projectRoot) => {
+    const base = identity.kind === "branch" ? await branchBaseNow(identity, key, projectRoot) : null;
+    const fp = await fingerprintNow(identity, projectRoot, base);
     if (!fp) throw new ReviewLoopError("override_unverifiable", "cannot compute the current fingerprint to override");
+    const context = await contextNow(identity, projectRoot, base);
     rec.status = "overridden";
     rec.reviewedFingerprint = fp;
+    rec.reviewedContext = context;
     rec.awaiting = null;
     rec.meta = { ...(rec.meta ?? {}), override: { reason, at: new Date().toISOString() } };
     writeRecord(rec);
@@ -558,6 +638,11 @@ async function cmdPush(v) {
     const v = await mergeBaseValidity(/** @type {string} */ (root), head, baseSha);
     if (!v.ok || `${head}:${v.mergeBase}` !== rec.reviewedFingerprint) {
       throw new ReviewLoopError("push_comparison_changed", `the PR base ${identity.baseBranch} moved since the review; re-run the round before pushing`);
+    }
+    // The pass also binds the base's context: one changed since the review can neither publish nor mark it reviewed.
+    const pushContext = contextDigest(await readContext(identity, /** @type {string} */ (root), { baseSha }));
+    if (pushContext !== rec.reviewedContext) {
+      throw new ReviewLoopError("push_not_reviewed", "the base's .claude/review-context.md changed since the review; re-run the round before pushing");
     }
     try {
       const pushed = await pushBranch(identity, key, head);

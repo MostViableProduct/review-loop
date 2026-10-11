@@ -292,7 +292,7 @@ async function main() {
       `review-loop: ${blocking.length} artifact(s) changed this session and are not reviewed. Invoke the review-loop:review-loop skill and run:\n` +
       blocking.map((i) => `- ${i.label} [${i.status}${i.reason ? `: ${i.reason}` : ""}]\n  ${i.command}`).join("\n");
     const log = (/** @type {"blocked" | "warned" | "allowed" | "skipped"} */ outcome) =>
-      logGate({ gate: "stop", outcome, preset, code: outcome === "skipped" ? "kill_switch" : pending ? "review_pending" : "reviewed", session, pending: blocking.length });
+      logGate({ gate: "stop", outcome, preset, code: outcome === "skipped" ? "kill_switch" : pending ? "review_pending" : "reviewed", session, pending: blocking.length, detail: blocking.some((i) => i.reason === "review_context_invalid") ? "review_context_invalid" : blocking.some((i) => i.reason === "context_changed") ? "context_changed" : null });
     if (action === "block" && input.stop_hook_active !== true) {
       emit({ decision: "block", reason, ...(notes.length ? { systemMessage: notes.join("\n") } : {}) });
       return log("blocked");

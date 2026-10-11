@@ -83,7 +83,7 @@ test("T-SET-2: a cancel at the approval-rule step writes nothing to settings.jso
   const s = sandbox({ pluginInstalled: true });
   const o = io([false]);
   assert.equal(await main(["setup", "--skip-live-check"], o), 3);
-  assert.match(o.lines.join(""), /Will: add 5 approval rules[\s\S]*Not done: approval rules/);
+  assert.match(o.lines.join(""), /Will: add 8 approval rules[\s\S]*Not done: approval rules/);
   assert.ok(!fs.existsSync(path.join(s.home, ".claude", "settings.json")));
 });
 
@@ -92,7 +92,7 @@ test("T-SET-5: a re-run after a failure converges without duplicate installs", a
   assert.equal(await main(["setup", "--yes", "--skip-live-check"], io([])), 0);
   assert.equal(installs(s).length, 0, "already installed → not reinstalled");
   const settings = JSON.parse(fs.readFileSync(path.join(s.home, ".claude", "settings.json"), "utf8"));
-  assert.equal(settings.permissions.ask.length, 5);
+  assert.equal(settings.permissions.ask.length, 8);
   const before = fs.readFileSync(path.join(s.home, ".claude", "settings.json"));
   const pin = fs.readFileSync(path.join(process.env.REVIEW_LOOP_STATE_DIR, "plugin-pin.json"));
   assert.equal(await main(["setup", "--yes", "--skip-live-check"], io([])), 0);

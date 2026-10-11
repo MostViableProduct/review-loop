@@ -57,7 +57,7 @@ test("T-UN-1b: a project- or local-scope install still listed → refused before
   assert.match(text, /review-loop: plugin_other_scope/);
   assert.match(text, /--scope project` and `claude plugin uninstall review-loop@review-loop --scope local`/);
   assert.ok(!s.claude.log().some((a) => a[1] === "uninstall" || a[1] === "marketplace"), "no plugin or marketplace removal ran");
-  assert.equal(settingsOf(s).permissions.ask.length, 6, "approval rules kept");
+  assert.equal(settingsOf(s).permissions.ask.length, 9, "approval rules kept");
   assert.ok(fs.existsSync(process.env.REVIEW_LOOP_CONFIG), "config kept");
 });
 
@@ -71,7 +71,7 @@ test("T-UN-1c: a linked config folder → refused before anything is removed; th
   assert.notEqual(await main(["uninstall", "--yes"], o), 0);
   assert.match(o.lines.join(""), /review-loop: config_dir_untrusted/);
   assert.ok(!s.claude.log().some((a) => a[1] === "uninstall" || a[1] === "marketplace"), "no plugin or marketplace removal ran");
-  assert.equal(settingsOf(s).permissions.ask.length, 6, "approval rules kept");
+  assert.equal(settingsOf(s).permissions.ask.length, 9, "approval rules kept");
   assert.ok(fs.existsSync(path.join(elsewhere, "config.json")), "the linked folder's config kept");
 });
 
@@ -80,7 +80,7 @@ test("T-UN-1 (−): plugin uninstall fails → nothing else removed, exit 1", as
   const o = io();
   assert.equal(await main(["uninstall", "--yes"], o), 1);
   assert.match(o.lines.join(""), /review-loop: plugin_uninstall_failed/, "an uninstall failure has its own code (L13)");
-  assert.equal(settingsOf(s).permissions.ask.length, 6);
+  assert.equal(settingsOf(s).permissions.ask.length, 9);
   assert.ok(fs.existsSync(process.env.REVIEW_LOOP_CONFIG));
   assert.ok(!s.claude.log().some((a) => a[1] === "marketplace" && a[2] === "remove"), "marketplace untouched");
 });
@@ -90,7 +90,7 @@ test("T-UN-1 (−): marketplace remove fails for a real reason → settings and 
   const o = io();
   assert.equal(await main(["uninstall", "--yes"], o), 1);
   assert.match(o.lines.join(""), /review-loop: plugin_uninstall_failed/);
-  assert.equal(settingsOf(s).permissions.ask.length, 6);
+  assert.equal(settingsOf(s).permissions.ask.length, 9);
   assert.ok(fs.existsSync(process.env.REVIEW_LOOP_CONFIG));
 });
 
@@ -252,7 +252,7 @@ test("T-UN-7: preconditions are checked before anything is removed", async () =>
     assert.match(o.lines.join(""), /claude_parent_process/);
   } finally { delete process.env.CLAUDECODE; }
   assert.ok(!s.claude.log().some((a) => a[1] === "uninstall" || (a[1] === "marketplace" && a[2] === "remove")), "nothing was removed");
-  assert.equal(settingsOf(s).permissions.ask.length, 6);
+  assert.equal(settingsOf(s).permissions.ask.length, 9);
   assert.ok(fs.existsSync(process.env.REVIEW_LOOP_CONFIG));
 });
 
@@ -285,7 +285,7 @@ test("T-UN-2 (+): the plugin still listed after uninstall fails the final check"
 test("uninstall without a terminal or --yes is a usage error and changes nothing", async () => {
   const s = sandbox();
   assert.equal(await main(["uninstall"], { ...io(), isTTY: false }), 2);
-  assert.equal(settingsOf(s).permissions.ask.length, 6);
+  assert.equal(settingsOf(s).permissions.ask.length, 9);
 });
 
 test("engine-path prints the engine directory; --json prints one event carrying path (R-D47); not installed → exit 1", async () => {

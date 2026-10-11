@@ -5,6 +5,8 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { CODES, CLI_EXIT, EVENT_CATALOG, exitFor } from "../plugin/engine/lib/codes.mjs";
+import { SEVERITIES } from "../plugin/engine/lib/scoring.mjs";
+import { RULES, LIKELIHOODS, IMPACTS, FIX_COSTS, TRUSTED_ACTORS, SEVERITY_TEXT, LIKELIHOOD_TEXT, IMPACT_TEXT, FIX_COST_TEXT, TRUSTED_ACTOR_TEXT } from "../plugin/engine/lib/value.mjs";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 
@@ -53,6 +55,26 @@ export function detailTable() {
   return ["| Code | Detail | What to do |", "|---|---|---|", ...rows].join("\n");
 }
 
+/** Spec D6: the rule order and every definition the classifier acts on, from the maps the engine uses. */
+export function triageTable() {
+  const rules = RULES.map((r, i) => `| ${i + 1} | ${cell(r.when)} | ${r.blocking ? "blocks" : "advisory"} | \`${r.why}\` |`);
+  /** @param {string} field @param {readonly string[]} keys @param {Readonly<Record<string, string>>} text */
+  const defs = (field, keys, text) => keys.map((k) => `| ${field} | \`${k}\` | ${cell(text[k])} |`);
+  return [
+    "| # | When (the first rule that matches decides) | Result | `why` |",
+    "|---|---|---|---|",
+    ...rules,
+    "",
+    "| Field | Value | Meaning |",
+    "|---|---|---|",
+    ...defs("severity", SEVERITIES, SEVERITY_TEXT),
+    ...defs("likelihood", LIKELIHOODS, LIKELIHOOD_TEXT),
+    ...defs("impact", IMPACTS, IMPACT_TEXT),
+    ...defs("fix_cost", FIX_COSTS, FIX_COST_TEXT),
+    ...defs("trusted actor", TRUSTED_ACTORS, TRUSTED_ACTOR_TEXT)
+  ].join("\n");
+}
+
 /**
  * Replace what lies between one marker pair. Adjacent markers (an empty block) work on the first run (ruling R-D31).
  * A replacer function, so a `$` in a remedy is never read as a replacement pattern.
@@ -85,7 +107,7 @@ function main(args) {
       fileSet = true;
     } else return usage(`unknown or repeated argument ${JSON.stringify(a.slice(0, 40))}`);
   }
-  const TROUBLE_BLOCKS = [["exit-codes", exitTable()], ["troubleshooting", troubleshootingTable()], ["live-check", detailTable()]];
+  const TROUBLE_BLOCKS = [["exit-codes", exitTable()], ["troubleshooting", troubleshootingTable()], ["live-check", detailTable()], ["triage", triageTable()]];
   // --file names one troubleshooting page (a test's copy); without it, both generated pages are covered.
   const targets = fileSet ? [[file, TROUBLE_BLOCKS]] : [[file, TROUBLE_BLOCKS], [path.join(ROOT, "docs", "EVENTS.md"), [["events", eventsTable()]]]];
   /** @type {Array<[string, string]>} */

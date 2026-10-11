@@ -29,6 +29,7 @@ g(repo, "checkout", "-q", "main");
 const rec = newRecord({ kind: "branch", baseRepo: "o/r", baseBranch: "main", headRepo: "o/r", headBranch: "feat" });
 rec.status = "passed";
 rec.reviewedFingerprint = `${A}:${base}`;
+rec.reviewedContext = "default";
 writeRecord(rec);
 
 const F = "headRefOid,baseRefName,headRefName,headRepository,headRepositoryOwner,isDraft,state";

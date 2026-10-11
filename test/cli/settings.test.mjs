@@ -98,7 +98,7 @@ test("R-P6: an ancestor whose path merely contains a claude directory is not Cla
   makeFakeBin(bin, "ps", psTable([`${process.pid} 4242 node review-loop.mjs setup`, "4242 4241 /bin/zsh /Users/x/claude/bin/tool", "4241 1 /Users/x/claude/bin/tool"]));
   assert.deepEqual(listClaudeProcesses(), { pids: [], parent: false });
   await updateSettings(addRules, { io, yes: true });
-  assert.equal(read().permissions.ask.length, 5);
+  assert.equal(read().permissions.ask.length, 8);
 });
 
 test("T-SET-9: idempotent — the second run changes no byte, makes no backup", async () => {
@@ -176,7 +176,7 @@ test("T-SET-12: symlinked settings — link survives, target updated, mode prese
   await updateSettings(addRules, { io, yes: true });
   assert.ok(fs.lstatSync(settingsPath()).isSymbolicLink());
   assert.equal(fs.statSync(real).mode & 0o777, 0o644);
-  assert.ok(JSON.parse(fs.readFileSync(real, "utf8")).permissions.ask.length === 5);
+  assert.ok(JSON.parse(fs.readFileSync(real, "utf8")).permissions.ask.length === 8);
   seams.set({ statUid: () => 12345 });
   await assert.rejects(updateSettings((o) => { o.x = 1; return true; }, { io, yes: true }), { code: "settings_target_insecure" });
 });
@@ -194,7 +194,7 @@ test("T-SET-13: concurrency, crash safety, detached writes, backups", async (t) 
     seams.set({ beforeRehash: () => { if (!fired) { fired = true; fs.writeFileSync(settingsPath(), JSON.stringify({ a: 1, foreign: true })); } } });
     await updateSettings(addRules, { io, yes: true });
     assert.equal(read().foreign, true);
-    assert.equal(read().permissions.ask.length, 5);
+    assert.equal(read().permissions.ask.length, 8);
   });
   await t.test("(2b) replace-style foreign write (temp + rename) before the re-hash → merged", async () => {
     sandbox(JSON.stringify({ a: 1 }));
@@ -203,7 +203,7 @@ test("T-SET-13: concurrency, crash safety, detached writes, backups", async (t) 
     await updateSettings(addRules, { io, yes: true });
     assert.equal(fired, true);
     assert.equal(read().foreign, true);
-    assert.equal(read().permissions.ask.length, 5);
+    assert.equal(read().permissions.ask.length, 8);
   });
   await t.test("(3) absent file → created 0600, no backup", async () => {
     const home = sandbox();
@@ -273,7 +273,7 @@ test("T-SET-13: concurrency, crash safety, detached writes, backups", async (t) 
     await updateSettings(addRules, { io: tty, yes: false });
     assert.equal(asked, 1);
     assert.match(said.join(""), /Quit all Claude Code sessions/);
-    assert.equal(read().permissions.ask.length, 5);
+    assert.equal(read().permissions.ask.length, 8);
     sandbox("{}");
     makeFakeBin(bin, "ps", psTable([...NO_CLAUDE, "123 1 claude"]));
     await assert.rejects(updateSettings(addRules, { io: { ...tty, ask: async () => false }, yes: false }), { code: "cancelled" });
@@ -301,7 +301,7 @@ test("T-SET-13: concurrency, crash safety, detached writes, backups", async (t) 
     seams.set({ afterRename: () => { if (!fired) { fired = true; fs.writeFileSync(settingsPath(), JSON.stringify({ late: true })); } } });
     await updateSettings(addRules, { io, yes: true });
     assert.equal(read().late, true);
-    assert.equal(read().permissions.ask.length, 5);
+    assert.equal(read().permissions.ask.length, 8);
   });
   await t.test("(6) crash between temp write and rename → target byte-identical, temp cleaned next run", async () => {
     const home = sandbox('{"keep":1}');
@@ -364,7 +364,7 @@ test("T-SET-13: concurrency, crash safety, detached writes, backups", async (t) 
       });
       await updateSettings(addRules, { io, yes: true });
       assert.equal(read().foreign, true, `replace=${replace}`);
-      assert.equal(read().permissions.ask.length, 5);
+      assert.equal(read().permissions.ask.length, 8);
     }
   });
   await t.test("(10) EXDEV: the backup is a 0600 byte copy and the output says so", async () => {
@@ -392,11 +392,11 @@ test("T-SET-8: env values never reach any output", async () => {
   assert.ok(!seen.join("").includes("ENVSECRET"));
 });
 
-test("T-SET-14: exactly the five strings; never permissions.allow; a similar string is untouched", async () => {
+test("T-SET-14: exactly the eight strings; never permissions.allow; a similar string is untouched", async () => {
   sandbox(JSON.stringify({ permissions: { ask: ["Bash(*review-loop.off* )"] } }));
   await updateSettings(addRules, { io, yes: true });
   const o = read();
-  assert.equal(o.permissions.ask.length, 6);
+  assert.equal(o.permissions.ask.length, 9);
   assert.equal(o.permissions.ask[0], "Bash(*review-loop.off* )");
   assert.deepEqual(o.permissions.ask.slice(1), [...ASK_RULES]);
   assert.equal(o.permissions.allow, undefined);
@@ -404,7 +404,10 @@ test("T-SET-14: exactly the five strings; never permissions.allow; a similar str
 
 test("ASK_RULES and LEGACY_HOOK_RE are the spec §6.2 values", async () => {
   const { LEGACY_HOOK_RE } = await import("../../cli/lib/settings.mjs");
-  assert.deepEqual([...ASK_RULES], ["Bash(*review-loop.off*)", "Bash(*review-round.mjs decide*)", "Bash(*review-round.mjs override*)", "Bash(*review-round.mjs repin*)", "Edit(**/.claude/review-loop.off)"]);
+  assert.deepEqual([...ASK_RULES], [
+    "Bash(*review-loop.off*)", "Bash(*review-round.mjs decide*)", "Bash(*review-round.mjs override*)", "Bash(*review-round.mjs repin*)", "Edit(**/.claude/review-loop.off)",
+    "Edit(**/.claude/review-context.md)", "Write(**/.claude/review-context.md)", "Bash(*review-context.md*)"
+  ]);
   assert.ok(Object.isFrozen(ASK_RULES));
   assert.ok(LEGACY_HOOK_RE.test("node ~/.claude/review-loop/review-gate-hook.mjs stop"));
 });

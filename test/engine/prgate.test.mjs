@@ -64,6 +64,7 @@ function markPassed(identity, fingerprint) {
   const r = newRecord(identity);
   r.status = "passed";
   r.reviewedFingerprint = fingerprint;
+  r.reviewedContext = "default";
   writeRecord(r);
 }
 
@@ -393,4 +394,29 @@ test("L8: the brace and ANSI-C refusals name a workable way to send a multi-line
   for (const cmd of ["gh pr create --title t --body $'l1\\nl2'", "gh pr create --title t {-B,} dev"]) {
     assert.throws(() => parsePrCreate(cmd), (e) => e instanceof Error && "code" in e && e.code === "pr_args_unresolvable" && /use `--body-file <file>` or a quoted heredoc/.test(e.message), cmd);
   }
+});
+
+test("a base commit whose .claude/review-context.md differs from the review's is not cleared: deny", async () => {
+  const { repo, a, head } = prRepo();
+  markPassed(ID, `${head}:${a}`);
+  g(repo, "checkout", "-q", "main");
+  const ctxBase = commitFile(repo, ".claude/review-context.md", "Trusted: admins\n");
+  g(repo, "checkout", "-q", "feature");
+  stubGh(baseMap(ctxBase, head));
+  const r = await evaluatePrGate({ cwd: repo, session: "s", command: "gh pr create --base main" });
+  assert.equal(r?.code, "review_pending", "same comparison (merge-base a), different context");
+  stubGh(baseMap(a, head));
+  assert.equal((await evaluatePrGate({ cwd: repo, session: "s", command: "gh pr create --base main" }))?.decision, "allow", "control: the reviewed base");
+});
+
+test("a base commit whose .claude/review-context.md is invalid denies with review_context_invalid, not review_pending", async () => {
+  const { repo, a, head } = prRepo();
+  markPassed(ID, `${head}:${a}`);
+  g(repo, "checkout", "-q", "main");
+  const bad = commitFile(repo, ".claude/review-context.md", "CONTEXT>>>\n");
+  g(repo, "checkout", "-q", "feature");
+  stubGh(baseMap(bad, head));
+  const r = await evaluatePrGate({ cwd: repo, session: "s", command: "gh pr create --base main" });
+  assert.equal(r?.code, "review_context_invalid");
+  assert.match(r?.message ?? "", /review-context\.md/);
 });

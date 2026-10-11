@@ -6,7 +6,9 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { tmpDir } from "../engine/helpers.mjs";
 import { emitEvent, buildEvent, writeEvent, eventsPath, eventsPathProblem, validateLine, maxLineBytes } from "../../plugin/engine/lib/events.mjs";
-import { EVENT_CATALOG } from "../../plugin/engine/lib/codes.mjs";
+import { EVENT_CATALOG, roundResultProblems } from "../../plugin/engine/lib/codes.mjs";
+import { classify, triageCounts } from "../../plugin/engine/lib/value.mjs";
+import { DIMENSIONS } from "../../plugin/engine/lib/scoring.mjs";
 
 const ROOT = path.resolve(import.meta.dirname, "../..");
 const EVENTS_URL = new URL("../../plugin/engine/lib/events.mjs", import.meta.url).href;
@@ -273,4 +275,88 @@ test("L16: eventsPathProblem refuses a parent or a file owned by someone else (n
   assert.equal(eventsPathProblem("/private/etc/hosts"), "not_owned", "a root-owned file in a root-owned dir");
   const mine = path.join(tmpDir(), "e.jsonl");
   assert.equal(eventsPathProblem(mine), null, "control: a new file in my own dir");
+});
+
+const NO_CTX = { trustedActors: new Set(), acceptedRisks: new Map(), priorClasses: new Set() };
+const scoredData = () => ({
+  kind: "spec", round: 1, pass: false, preset: "default", duration_ms: 5, mean: 8.4, dims: Object.fromEntries(DIMENSIONS.map((d) => [d, 8.4])),
+  model: null, effort: null, effort_source: "codex-inherited", scored: true, context: "file", context_digest: "0123456789ab",
+  ...triageCounts([{ severity: "medium", dimension: "Safety", value: null, triage: classify({ severity: "medium", title: "[Safety] x", value: null }, NO_CTX) }]).event
+});
+
+test("round.result: a scored event carries every count; histograms have exactly their enum's keys and agree with the total", () => {
+  assert.deepEqual(roundResultProblems(scoredData()), []);
+  const line = buildEvent({ source: "round", event: "round.result", code: "needs_fixes", data: scoredData() });
+  assert.deepEqual(validateLine(line), []);
+  assert.deepEqual([line.data.blocking, line.data.unvalued, line.data.why_unvalued], [1, 1, 1]);
+  const extraKey = scoredData();
+  extraKey.impacts = { ...extraKey.impacts, extra: 0 };
+  assert.ok(roundResultProblems(extraKey).includes("impacts"));
+  const badSum = scoredData();
+  badSum.severities = { ...badSum.severities, low: 1 };
+  assert.ok(roundResultProblems(badSum).includes("severities"));
+  assert.ok(roundResultProblems({ ...scoredData(), blocking: 10_001 }).includes("blocking"));
+  assert.ok(roundResultProblems({ ...scoredData(), context_digest: "xyz" }).includes("context_digest"));
+  assert.ok(roundResultProblems({ ...scoredData(), context: undefined }).includes("context"), "a scored round names its context");
+  assert.ok(roundResultProblems({ ...scoredData(), context: "weird" }).includes("context"));
+  for (const f of ["kind", "round", "pass", "preset", "duration_ms", "mean", "dims", "effort_source"]) {
+    assert.ok(roundResultProblems({ ...scoredData(), [f]: undefined }).includes(f), `a scored round must carry ${f}`);
+  }
+  assert.deepEqual(roundResultProblems(scoredData()), [], "model and effort may be null: Codex's own default");
+  for (const f of ["model", "effort"]) {
+    const omitted = /** @type {Record<string, unknown>} */ (scoredData());
+    delete omitted[f];
+    assert.ok(roundResultProblems(omitted).includes(f), `a scored round must say its ${f}, if only as null`);
+  }
+  assert.equal(EVENT_CATALOG["round.result"].data.context("weird"), null);
+  assert.equal(EVENT_CATALOG["round.result"].data.context_digest("0123456789abc"), null);
+});
+
+test("round.result: an unscored event carries no counts, written as null; a count on it is refused", () => {
+  const unscored = { kind: "spec", round: 3, pass: false, preset: "default", duration_ms: 5, scored: false, context: null, context_digest: null };
+  assert.deepEqual(roundResultProblems(unscored), []);
+  assert.equal(buildEvent({ source: "round", event: "round.result", code: "plugin_pin", data: unscored }).data.blocking, null);
+  assert.ok(roundResultProblems({ ...unscored, blocking: 0 }).includes("blocking"));
+  for (const f of ["mean", "dims", "effort_source", "model", "effort", "blocking"]) {
+    assert.ok(roundResultProblems({ ...unscored, [f]: null }).includes(f), `an unscored round carries no ${f}, not even null`);
+  }
+  assert.deepEqual(roundResultProblems({ kind: "spec" }), ["scored"]);
+  assert.ok(roundResultProblems({ ...unscored, duration_ms: undefined }).includes("duration_ms"), "every round says how long it ran");
+  assert.ok(roundResultProblems({ ...unscored, context: "weird" }).includes("context"), "an unscored round's context is null or a known kind");
+  assert.deepEqual(roundResultProblems({ ...unscored, context: "default" }), []);
+  assert.ok(roundResultProblems({ ...unscored, context: "default", context_digest: "0123456789ab" }).includes("context_digest"), "a digest only with a file");
+});
+
+test("a malformed round.result never throws, even when stderr does", (t) => {
+  t.mock.method(process.stderr, "write", () => {
+    throw new Error("EPIPE");
+  });
+  let r;
+  assert.doesNotThrow(() => {
+    r = emitEvent({ source: "round", event: "round.result", code: "needs_fixes", data: { kind: "spec", round: 1 } });
+  });
+  t.mock.restoreAll();
+  assert.equal(r, false);
+});
+
+test("a round.result without scored, or scored but missing a count or its score, is never written; stderr names event_shape_invalid", (t) => {
+  const file = eventsPath();
+  const before = fs.existsSync(file) ? fs.readFileSync(file, "utf8") : "";
+  /** @type {string[]} */
+  const said = [];
+  t.mock.method(process.stderr, "write", (/** @type {unknown} */ s) => {
+    said.push(String(s));
+    return true;
+  });
+  const missing = /** @type {Record<string, unknown>} */ (scoredData());
+  delete missing.unvalued;
+  const noMean = /** @type {Record<string, unknown>} */ (scoredData());
+  delete noMean.mean;
+  const a = emitEvent({ source: "round", event: "round.result", code: "needs_fixes", data: { kind: "spec", round: 1 } });
+  const b = emitEvent({ source: "round", event: "round.result", code: "needs_fixes", data: missing });
+  const c = emitEvent({ source: "round", event: "round.result", code: "needs_fixes", data: noMean });
+  t.mock.restoreAll();
+  assert.deepEqual([a, b, c], [false, false, false]);
+  assert.deepEqual(said, Array(3).fill("review-loop: event_shape_invalid round.result\n"));
+  assert.equal(fs.existsSync(file) ? fs.readFileSync(file, "utf8") : "", before, "nothing written");
 });

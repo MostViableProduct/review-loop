@@ -1,15 +1,18 @@
 import { parsePrCreate } from "./cmdparse.mjs";
 import { errorCode } from "./errors.mjs";
-import { PR_LIST_LIMIT, ghInstalled, ghPrClose, ghPrDraft, ghPrListByHead, ghPrView } from "./github.mjs";
-import { repoRoot, currentBranch } from "./git.mjs";
+import { PR_LIST_LIMIT, ghBranchSha, ghInstalled, ghPrClose, ghPrDraft, ghPrListByHead, ghPrView } from "./github.mjs";
+import { repoRoot, currentBranch, commitExists, fetchExactRef, fetchSource } from "./git.mjs";
 import { killSwitchForSession, resolveBaseSlug } from "./prgate.mjs";
 import { gateOutcome } from "./presets.mjs";
 import { identityKey, readRecord } from "./state.mjs";
+import { gateContextDigest } from "./context.mjs";
 
 const SLUG = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 const MAX_BODY = 1024 * 1024;
 const MAX_MCP_TEXT = 64 * 1024;
 const DEFAULT_DEADLINE_MS = 30_000;
+// Kept back from a base fetch, so a PR whose context still can't be read can be drafted or closed in time.
+const CONTAIN_RESERVE_MS = 10_000;
 
 /** @param {unknown} v @returns {Record<string, unknown>} */
 const obj = (v) => (typeof v === "object" && v !== null && !Array.isArray(v) ? /** @type {Record<string, unknown>} */ (v) : {});
@@ -155,10 +158,36 @@ export async function evaluatePrVerify(p) {
   const identity = { kind: /** @type {const} */ ("branch"), baseRepo: repo, baseBranch: pr.baseRefName, headRepo: pr.headRepo, headBranch: pr.headRefName };
   const rec = readRecord(identityKey(identity));
   const reviewedHead = rec && (rec.status === "passed" || rec.status === "overridden") ? rec.reviewedFingerprint?.split(":")[0] ?? null : null;
-  if (reviewedHead === head) return { output: null, outcome: "allowed", code: "reviewed", detail: null };
+  // The head alone isn't the pass: the base's context must still be the one the review ran under (spec D1). It is read
+  // at the base's current commit. No base to read it at is the check being unavailable; an invalid file is "error";
+  // both fail closed.
+  let contextMoved = false;
+  if (reviewedHead === head) {
+    const baseSha = root ? await ghBranchSha(repo, pr.baseRefName, root, { notFound: "pr_base_unverifiable", failed: "pr_base_unverifiable" }, deadlineAt).catch(() => null) : null;
+    // A clone that hasn't fetched since the base moved has no tree to read: fetch the exact ref, as the merge gate does.
+    const fetchMs = deadlineAt - Date.now() - CONTAIN_RESERVE_MS;
+    if (root && baseSha && fetchMs > 0 && !(await commitExists(root, baseSha, deadlineAt).catch(() => true))) {
+      await fetchExactRef(root, await fetchSource(root, repo, deadlineAt), pr.baseRefName, { timeoutMs: fetchMs }).catch(() => null);
+    }
+    if (!root || !baseSha) return unavailable(root ? "the PR's base branch could not be read from GitHub" : "no local repository holds the PR's base", number);
+    if (!(await commitExists(root, baseSha, deadlineAt).catch(() => false))) return unavailable("the PR's base commit could not be fetched", number);
+    let context;
+    try {
+      context = await gateContextDigest(identity, root, { baseSha, deadlineAt });
+    } catch (err) {
+      // A timeout or a failed git call says nothing about the file: report it as the check being unavailable.
+      return unavailable(`the base's .claude/review-context.md could not be read (${errorCode(err)})`, number);
+    }
+    if (context === rec?.reviewedContext) return { output: null, outcome: "allowed", code: "reviewed", detail: null };
+    // An invalid file is the base's to fix, not a sign the head is unreviewed: report, and change nothing on GitHub.
+    if (context === "error") return unavailable(`${pr.baseRefName}'s .claude/review-context.md is invalid (review_context_invalid); fix or remove it there`, number);
+    contextMoved = true;
+  }
 
   const short = (/** @type {string | null} */ s) => (s ? s.slice(0, 7) : "none");
-  const what = `PR #${number} head ${short(head)} is not the reviewed ${short(reviewedHead)}`;
+  const what = contextMoved
+    ? `PR #${number} head ${short(head)} was reviewed under a different .claude/review-context.md than its base has now`
+    : `PR #${number} head ${short(head)} is not the reviewed ${short(reviewedHead)}`;
   const merged = pr.state === "MERGED";
   // Advisory never blocks and never mutates the PR (spec §5.2, AC-23): it warns only.
   if (soft) {

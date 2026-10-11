@@ -1,6 +1,7 @@
 // Pure round/checkpoint/dispute logic. No I/O, so every paging path is unit-testable without Codex.
 import { ReviewLoopError } from "./errors.mjs";
 import { parseDimensionTag } from "./scoring.mjs";
+import { classKey } from "./value.mjs";
 
 export const EXIT = Object.freeze({
   PASS: 0,
@@ -20,6 +21,8 @@ const CHECKPOINT_OPTIONS = ["continue", "more", "accept", "stop"];
 export const OPTIONS = Object.freeze({
   checkpoint: CHECKPOINT_OPTIONS,
   stall: CHECKPOINT_OPTIONS,
+  // No option is recommended: what still blocks is plausible, which the engine calls realistic (owner, 2026-10-11).
+  diminishing_returns: ["continue", "accept", "stop"],
   dispute_deadlock: ["accept-finding", "waive", "stop"],
   plugin_pin: ["repin", "override", "stop"],
   criss_cross: ["merge", "override", "stop"],
@@ -40,10 +43,27 @@ export const OPTION_LABELS = Object.freeze({
   pull: "Pull remote changes and re-review (no force)"
 });
 
+/** Labels that differ on one page from OPTION_LABELS. */
+const PAGE_LABELS = Object.freeze({
+  diminishing_returns: Object.freeze({ accept: "Accept (logged override)", continue: "Keep fixing (the round limit stays)" })
+});
+
+/** @param {string} reason @param {string} option */
+export function optionLabel(reason, option) {
+  const page = /** @type {Readonly<Record<string, Readonly<Record<string, string>>>>} */ (PAGE_LABELS)[reason];
+  return page?.[option] ?? OPTION_LABELS[/** @type {keyof typeof OPTION_LABELS} */ (option)] ?? option;
+}
+
+/** Failing rounds in a row, with only plausible, lower-stakes findings blocking, before the value page (spec D5). */
+export const VALUE_PAGE_ROUNDS = 2;
+
+/** The most finding classes a record keeps (spec D4): the most recently raised. */
+export const CLASS_CAP = 50;
+
 /** @param {string} reason */
 export function exitForAwaiting(reason) {
   if (reason === "checkpoint") return EXIT.CHECKPOINT;
-  if (reason === "stall") return EXIT.STALL;
+  if (reason === "stall" || reason === "diminishing_returns") return EXIT.STALL;
   if (reason === "plugin_pin") return EXIT.PIN;
   return EXIT.HUMAN;
 }
@@ -75,13 +95,14 @@ export function sameFinding(a, b) {
 }
 
 /**
- * A new loop starts when the artifact changed after a terminal outcome.
+ * A new loop starts when the artifact, or the context it was reviewed under, changed after a terminal outcome.
  * @param {ReturnType<typeof import("./state.mjs").newRecord>} rec
  * @param {string} fingerprint
+ * @param {string} context the current contextDigest
  */
-export function resetIfNewLoop(rec, fingerprint) {
+export function resetIfNewLoop(rec, fingerprint, context) {
   const terminal = rec.status === "passed" || rec.status === "overridden" || rec.status === "stopped";
-  if (terminal && rec.reviewedFingerprint !== fingerprint) {
+  if (terminal && (rec.reviewedFingerprint !== fingerprint || rec.reviewedContext !== context)) {
     Object.assign(rec, {
       status: "pending",
       round: 0,
@@ -90,9 +111,11 @@ export function resetIfNewLoop(rec, fingerprint) {
       uncappedStart: null,
       bestSumTenths: null,
       sinceImprovement: 0,
+      sinceValue: 0,
       history: [],
       disputes: [],
       waivers: [],
+      classes: [],
       awaiting: null,
       lastError: null,
       errorAttempts: 0
@@ -115,11 +138,13 @@ export function withoutWaived(findings, waivers) {
  * Fold one completed Codex round into the record and decide the next step.
  * @param {ReturnType<typeof import("./state.mjs").newRecord>} rec
  * @param {{ pass: boolean, dimensions: Array<{ name: string, tenths: number }>, sum: number }} scored
- * @param {Array<{ title: string, file?: string | null, severity: string }>} findings  already waiver-filtered
+ * @param {Array<{ title: string, file?: string | null, severity: string }>} findings the blocking findings, waivers removed
  * @param {string} fingerprint
+ * @param {{ context: string, triage: import("./value.mjs").HistoryTriage }} meta the contextDigest the round was reviewed
+ *   under, and its triage counts
  * @returns {number} exit code
  */
-export function applyRoundResult(rec, scored, findings, fingerprint) {
+export function applyRoundResult(rec, scored, findings, fingerprint, meta) {
   rec.round += 1;
   rec.fingerprint = fingerprint;
   rec.lastError = null;
@@ -129,11 +154,14 @@ export function applyRoundResult(rec, scored, findings, fingerprint) {
     round: rec.round,
     sumTenths,
     dims: Object.fromEntries(scored.dimensions.map((d) => [d.name, d.tenths])),
-    findings: findings.length,
+    // Every finding after waivers, as in 1.0.x: `findings` here holds only the blocking ones.
+    findings: meta.triage.blocking + meta.triage.advisory,
+    context: meta.context,
+    triage: meta.triage,
     at: new Date().toISOString()
   });
 
-  // A dispute Codex drops is resolved; one it re-raises twice needs a human.
+  // A dispute Codex drops is resolved; one it re-raises twice needs a human. Only blocking findings count.
   rec.disputes = rec.disputes
     .map((d) => (findings.some((f) => sameFinding(f, d)) ? { ...d, raisedAgain: d.raisedAgain + 1 } : null))
     .filter((d) => d !== null);
@@ -141,24 +169,35 @@ export function applyRoundResult(rec, scored, findings, fingerprint) {
   if (scored.pass) {
     rec.status = "passed";
     rec.reviewedFingerprint = fingerprint;
+    rec.reviewedContext = meta.context;
     rec.awaiting = null;
     return EXIT.PASS;
   }
 
-  const deadlock = rec.disputes.find((d) => d.raisedAgain >= 2);
-  if (deadlock) return awaitHuman(rec, "dispute_deadlock", { title: deadlock.title, file: deadlock.file ?? null });
+  // A round counts toward the value page only when what blocked is plausible and lower-stakes: no critical, no
+  // malformed (unvalued) finding, no money/data/security finding, nothing on a real path. Those keep the loop fixing
+  // and reach the owner through the checkpoint and stall pages.
+  const t = meta.triage;
+  const worthFixing = t.why.critical > 0 || t.unvalued > 0 || t.why.money_data_security > 0 || t.likelihoods.includes("real_path");
+  rec.sinceValue = worthFixing ? 0 : rec.sinceValue + 1;
 
-  if (rec.mode === "capped") {
-    if (rec.round >= rec.nextCheckpoint) return awaitHuman(rec, "checkpoint", { round: rec.round });
-  } else {
+  const deadlock = rec.disputes.find((d) => d.raisedAgain >= 2);
+  if (deadlock) return awaitHuman(rec, "dispute_deadlock", { title: deadlock.title, file: deadlock.file ?? null, class: deadlock.class ?? null }, fingerprint, meta.context);
+
+  if (rec.mode === "uncapped") {
     if (rec.bestSumTenths === null || sumTenths > rec.bestSumTenths) {
       rec.bestSumTenths = sumTenths;
       rec.sinceImprovement = 0;
     } else {
       rec.sinceImprovement += 1;
     }
-    if (rec.sinceImprovement >= 3) return awaitHuman(rec, "stall", { round: rec.round });
-    if (rec.uncappedStart !== null && rec.round >= rec.uncappedStart + 20) return awaitHuman(rec, "checkpoint", { round: rec.round });
+  }
+  if (rec.sinceValue >= VALUE_PAGE_ROUNDS) return awaitHuman(rec, "diminishing_returns", { rounds: valueTable(rec) }, fingerprint, meta.context);
+  if (rec.mode === "capped") {
+    if (rec.round >= rec.nextCheckpoint) return awaitHuman(rec, "checkpoint", { round: rec.round }, fingerprint, meta.context);
+  } else {
+    if (rec.sinceImprovement >= 3) return awaitHuman(rec, "stall", { round: rec.round }, fingerprint, meta.context);
+    if (rec.uncappedStart !== null && rec.round >= rec.uncappedStart + 20) return awaitHuman(rec, "checkpoint", { round: rec.round }, fingerprint, meta.context);
   }
   rec.status = "needs_fixes";
   rec.awaiting = null;
@@ -166,16 +205,26 @@ export function applyRoundResult(rec, scored, findings, fingerprint) {
 }
 
 /**
+ * The value page's detail: per round, counts and the blocking findings' likelihoods; never titles or bodies.
+ * @param {ReturnType<typeof import("./state.mjs").newRecord>} rec
+ */
+function valueTable(rec) {
+  return rec.history.slice(-VALUE_PAGE_ROUNDS).map((h) => ({ round: h.round, blocking: h.triage.blocking, advisory: h.triage.advisory, unvalued: h.triage.unvalued, likelihoods: h.triage.likelihoods }));
+}
+
+/**
  * @param {ReturnType<typeof import("./state.mjs").newRecord>} rec
  * @param {string} reason
  * @param {Record<string, unknown>} [detail]
+ * @param {string | null} [fingerprint]
+ * @param {string | null} [context] the contextDigest a scored page was raised under; null for a page with no score
  */
-export function awaitHuman(rec, reason, detail = {}, fingerprint = rec.fingerprint ?? null) {
+export function awaitHuman(rec, reason, detail = {}, fingerprint = rec.fingerprint ?? null, context = null) {
   const options = OPTIONS[/** @type {keyof typeof OPTIONS} */ (reason)];
   if (!options) throw new ReviewLoopError("unknown_page_reason", `no page options defined for "${reason}"`);
   rec.status = "awaiting_human";
-  // The page is a decision about THIS fingerprint; accept/override later require the artifact to still be at it.
-  rec.awaiting = { reason, detail, options: [...options], fingerprint };
+  // The page is a decision about THIS fingerprint and context; accept/override later require both to still hold.
+  rec.awaiting = { reason, detail, options: [...options], fingerprint, context };
   return exitForAwaiting(reason);
 }
 
@@ -184,8 +233,9 @@ export function awaitHuman(rec, reason, detail = {}, fingerprint = rec.fingerpri
  * @param {ReturnType<typeof import("./state.mjs").newRecord>} rec
  * @param {string} option
  * @param {string | null} currentFingerprint
+ * @param {string | null} currentContext the contextDigest now; never "error" (contextNow throws instead)
  */
-export function applyDecision(rec, option, currentFingerprint) {
+export function applyDecision(rec, option, currentFingerprint, currentContext) {
   if (rec.status !== "awaiting_human" || !rec.awaiting) {
     throw new ReviewLoopError("invalid_decision", "this artifact is not awaiting a decision");
   }
@@ -194,42 +244,54 @@ export function applyDecision(rec, option, currentFingerprint) {
   if (!allowed.includes(option)) {
     throw new ReviewLoopError("invalid_decision", `"${option}" is not an option for ${reason}; allowed: ${allowed.join(", ")}`);
   }
-  if ((option === "accept" || option === "override") && (!currentFingerprint || rec.awaiting.fingerprint !== currentFingerprint)) {
-    throw new ReviewLoopError("decision_stale", "the artifact changed since this page was shown (or its state is unknown); re-run the round for a current page");
+  const contextMoved = typeof rec.awaiting.context === "string" && rec.awaiting.context !== currentContext;
+  if ((option === "accept" || option === "override") && (!currentFingerprint || rec.awaiting.fingerprint !== currentFingerprint || contextMoved)) {
+    throw new ReviewLoopError("decision_stale", "the artifact or its .claude/review-context.md changed since this page was shown (or its state is unknown); re-run the round for a current page");
   }
-  const detail = /** @type {{ title?: string, file?: string | null }} */ (rec.awaiting.detail ?? {});
+  const detail = /** @type {{ title?: string, file?: string | null, class?: string | null }} */ (rec.awaiting.detail ?? {});
   rec.awaiting = null;
   switch (option) {
     case "continue": {
+      // On the value page, continue only resets its counter: the loop's mode and checkpoint stay (spec D5).
+      if (reason === "diminishing_returns") {
+        rec.sinceValue = 0;
+        rec.status = "needs_fixes";
+        break;
+      }
       rec.mode = "uncapped";
       rec.uncappedStart = rec.round;
       const last = rec.history[rec.history.length - 1];
       rec.bestSumTenths = last ? last.sumTenths : null;
       rec.sinceImprovement = 0;
+      rec.sinceValue = 0;
       rec.status = "needs_fixes";
       break;
     }
     case "more":
       rec.mode = "capped";
       rec.nextCheckpoint = rec.round + 10;
+      rec.sinceValue = 0;
       rec.status = "needs_fixes";
       break;
     case "accept":
     case "override":
-      if (!currentFingerprint) throw new ReviewLoopError("invalid_decision", "cannot override: current fingerprint unknown");
+      if (!currentFingerprint || currentContext === null) throw new ReviewLoopError("invalid_decision", "cannot override: the current fingerprint or context is unknown");
       rec.status = "overridden";
       rec.reviewedFingerprint = currentFingerprint;
+      rec.reviewedContext = currentContext;
       break;
     case "stop":
       rec.status = "stopped";
       break;
     case "accept-finding":
       rec.disputes = rec.disputes.filter((d) => !sameFinding(d, { title: detail.title ?? "", file: detail.file ?? null }));
+      refreshDispositions(rec);
       rec.status = "needs_fixes";
       break;
     case "waive":
       rec.disputes = rec.disputes.filter((d) => !sameFinding(d, { title: detail.title ?? "", file: detail.file ?? null }));
-      rec.waivers.push({ title: detail.title ?? "", file: detail.file ?? null, at: new Date().toISOString() });
+      rec.waivers.push({ title: detail.title ?? "", file: detail.file ?? null, at: new Date().toISOString(), class: detail.class ?? null });
+      refreshDispositions(rec);
       rec.status = "needs_fixes";
       break;
     case "repin":
@@ -241,6 +303,31 @@ export function applyDecision(rec, option, currentFingerprint) {
       throw new ReviewLoopError("invalid_decision", `unknown option ${option}`);
   }
   return reason;
+}
+
+/**
+ * Fold this round's valued findings into the record's classes (spec D4): most recently raised last, capped at CLASS_CAP.
+ * @param {ReturnType<typeof import("./state.mjs").newRecord>} rec
+ * @param {Array<{ dimension: string, label: string }>} raised this round's findings that carried a VALUE line
+ */
+export function updateClasses(rec, raised) {
+  const classes = rec.classes.map((c) => ({ ...c, rounds: [...c.rounds] }));
+  for (const r of raised) {
+    const key = classKey(r.dimension, r.label);
+    const at = classes.findIndex((c) => c.key === key);
+    const c = at === -1 ? { label: r.label, key, dimension: r.dimension, rounds: /** @type {number[]} */ ([]), disposition: "raised" } : classes.splice(at, 1)[0];
+    if (c.rounds[c.rounds.length - 1] !== rec.round) c.rounds = [...c.rounds, rec.round].slice(-100);
+    classes.push(c);
+  }
+  rec.classes = classes.slice(-CLASS_CAP);
+  refreshDispositions(rec);
+}
+
+/** A class's disposition comes from the disputes and waivers that name it: waived, else disputed, else raised. */
+export function refreshDispositions(/** @type {ReturnType<typeof import("./state.mjs").newRecord>} */ rec) {
+  for (const c of rec.classes) {
+    c.disposition = rec.waivers.some((w) => w.class === c.key) ? "waived" : rec.disputes.some((d) => d.class === c.key) ? "disputed" : "raised";
+  }
 }
 
 /** @param {string} title */

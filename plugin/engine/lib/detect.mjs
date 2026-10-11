@@ -17,6 +17,7 @@ import {
   readLock
 } from "./state.mjs";
 import { emitEvent } from "./events.mjs";
+import { gateContextDigest } from "./context.mjs";
 import { reapChildren } from "./proc.mjs";
 import { killSwitchState, killSwitchForSession, RR_CMD } from "./prgate.mjs";
 
@@ -311,6 +312,15 @@ async function scanSession(session, cwd) {
     scanFailures.push(scanFailure(session, CLAUDE_PLANS_DIR, err, root ?? cwd));
   }
 
+  // One read per project root. An unreadable context is "error", which no record holds, so it never clears.
+  /** @type {Map<string, Promise<string>>} */
+  const digests = new Map();
+  const contextOf = (/** @type {Artifact} */ a) => {
+    const at = a.projectRoot ?? "";
+    if (!digests.has(at)) digests.set(at, gateContextDigest(a.identity, a.projectRoot));
+    return /** @type {Promise<string>} */ (digests.get(at));
+  };
+
   for (const { baseRoot, list } of scopes) {
     const baseline = readBaseline(session, baseRoot);
     if (!baseline) {
@@ -323,6 +333,15 @@ async function scanSession(session, cwd) {
       continue;
     }
     for (const a of list) if (baseline.artifacts[a.key] !== a.fingerprint) candidates.push(a);
+    // A context changed since a pass re-opens it even when this session's baseline already holds the change (it was
+    // made between sessions): the record, not the baseline, says which context the pass was bound to. Not for
+    // ~/.claude/plans: its plans are listed whatever the project, so each project's context would re-open every
+    // untouched plan reviewed under another's. A plan this session edits is still a candidate above.
+    for (const a of baseRoot === CLAUDE_PLANS_DIR ? [] : list) {
+      if (candidates.some((c) => c.key === a.key)) continue;
+      const rec = readRecord(a.key);
+      if (rec && (rec.status === "passed" || rec.status === "overridden") && rec.reviewedFingerprint === a.fingerprint && rec.reviewedContext !== (await contextOf(a))) candidates.push(a);
+    }
     // A baseline without `head` predates commit tracking: its start commit is unknown, so there is no range to scan.
     if (baseRoot === CLAUDE_PLANS_DIR || baseline.head === undefined) continue;
     try {
@@ -361,13 +380,18 @@ async function scanSession(session, cwd) {
   const items = [...scanFailures];
   for (const a of candidates) {
     if (a.identity.kind !== "branch") {
-      const cleared = isClearedAt(a.identity, a.fingerprint) || (a.carriedFrom ? isClearedAt(a.carriedFrom, a.fingerprint) : false);
+      const context = await contextOf(a);
+      const cleared = isClearedAt(a.identity, a.fingerprint, context) || (a.carriedFrom ? isClearedAt(a.carriedFrom, a.fingerprint, context) : false);
       if (cleared) {
         removeMarker(a.key);
         continue;
       }
     }
     const rec = readRecord(a.key);
+    // A pass bound to another context: said, so the operator can tell it from an unreviewed change (no digest, no text).
+    // An invalid file gets its own reason: its fix is the file, not a re-review.
+    const current = a.identity.kind !== "branch" ? await contextOf(a) : null;
+    const contextChanged = current !== null && !!rec && (rec.status === "passed" || rec.status === "overridden") && rec.reviewedFingerprint === a.fingerprint && rec.reviewedContext !== current;
     let status = rec?.status ?? "pending";
     if (status === "reviewing" && !isLockLive(readLock(a.key))) status = "op_error";
     // A running round is not a pass, and neither is a review that kept failing: both block (once per turn). Retries
@@ -388,7 +412,7 @@ async function scanSession(session, cwd) {
           ? "round_in_progress"
           : exhausted
             ? `${rec?.lastError?.code ?? "op_error"}, ${rec?.errorAttempts} attempts — retries exhausted: report it; the user decides`
-            : rec?.awaiting?.reason ?? rec?.lastError?.code ?? (a.fingerprint.startsWith("error:") ? a.fingerprint.split(":")[1] : null),
+            : contextChanged ? (current === "error" ? "review_context_invalid" : "context_changed") : rec?.awaiting?.reason ?? rec?.lastError?.code ?? (a.fingerprint.startsWith("error:") ? a.fingerprint.split(":")[1] : null),
       command: status === "reviewing" ? `wait for the running round to finish and act on its exit code (re-running now returns busy): ${runCommand}` : runCommand,
       blocking
     });

@@ -2,12 +2,14 @@
 // (a stub inside a copy of the real plugin, pinned with the same pin code) and `gh` (a PATH stub).
 import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { spawnSync, spawn } from "node:child_process";
 import { makeFakeBin } from "../fakes/fakebin.mjs";
 import { g, makeRepo, commitFile, writeFile, tmpDir, GIT_ENV } from "./helpers.mjs";
 import { classify } from "../../cli/lib/livecheck.mjs";
+import { identityKey } from "../../plugin/engine/lib/state.mjs";
 
 const HERE = path.dirname(new URL(import.meta.url).pathname);
 const ROUND = path.join(HERE, "..", "..", "plugin", "engine", "review-round.mjs");
@@ -93,6 +95,14 @@ const respond = (findings, extra = {}) =>
   fs.writeFileSync(stubOut, JSON.stringify({ result: { verdict: findings.length ? "needs-attention" : "approve", summary: "s", findings, next_steps: [] }, parseError: null, ...extra }));
 const finding = (title, severity = "medium", file = "docs/specs/feature.md") => ({ severity, title, body: "b", file, line_start: 1, line_end: 2, confidence: 0.9, recommendation: "r" });
 const stubCalls = () => fs.readFileSync(stubLog, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
+const sha256 = (/** @type {string} */ s) => crypto.createHash("sha256").update(s).digest("hex");
+const recordOf = (/** @type {string} */ key) => JSON.parse(fs.readFileSync(path.join(env.REVIEW_LOOP_STATE_DIR, "records", `${key}.json`), "utf8"));
+/** A finding whose body ends with a VALUE line. */
+const valued = (/** @type {string} */ title, /** @type {string} */ severity, /** @type {{ l: string, i: string, c?: string, a?: string, ar?: string }} */ v) => ({
+  ...finding(title, severity),
+  body: `Body text.\nVALUE likelihood=${v.l}; impact=${v.i}; fix_cost=small; class=${v.c ?? "general handling"}; actor=${v.a ?? "none"}; accepted_risk=${v.ar ?? "none"}; trigger=a concrete trigger`
+});
+const roundResults = () => eventLines(fs.readFileSync(path.join(env.REVIEW_LOOP_STATE_DIR, "events.jsonl"), "utf8")).filter((e) => e.event === "round.result");
 
 function specRepo() {
   const repo = makeRepo();
@@ -882,7 +892,7 @@ if (m.stdout) console.log(m.stdout); if (m.stderr) console.error(m.stderr); proc
   const key = /--key (\w+)/.exec(gate.out.hookSpecificOutput.permissionDecisionReason)?.[1];
   assert.ok(key, gate.out.hookSpecificOutput.permissionDecisionReason);
   const statusCalls = () => (fs.existsSync(ghLog) ? fs.readFileSync(ghLog, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l)) : []).filter((c) => c[3]?.startsWith("repos/me/proj/statuses/"));
-  return { a, bare, local, key, refsBefore, ghMap, f1, statusCalls };
+  return { a, up, bare, local, key, refsBefore, ghMap, f1, statusCalls };
 }
 
 test("branch loop: gate denies → round unshallows head, fetches base by exact ref, reviews --base <merge-base>; refs/remotes untouched", () => {
@@ -1088,4 +1098,384 @@ test("statuses: spec and impl rounds (no PR) post nothing", () => {
   writeFile(repo, "src/a.ts", "changed");
   assert.equal(cli(["run", "--kind", "impl", "--path", repo], onPath).code, 10);
   assert.deepEqual(gh.log(), []);
+});
+
+test("an unreadable .claude/review-context.md fails the round before any Codex call, and is not retryable", () => {
+  const repo = specRepo();
+  const spec = writeFile(repo, "docs/specs/feature.md", "x");
+  writeFile(repo, ".claude/review-context.md", "Trusted: everyone\n");
+  respond([]);
+  const r = cli(["run", "--kind", "spec", "--path", spec, "--project-root", repo]);
+  assert.deepEqual([r.code, r.json?.error?.code, r.json?.error?.retryable], [30, "review_context_invalid", false], r.stdout);
+  assert.equal(stubCalls().length, 0, "no Codex call");
+  assert.doesNotMatch(r.stdout, /everyone/, "the error names the path and the reason, never the content");
+});
+
+test("a context change after a pass makes the next run review again; a 900 KiB spec still reviews beside a context file", () => {
+  const repo = specRepo();
+  const spec = writeFile(repo, "docs/specs/feature.md", "x");
+  const run = () => cli(["run", "--kind", "spec", "--path", spec, "--project-root", repo]);
+  respond([]);
+  assert.equal(run().code, 0);
+  const same = run();
+  assert.deepEqual([same.code, same.json.status, stubCalls().length], [0, "passed", 1], "unchanged: the pass stands, no Codex call");
+  writeFile(repo, ".claude/review-context.md", "Trusted: admins\n");
+  const again = run();
+  assert.deepEqual([again.code, again.json.round, stubCalls().length], [0, 1, 2], "a new loop, reviewed under the new context");
+  assert.equal(recordOf(again.json.key).reviewedContext, sha256("Trusted: admins\n"));
+  fs.writeFileSync(spec, "y".repeat(900 * 1024));
+  assert.equal(run().code, 0, "the context's 8 KiB cap is its own, not the artifact's");
+});
+
+test("a page shown, the context changed, then accept: decision_stale, and the record is byte-identical", () => {
+  const repo = specRepo();
+  const spec = writeFile(repo, "docs/specs/feature.md", "x");
+  const args = ["--kind", "spec", "--path", spec, "--project-root", repo];
+  respond([finding("[Usability] x", "low")]);
+  let r = cli(["run", ...args]);
+  for (let i = 2; i <= 10; i++) r = cli(["run", ...args]);
+  assert.equal(r.code, 20, r.stdout);
+  writeFile(repo, ".claude/review-context.md", "Trusted: admins\n");
+  const shown = cli(["run", ...args]);
+  assert.deepEqual([shown.code, shown.json.awaiting.stale], [20, true], "the re-shown page says accept will be refused");
+  const file = path.join(env.REVIEW_LOOP_STATE_DIR, "records", `${r.json.key}.json`);
+  const before = fs.readFileSync(file);
+  const accept = cli(["decide", ...args, "--option", "accept"]);
+  assert.deepEqual([accept.code, accept.json?.error?.code], [30, "decision_stale"], accept.stdout);
+  assert.ok(fs.readFileSync(file).equals(before), "the record is byte-identical");
+  fs.rmSync(path.join(repo, ".claude", "review-context.md"));
+  assert.equal(cli(["decide", ...args, "--option", "accept"]).json.status, "overridden", "back at the page's context, accept works");
+});
+
+test("accept after the PR base was rewritten, with the context unchanged: decision_stale, and the record is byte-identical", () => {
+  const { up, bare, local, key, ghMap } = branchFixture();
+  respond([finding("[Usability] x", "low")]);
+  let r;
+  for (let i = 1; i <= 10; i++) r = cli(["run", "--key", key]);
+  assert.equal(r.json?.awaiting?.reason, "checkpoint", r.stdout);
+  // A base with no common history: the PR's comparison is a different one, while neither base has a context file.
+  g(up, "checkout", "-q", "--orphan", "rewritten");
+  const rewritten = commitFile(up, "z.txt", "z");
+  g(up, "push", "-q", "-f", bare, "rewritten:main");
+  g(local, "fetch", "-q", bare, "main");
+  const map = JSON.parse(fs.readFileSync(ghMap, "utf8"));
+  fs.writeFileSync(ghMap, JSON.stringify({ ...map, "api repos/me/proj/git/ref/heads/main --jq .object.sha": { stdout: rewritten } }));
+  const file = path.join(env.REVIEW_LOOP_STATE_DIR, "records", `${key}.json`);
+  const before = fs.readFileSync(file);
+  const accept = cli(["decide", "--key", key, "--option", "accept"]);
+  assert.deepEqual([accept.code, accept.json?.error?.code], [30, "decision_stale"], accept.stdout);
+  assert.ok(fs.readFileSync(file).equals(before), "the record is byte-identical");
+});
+
+test("a PR round reads its context at the base prepareBranch resolved, not the marker's older base", () => {
+  const { up, bare, key, ghMap } = branchFixture();
+  const fresh = commitFile(up, ".claude/review-context.md", "Trusted: admins\n");
+  g(up, "push", "-q", bare, "main");
+  const map = JSON.parse(fs.readFileSync(ghMap, "utf8"));
+  fs.writeFileSync(ghMap, JSON.stringify({ ...map, "api repos/me/proj/git/ref/heads/main --jq .object.sha": { stdout: fresh } }));
+  respond([]);
+  const r = cli(["run", "--key", key]);
+  assert.equal(r.code, 0, r.stdout);
+  assert.equal(recordOf(key).reviewedContext, sha256("Trusted: admins\n"), "the fresh base's file; the marker's base has none");
+});
+
+test("an in-repo spec's context comes from its own repository, whatever --project-root names", () => {
+  const repo = specRepo();
+  const other = specRepo();
+  const spec = writeFile(repo, "docs/specs/feature.md", "x");
+  writeFile(repo, ".claude/review-context.md", "Trusted: admins\n");
+  writeFile(other, ".claude/review-context.md", "Trusted: operators\n");
+  respond([]);
+  const r = cli(["run", "--kind", "spec", "--path", spec, "--project-root", other]);
+  assert.equal(r.code, 0, r.stdout);
+  assert.equal(recordOf(r.json.key).reviewedContext, sha256("Trusted: admins\n"), "the spec's repository, not the named one");
+  const focus = stubCalls().at(-1).args.find((/** @type {string} */ a) => a.startsWith("ARTIFACT UNDER REVIEW"));
+  assert.ok(focus?.includes(`PROJECT ROOT (read-only context; read whatever you need to verify claims): ${recordOf(r.json.key).meta.projectRoot}`));
+  assert.ok(!focus?.includes(other), "the other project is not named in the focus either");
+});
+
+test("a keyed run of an in-repo spec reads its own repository's context, whatever a stored project root says", () => {
+  const repo = specRepo();
+  const other = specRepo();
+  const spec = writeFile(repo, "docs/specs/feature.md", "x");
+  writeFile(repo, ".claude/review-context.md", "Trusted: admins\n");
+  writeFile(other, ".claude/review-context.md", "Trusted: operators\n");
+  respond([finding("[Reliability] retry storm", "medium")]);
+  const first = cli(["run", "--kind", "spec", "--path", spec, "--project-root", repo]);
+  assert.equal(first.code, 10, first.stdout);
+  const key = first.json.key;
+  // As a 1.0.x record written under --project-root <other> holds it.
+  const file = path.join(env.REVIEW_LOOP_STATE_DIR, "records", `${key}.json`);
+  const stale = JSON.parse(fs.readFileSync(file, "utf8"));
+  fs.writeFileSync(file, JSON.stringify({ ...stale, meta: { ...stale.meta, projectRoot: other } }), { mode: 0o600 });
+  const o = cli(["override", "--key", key]);
+  assert.equal(o.code, 0, o.stdout);
+  assert.deepEqual([recordOf(key).reviewedFingerprint, recordOf(key).reviewedContext], [sha256(fs.readFileSync(spec)), sha256("Trusted: admins\n")], "override reads the spec and its context under the spec's own root");
+  fs.appendFileSync(spec, "!");
+  respond([]);
+  assert.equal(cli(["run", "--key", key]).code, 0);
+  assert.equal(recordOf(key).reviewedContext, sha256("Trusted: admins\n"), "a keyed run resolves the root the same way");
+});
+
+test("an untouched ~/.claude/plans plan passed under one project's context is not re-opened by a session in another", () => {
+  const home = tmpDir("rl-e2e-home-");
+  const plans = path.join(home, ".claude", "plans");
+  fs.mkdirSync(plans, { recursive: true, mode: 0o700 });
+  const plan = path.join(plans, "shared.md");
+  fs.writeFileSync(plan, "a plan");
+  const a = specRepo();
+  writeFile(a, ".claude/review-context.md", "Trusted: admins\n");
+  respond([]);
+  const r = cli(["run", "--kind", "plan", "--path", plan, "--project-root", a], { HOME: home });
+  assert.equal(r.code, 0, r.stdout);
+  assert.equal(recordOf(r.json.key).reviewedContext, sha256("Trusted: admins\n"));
+  const b = specRepo();
+  const S = { session_id: "e2e-session-b", cwd: b, stop_hook_active: false };
+  hookRaw("session", JSON.stringify(S), { HOME: home });
+  const stop = hookRaw("stop", JSON.stringify(S), { HOME: home });
+  assert.notEqual(stop.out?.decision, "block", JSON.stringify(stop.out));
+  fs.appendFileSync(plan, "!");
+  assert.equal(hookRaw("stop", JSON.stringify(S), { HOME: home }).out?.decision, "block", "an edited plan still blocks");
+});
+
+test("a context-only change re-opens a passed impl at Stop, in the same session and in the next, and on removal", () => {
+  const repo = specRepo();
+  const S = { session_id: "e2e-session", cwd: repo };
+  hook("session", S);
+  writeFile(repo, "src/a.ts", "changed");
+  respond([]);
+  const first = cli(["run", "--kind", "impl", "--path", repo]);
+  assert.equal(first.code, 0);
+  assert.equal(recordOf(first.json.key).history.at(-1).context, "default", "no file: the default context");
+  assert.notEqual(hook("stop", { ...S, stop_hook_active: false }).out?.decision, "block", "passed: Stop lets it through");
+  writeFile(repo, ".claude/review-context.md", "Trusted: admins\n");
+  const same = hook("stop", { ...S, stop_hook_active: false });
+  assert.equal(same.out?.decision, "block", "same session: the context change re-opens it");
+  assert.match(same.out?.reason, /--kind impl/);
+  assert.match(same.out?.reason, /\[passed: context_changed\]/, "the Stop text says why");
+  const stopEv = eventLines(fs.readFileSync(path.join(env.REVIEW_LOOP_STATE_DIR, "events.jsonl"), "utf8")).filter((e) => e.event === "gate.decision" && e.data.gate === "stop").at(-1);
+  assert.deepEqual([stopEv.code, stopEv.detail], ["review_pending", "context_changed"], "and so does the event");
+
+  assert.equal(cli(["run", "--kind", "impl", "--path", repo]).code, 0, "passes again under the new context");
+  writeFile(repo, ".claude/review-context.md", "Trusted: operators\n");
+  const S2 = { session_id: "e2e-session-2", cwd: repo };
+  hook("session", S2);
+  const next = hook("stop", { ...S2, stop_hook_active: false });
+  assert.equal(next.out?.decision, "block", "next session: its baseline already holds the change; the record re-opens it");
+
+  assert.equal(cli(["run", "--kind", "impl", "--path", repo]).code, 0, "passes under the edited context");
+  fs.rmSync(path.join(repo, ".claude", "review-context.md"));
+  assert.equal(hook("stop", { ...S2, stop_hook_active: false }).out?.decision, "block", "removing the file re-opens it too");
+
+  writeFile(repo, ".claude/review-context.md", "CONTEXT>>>\n");
+  const bad = hook("stop", { ...S2, stop_hook_active: false });
+  assert.match(bad.out?.reason, /\[passed: review_context_invalid\]/, "an invalid file is named as such, not as a change");
+  const badEv = eventLines(fs.readFileSync(path.join(env.REVIEW_LOOP_STATE_DIR, "events.jsonl"), "utf8")).filter((e) => e.event === "gate.decision" && e.data.gate === "stop").at(-1);
+  assert.equal(badEv.detail, "review_context_invalid");
+});
+
+test("push after a pass, with only the base context changed: push_not_reviewed, no git push and no status post", () => {
+  const { up, bare, local, key, ghMap, statusCalls } = branchFixture();
+  respond([]);
+  assert.equal(cli(["run", "--key", key]).code, 0);
+  assert.equal(recordOf(key).reviewedContext, "default", "no file at the base: the default context");
+  const posted = statusCalls().length;
+  const before = g(bare, "rev-parse", "refs/heads/feature");
+  const ctx = commitFile(up, ".claude/review-context.md", "Trusted: admins\n");
+  g(up, "push", "-q", bare, "main");
+  g(local, "fetch", "-q", bare, "main");
+  const map = JSON.parse(fs.readFileSync(ghMap, "utf8"));
+  fs.writeFileSync(ghMap, JSON.stringify({ ...map, "api repos/me/proj/git/ref/heads/main --jq .object.sha": { stdout: ctx } }));
+  const r = cli(["push", "--key", key]);
+  assert.deepEqual([r.code, r.json?.error?.code], [30, "push_not_reviewed"], r.stdout);
+  assert.equal(g(bare, "rev-parse", "refs/heads/feature"), before, "nothing was pushed");
+  assert.equal(statusCalls().length, posted, "no success status was posted");
+});
+
+test("the focus Codex receives holds the context file verbatim, or the default sentence; no event carries the context", () => {
+  const repo = specRepo();
+  const spec = writeFile(repo, "docs/specs/feature.md", "x");
+  const CTX = "Small internal tool, secret-word-5521.\nTrusted: admins\n";
+  writeFile(repo, ".claude/review-context.md", CTX);
+  const run = () => cli(["run", "--kind", "spec", "--path", spec, "--project-root", repo]);
+  respond([]);
+  assert.equal(run().code, 0);
+  const focusOf = (/** @type {number} */ i) => stubCalls()[i].args.find((/** @type {string} */ a) => a.startsWith("ARTIFACT UNDER REVIEW"));
+  assert.ok(focusOf(0)?.includes(`<<<CONTEXT\n${CTX}CONTEXT>>>`), "verbatim between the delimiters");
+  assert.doesNotMatch(fs.readFileSync(path.join(env.REVIEW_LOOP_STATE_DIR, "events.jsonl"), "utf8"), /secret-word-5521/);
+  fs.rmSync(path.join(repo, ".claude", "review-context.md"));
+  assert.equal(run().code, 0);
+  assert.ok(focusOf(1)?.includes("OPERATING CONTEXT: (none stated; assume a small team and internet-facing users, and trust no actor)"));
+});
+
+test("calibration: three findings block and four become advisory; without the context, or without AR-1, the floors block them", () => {
+  const CTX = "Trusted: same_user_processes, admins, ci_runner\n- AR-1 (2026-10-10) [Correctness] class=history provenance: rows are written only by our own job\n";
+  const FIXTURE = [
+    valued("[Safety] prod accepts test-mode payment keys", "high", { l: "real_path", i: "money_or_data", c: "payment key mode" }),
+    valued("[Safety] signed webhook events not bound to this app's checkout", "high", { l: "plausible", i: "security", c: "webhook binding" }),
+    valued("[Correctness] a needs-review order clears the cart", "medium", { l: "plausible", i: "user_visible", c: "order state" }),
+    valued("[Safety] secrets listing races a file swap", "medium", { l: "requires_out_of_model_actor", i: "security", a: "same_user_processes", c: "secrets-listing file-type hardening" }),
+    valued("[Reliability] secrets listing hangs on a FIFO", "medium", { l: "requires_out_of_model_actor", i: "operator_visible", a: "same_user_processes", c: "secrets-listing file-type hardening" }),
+    valued("[Performance] oversized stored cart", "medium", { l: "requires_out_of_model_actor", i: "user_visible", a: "admins", c: "cart size" }),
+    valued("[Correctness] a history row could be fabricated", "medium", { l: "theoretical", i: "money_or_data", c: "history provenance", ar: "AR-1" }),
+    valued("[Safety] a history row could be fabricated", "medium", { l: "theoretical", i: "money_or_data", c: "history provenance", ar: "AR-1" })
+  ];
+  // Each run in its own repo: one round's classes would otherwise be the next round's prior classes.
+  const calibrate = (/** @type {string | null} */ ctx) => {
+    const repo = specRepo();
+    const spec = writeFile(repo, "docs/specs/feature.md", "x");
+    if (ctx !== null) writeFile(repo, ".claude/review-context.md", ctx);
+    respond(FIXTURE);
+    const r = cli(["run", "--kind", "spec", "--path", spec, "--project-root", repo]);
+    assert.equal(r.code, 10, r.stdout);
+    return { r, ev: roundResults().at(-1) };
+  };
+
+  const full = calibrate(CTX);
+  assert.deepEqual(full.r.json.findings.map((/** @type {{ blocking: boolean }} */ f) => f.blocking), [true, true, true, false, false, false, false, true]);
+  assert.deepEqual(full.r.json.findings.map((/** @type {{ why: string }} */ f) => f.why), ["money_data_security", "money_data_security", "realistic", "low_value", "low_value", "low_value", "accepted_risk", "money_data_security"]);
+  assert.equal(full.r.json.findings[6].accepted_risk_text, "- AR-1 (2026-10-10) [Correctness] class=history provenance: rows are written only by our own job");
+  assert.deepEqual([full.r.json.score.blocking, full.r.json.score.advisory, full.r.json.score.unvalued], [4, 4, 0]);
+  assert.deepEqual([full.ev.data.accepted_risk_out_of_scope, full.ev.data.theoretical_floored, full.ev.data.actor_not_trusted], [1, 2, 0], "AR-1 covers [Correctness] only");
+
+  const none = calibrate(null);
+  assert.deepEqual(none.r.json.findings.slice(3, 6).map((/** @type {{ blocking: boolean }} */ f) => f.blocking), [true, true, true], "no context: nobody is trusted");
+  assert.equal(none.ev.data.actor_not_trusted, 3);
+
+  const noRisk = calibrate("Trusted: same_user_processes, admins, ci_runner\n");
+  assert.deepEqual([noRisk.r.json.findings[6].blocking, noRisk.r.json.findings[6].why], [true, "money_data_security"], "without AR-1 the floor blocks it");
+  assert.equal(noRisk.ev.data.unknown_accepted_risk, 2);
+});
+
+test("an unvalued medium counts as unvalued and blocking and caps its dimension at 8.4; a critical with no trailer still counts as unvalued", () => {
+  const repo = specRepo();
+  const spec = writeFile(repo, "docs/specs/feature.md", "x");
+  const run = () => cli(["run", "--kind", "spec", "--path", spec, "--project-root", repo]);
+  respond([finding("[Reliability] retry storm", "medium")]);
+  const r = run();
+  assert.deepEqual([r.json.score.blocking, r.json.score.advisory, r.json.score.unvalued], [1, 0, 1]);
+  assert.equal(recordOf(r.json.key).history.at(-1).context, "default", "a spec with no file: the default context");
+  assert.equal(r.json.score.dimensions.find((/** @type {{ name: string }} */ d) => d.name === "Reliability").score, 8.4);
+  assert.deepEqual(recordOf(r.json.key).history.at(-1).triage, { blocking: 1, advisory: 0, unvalued: 1, why: { critical: 0, unvalued: 1, accepted_risk: 0, money_data_security: 0, repeat_class: 0, realistic: 0, low_value: 0 }, likelihoods: [null] });
+  const ev = roundResults().at(-1);
+  assert.deepEqual([ev.data.scored, ev.data.blocking, ev.data.advisory, ev.data.unvalued, ev.data.why_unvalued], [true, 1, 0, 1, 1]);
+  fs.appendFileSync(spec, "!");
+  respond([finding("[Safety] remote code execution", "critical")]);
+  const c = run();
+  assert.equal(c.json.score.unvalued, 1);
+  const ev2 = roundResults().at(-1);
+  assert.deepEqual([ev2.data.blocking, ev2.data.unvalued, ev2.data.why_critical, ev2.data.why_unvalued], [1, 1, 1, 0]);
+});
+
+test("a round whose findings are all advisory passes", () => {
+  const repo = specRepo();
+  const spec = writeFile(repo, "docs/specs/feature.md", "x");
+  respond([valued("[Usability] copy could be clearer", "low", { l: "plausible", i: "user_visible", c: "copy" })]);
+  const r = cli(["run", "--kind", "spec", "--path", spec, "--project-root", repo]);
+  assert.deepEqual([r.code, r.json.status, r.json.score.advisory, r.json.findings[0].blocking], [0, "passed", 1, false], r.stdout);
+  const h = recordOf(r.json.key).history.at(-1);
+  assert.deepEqual([h.findings, h.triage.blocking, h.triage.advisory], [1, 0, 1], "history counts every finding after waivers, as 1.0.x did");
+});
+
+test("disputing an advisory finding exits with dispute_advisory and leaves disputes unchanged; a blocking one can be disputed", () => {
+  const repo = specRepo();
+  const spec = writeFile(repo, "docs/specs/feature.md", "x");
+  const args = ["--kind", "spec", "--path", spec, "--project-root", repo];
+  respond([valued("[Usability] copy", "low", { l: "plausible", i: "user_visible", c: "copy" }), finding("[Safety] token logged", "high")]);
+  const r = cli(["run", ...args]);
+  assert.equal(r.code, 10);
+  const d = cli(["dispute", ...args, "--finding", "0", "--reason", "it is fine"]);
+  assert.deepEqual([d.code, d.json?.error?.code], [30, "dispute_advisory"], d.stdout);
+  assert.deepEqual(recordOf(r.json.key).disputes, []);
+  assert.equal(cli(["dispute", ...args, "--finding", "1", "--reason", "redacted at src/log.ts:12"]).code, 0);
+});
+
+test("prior classes: two findings of one class in one round are both judged as new; a later plausible repeat is advisory, a real_path one blocks; the focus shows the dispute", () => {
+  const repo = specRepo();
+  const spec = writeFile(repo, "docs/specs/feature.md", "x");
+  const args = ["--kind", "spec", "--path", spec, "--project-root", repo];
+  respond([
+    valued("[Reliability] cache key collision on rename", "medium", { l: "plausible", i: "user_visible", c: "cache keying" }),
+    valued("[Reliability] cache key collision on move", "medium", { l: "plausible", i: "user_visible", c: "cache keying" })
+  ]);
+  const r1 = cli(["run", ...args]);
+  assert.deepEqual(r1.json.findings.map((/** @type {{ blocking: boolean }} */ f) => f.blocking), [true, true], "same class, same round: both new");
+  assert.equal(cli(["dispute", ...args, "--finding", "0", "--reason", "keys include the inode"]).code, 0);
+  fs.appendFileSync(spec, "!");
+  respond([
+    valued("[Reliability] stale entries outlive a TTL change", "medium", { l: "plausible", i: "user_visible", c: "Cache  Keying" }),
+    valued("[Reliability] cache key collision on create", "medium", { l: "real_path", i: "user_visible", c: "cache keying" })
+  ]);
+  const r2 = cli(["run", ...args]);
+  assert.deepEqual(r2.json.findings.map((/** @type {{ why: string }} */ f) => f.why), ["repeat_class", "realistic"]);
+  const focus = stubCalls()[1].args.find((/** @type {string} */ a) => a.startsWith("ARTIFACT UNDER REVIEW"));
+  assert.ok(focus?.includes("- cache keying [Reliability]: raised in rounds 1; disputed"), focus);
+});
+
+test("an unfixed blocking finding still blocks the next round under its own class; another instance of the class is advisory", () => {
+  const repo = specRepo();
+  const spec = writeFile(repo, "docs/specs/feature.md", "x");
+  const args = ["--kind", "spec", "--path", spec, "--project-root", repo];
+  const unfixed = valued("[Reliability] retry is unbounded", "high", { l: "plausible", i: "user_visible", c: "retry policy" });
+  respond([unfixed]);
+  assert.equal(cli(["run", ...args]).code, 10);
+  fs.appendFileSync(spec, "!");
+  respond([unfixed, valued("[Reliability] reconnect has no jitter", "medium", { l: "plausible", i: "user_visible", c: "retry policy" })]);
+  const r2 = cli(["run", ...args]);
+  assert.deepEqual([r2.json.score.pass, r2.json.score.blocking], [false, 1], r2.stdout);
+  assert.deepEqual(r2.json.findings.map((/** @type {{ why: string }} */ f) => f.why), ["realistic", "repeat_class"]);
+  // Two failing rounds with only a plausible finding blocking: the value page, never a pass.
+  assert.deepEqual([r2.code, r2.json.awaiting?.reason], [21, "diminishing_returns"]);
+});
+
+test("a record written by 1.0.x completes rounds, pages diminishing_returns, and reloads with every new field present", () => {
+  const repo = specRepo();
+  const spec = writeFile(repo, "docs/specs/feature.md", "x");
+  const identity = { kind: "spec", path: spec };
+  const dir = path.join(env.REVIEW_LOOP_STATE_DIR, "records");
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  const legacy = {
+    v: 1, identity, status: "needs_fixes", round: 1, mode: "capped", nextCheckpoint: 10, uncappedStart: null, bestSumTenths: null,
+    sinceImprovement: 0, fingerprint: "old", reviewedFingerprint: null, history: [{ round: 1, sumTenths: 1000, findings: 1, at: "2026-10-01T00:00:00.000Z" }],
+    disputes: [], waivers: [], awaiting: null, lastError: null, errorAttempts: 0, meta: { projectRoot: repo }, updatedAt: "2026-10-01T00:00:00.000Z",
+    lastFindings: [{ title: "[Usability] x", file: "docs/specs/feature.md", severity: "low" }]
+  };
+  fs.writeFileSync(path.join(dir, `${identityKey(identity)}.json`), JSON.stringify(legacy), { mode: 0o600 });
+  const args = ["--kind", "spec", "--path", spec, "--project-root", repo];
+  respond([valued("[Reliability] retry storm", "medium", { l: "plausible", i: "user_visible", c: "retry policy" })]);
+  assert.equal(cli(["run", ...args]).code, 10);
+  fs.appendFileSync(spec, "!");
+  // A new class: a plausible repeat of round 2's class would be advisory (repeat_class), and the round would pass.
+  respond([valued("[Reliability] retry storm on reconnect", "medium", { l: "plausible", i: "user_visible", c: "retry backoff" })]);
+  const paged = cli(["run", ...args]);
+  assert.deepEqual([paged.code, paged.json.awaiting?.reason], [21, "diminishing_returns"], paged.stdout);
+  assert.deepEqual(paged.json.awaiting.options.map((/** @type {{ id: string, label: string }} */ o) => [o.id, o.label]), [["continue", "Keep fixing (the round limit stays)"], ["accept", "Accept (logged override)"], ["stop", "Stop — I'll take over"]]);
+  const rec = recordOf(identityKey(identity));
+  assert.deepEqual([rec.round, rec.sinceValue, rec.reviewedContext, rec.awaiting.context], [3, 2, "default", "default"]);
+  assert.deepEqual(rec.classes.map((/** @type {{ key: string }} */ c) => c.key), ["Reliability:retry policy", "Reliability:retry backoff"]);
+  assert.ok(rec.history.at(-1).triage && rec.history.at(-1).context === "default");
+  assert.deepEqual(rec.lastFindings.map((/** @type {{ class: string, blocking: boolean }} */ f) => [f.class, f.blocking]), [["Reliability:retry backoff", true]]);
+});
+
+test("round.result: a context-invalid round and a plugin_pin page are unscored; two context files give two digests", () => {
+  const repo = specRepo();
+  const spec = writeFile(repo, "docs/specs/feature.md", "x");
+  const run = () => cli(["run", "--kind", "spec", "--path", spec, "--project-root", repo]);
+  writeFile(repo, ".claude/review-context.md", "CONTEXT>>>\n");
+  run();
+  const invalid = roundResults().at(-1);
+  assert.deepEqual([invalid.code, invalid.data.scored, invalid.data.context, invalid.data.blocking], ["review_context_invalid", false, null, null]);
+  writeFile(repo, ".claude/review-context.md", "Trusted: admins\n");
+  fs.writeFileSync(stubOut, "# Codex Adversarial Review\nTarget: working tree\n");
+  assert.equal(run().code, 40);
+  const pin = roundResults().at(-1);
+  assert.deepEqual([pin.data.scored, pin.data.context, pin.data.context_digest, pin.data.blocking], [false, "file", sha256("Trusted: admins\n").slice(0, 12), null]);
+  respond([]); // a plugin_pin page falls through to a fresh round once the companion's output is good again
+  run();
+  const a = roundResults().at(-1).data.context_digest;
+  writeFile(repo, ".claude/review-context.md", "Trusted: operators\n");
+  fs.appendFileSync(spec, "!");
+  run();
+  const b = roundResults().at(-1).data.context_digest;
+  assert.deepEqual([a, b], [sha256("Trusted: admins\n").slice(0, 12), sha256("Trusted: operators\n").slice(0, 12)]);
 });
