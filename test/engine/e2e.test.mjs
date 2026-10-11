@@ -1373,6 +1373,8 @@ test("a round whose findings are all advisory passes", () => {
   respond([valued("[Usability] copy could be clearer", "low", { l: "plausible", i: "user_visible", c: "copy" })]);
   const r = cli(["run", "--kind", "spec", "--path", spec, "--project-root", repo]);
   assert.deepEqual([r.code, r.json.status, r.json.score.advisory, r.json.findings[0].blocking], [0, "passed", 1, false], r.stdout);
+  const h = recordOf(r.json.key).history.at(-1);
+  assert.deepEqual([h.findings, h.triage.blocking, h.triage.advisory], [1, 0, 1], "history counts every finding after waivers, as 1.0.x did");
 });
 
 test("disputing an advisory finding exits with dispute_advisory and leaves disputes unchanged; a blocking one can be disputed", () => {

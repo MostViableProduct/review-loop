@@ -154,7 +154,8 @@ export function applyRoundResult(rec, scored, findings, fingerprint, meta) {
     round: rec.round,
     sumTenths,
     dims: Object.fromEntries(scored.dimensions.map((d) => [d.name, d.tenths])),
-    findings: findings.length,
+    // Every finding after waivers, as in 1.0.x: `findings` here holds only the blocking ones.
+    findings: meta.triage.blocking + meta.triage.advisory,
     context: meta.context,
     triage: meta.triage,
     at: new Date().toISOString()

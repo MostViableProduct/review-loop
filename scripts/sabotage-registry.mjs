@@ -294,4 +294,5 @@ export const SABOTAGES = Object.freeze([
   { id: "class-label-normalized", file: "plugin/engine/lib/value.mjs", find: " || normalizeLabel(cls).length > 80) return", replace: " ) return", test: "test/engine/value.test.mjs", expect: "parseValue: the class label is bounded as the record stores it" },
   { id: "context-near-miss-trusted", file: "plugin/engine/lib/context.mjs", find: "    if (/^\\s*trusted\\s*:/i.test(line)) throw invalid(", replace: "    if (false) throw invalid(", test: "test/engine/context.test.mjs", expect: "invalid lines are review_context_invalid" },
   { id: "context-near-miss-ar", file: "plugin/engine/lib/context.mjs", find: "      if (/^\\s*[-*+]\\s*AR-\\d/i.test(line)) throw invalid(", replace: "      if (false) throw invalid(", test: "test/engine/context.test.mjs", expect: "invalid lines are review_context_invalid" },
+  { id: "history-findings-total", file: "plugin/engine/lib/policy.mjs", find: "    findings: meta.triage.blocking + meta.triage.advisory,\n", replace: "    findings: findings.length,\n", test: "test/engine/e2e.test.mjs", expect: "a round whose findings are all advisory passes" },
 ]);
