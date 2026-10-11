@@ -127,6 +127,7 @@ https://github.com/MostViableProduct/review-loop/issues with the code and the li
 | `push_rejected` | 1 | pull the remote changes, then re-run the review round |  |
 | `push_target_protected` | 1 | push to a feature branch, not a protected one |  |
 | `repo_lookup_failed` | 1 | check that gh is signed in and the repository exists, then retry |  |
+| `review_context_invalid` | 1 | fix or remove the project's `.claude/review-context.md` as the error says (a context file that can't be read whole is never used), then re-run the review round |  |
 | `review_pending` | 1 | let Claude finish the pending review (the review-loop:review-loop skill), then retry |  |
 | `rollback_skipped_modified` | 1 | the named file changed after migration; clear it and run `review-loop migrate --rollback` again to finish, or restore it by hand from the backup |  |
 | `rubric_source_mismatch` | 1 | restore the rubric file, or point rubricPath at a different one |  |

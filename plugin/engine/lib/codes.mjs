@@ -201,6 +201,7 @@ export const CODES = Object.freeze({
   review_pending: { category: "user_action", remedy: "let Claude finish the pending review (the review-loop:review-loop skill), then retry" },
   rubric_source_mismatch: { category: "user_action", remedy: "restore the rubric file, or point rubricPath at a different one" },
   rubric_source_missing: { category: "user_action", remedy: "restore the rubric file, or point rubricPath at a different one" },
+  review_context_invalid: { category: "user_action", remedy: "fix or remove the project's `.claude/review-context.md` as the error says (a context file that can't be read whole is never used), then re-run the review round" },
   state_dir_insecure: { category: "user_action", remedy: "a state or repo path is not readable/writable by you, is owned by someone else, or is group/world-accessible: make the review-loop state directory yours with mode 700 (`chmod 700`) and repo paths accessible, then re-run" },
   state_missing: { category: "user_action", remedy: "run `review-loop setup`" },
   state_symlink_rejected: { category: "user_action", remedy: "replace the linked path in the state directory with a real directory" },

@@ -64,6 +64,8 @@ on:
       - "homebrew-tap/Formula/review-loop.rb"
       - "plugin/engine/lib/value.mjs"
       - "test/engine/value.test.mjs"
+      - "plugin/engine/lib/context.mjs"
+      - "test/engine/context.test.mjs"
       # The gate tests: a test edited to keep its name but lose its assertion re-runs the sabotage it must catch.
       - "test/contract/events.test.mjs"
       - "test/contract/content-discipline.test.mjs"
@@ -167,6 +169,8 @@ on:
       - "test/contract/no-bare-exit.test.mjs"
       - "plugin/engine/lib/value.mjs"
       - "test/engine/value.test.mjs"
+      - "plugin/engine/lib/context.mjs"
+      - "test/engine/context.test.mjs"
 permissions:
   contents: read
 concurrency:

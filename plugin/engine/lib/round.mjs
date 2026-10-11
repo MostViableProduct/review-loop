@@ -47,7 +47,8 @@ export const NON_RETRYABLE = new Set([
   "shallow_file_symlink",
   "shallow_file_too_large",
   "shallow_file_invalid",
-  "branch_marker_missing"
+  "branch_marker_missing",
+  "review_context_invalid"
 ]);
 
 /** Outcomes that need a human decision rather than a retry. */
