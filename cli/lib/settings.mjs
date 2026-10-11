@@ -13,7 +13,11 @@ export const ASK_RULES = Object.freeze([
   "Bash(*review-round.mjs decide*)",
   "Bash(*review-round.mjs override*)",
   "Bash(*review-round.mjs repin*)",
-  "Edit(**/.claude/review-loop.off)"
+  "Edit(**/.claude/review-loop.off)",
+  // The context file decides what blocks (spec D1): the owner approves every agent edit to it, like the kill switch.
+  "Edit(**/.claude/review-context.md)",
+  "Write(**/.claude/review-context.md)",
+  "Bash(*review-context.md*)"
 ]);
 export const LEGACY_HOOK_RE = /review-loop\/review-gate-hook\.mjs/;
 const MAX_ATTEMPTS = 3;

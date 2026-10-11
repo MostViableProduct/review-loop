@@ -43,6 +43,7 @@ comes with the command that fixes it.
    This is expected. Claude starts a review on its own.
 3. **Claude runs a review round.** A round is one Codex review and usually takes 2–8 minutes in the background.
    Claude reads the findings, fixes the valid ones, argues the wrong ones with evidence, and runs the next round.
+   Findings that don't block (unlikely, already accepted, or low value) are listed for you, not fixed.
 4. **The work passes when all 11 scores reach 9.2.** Claude shows you the score table and carries on.
 5. **Pull requests are held to the same bar.** Claude can't open a pull request until its exact changes have
    passed. With `gh` signed in, review-loop then marks the commit on GitHub as reviewed (a
@@ -53,6 +54,7 @@ Claude asks you, with a notification and a question, only when:
 - 10 rounds have run without passing. You choose: keep going until 9.2, run 10 more rounds, accept the current
   score, or stop.
 - Scores stop improving, or Claude and Codex disagree about a finding twice.
+- Two rounds in a row failed only on plausible, lower-stakes findings. You choose: keep fixing, accept, or stop.
 - A finding needs a product or security decision.
 - The Codex plugin changed since setup, so review-loop asks before trusting it again.
 - Git history needs a merge or pull that Claude shouldn't decide alone.
@@ -89,6 +91,25 @@ Claude asks you, with a notification and a question, only when:
 
 Change it any time, for example `review-loop config set preset balanced`. The bar (every score at least 9.2)
 is the same in every preset.
+
+## Telling Codex about your project
+
+Codex judges how likely each finding is and who it would harm, and review-loop holds only the realistic and the
+harmful against the score (see "Why didn't this finding block?" in [`docs/TROUBLESHOOTING.md`](docs/TROUBLESHOOTING.md)).
+To tell it your scale and who you trust, add `.claude/review-context.md` to the project, at most 8 KiB:
+
+    Small internal tool, about 20 staff users, behind SSO.
+    Trusted: admins, ci_runner
+    - AR-1 (2026-10-10) [Correctness] class=history provenance: rows are written only by our own job
+
+- `Trusted:` (one line) names who can be assumed honest. Only the trusted actors in the troubleshooting page's
+  table can be listed; end users can't.
+- Each `- AR-n (date) [Dimension] class=<label>: <reason>` line accepts one kind of risk, for that dimension and
+  class only.
+- For a pull request the file is read from the base branch, so a PR can't accept its own risks.
+- Changing the file re-opens the passed reviews of work not yet committed (Claude reviews it again before it
+  stops). Committed work is checked at the pull request, against the base branch's copy of the file. Claude needs
+  your approval to edit the file.
 
 ## The kill switch: skipping review on purpose
 

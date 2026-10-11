@@ -195,6 +195,60 @@ fix:
 | `live_check_failed` | `unknown` | report a bug, with the output above |
 <!-- live-check:end -->
 
+## Why didn't this finding block?
+
+Codex ends every finding with a `VALUE` line: how likely it is, who it harms, what it costs to fix and what kind of
+defect it is. review-loop, not Codex, decides from that line whether the finding blocks. Only blocking findings
+count toward the score. The rest are advisory: Claude lists them for you and doesn't change code for them unless you
+ask.
+
+Two floors come first. A finding that needs an actor counts as `plausible` unless the actor is one your
+`.claude/review-context.md` lists after `Trusted:`. A `theoretical` finding that harms money, data or security counts
+as `plausible` too. So with no context file, nobody is trusted and nothing that harms money, data or security is
+waved through. Then the first matching rule decides:
+
+<!-- triage:start -->
+| # | When (the first rule that matches decides) | Result | `why` |
+|---|---|---|---|
+| 1 | severity is critical | blocks | `critical` |
+| 2 | the finding has no valid VALUE line | blocks | `unvalued` |
+| 3 | it cites an accepted risk whose dimension and class both equal its own | advisory | `accepted_risk` |
+| 4 | impact is money_or_data or security, and likelihood is real_path, plausible or requires_misconfig | blocks | `money_data_security` |
+| 5 | its dimension and class were raised in an earlier round, and likelihood is not real_path | advisory | `repeat_class` |
+| 6 | severity is high or medium, and likelihood is real_path or plausible | blocks | `realistic` |
+| 7 | anything else | advisory | `low_value` |
+
+| Field | Value | Meaning |
+|---|---|---|
+| severity | `critical` | exploitable security, data loss, irreversible harm, or a core deliverable non-functional |
+| severity | `high` | a stated requirement unmet, or a wrong result on a real path |
+| severity | `medium` | a real defect, bounded or edge-triggered |
+| severity | `low` | defensive, polish, or rare and bounded, with no user-visible harm |
+| likelihood | `real_path` | normal use hits it |
+| likelihood | `plausible` | an ordinary mistake or race that a real user or operator could cause |
+| likelihood | `requires_misconfig` | only with a configuration the docs don't support |
+| likelihood | `requires_out_of_model_actor` | needs an actor the operating context lists as trusted; never an unauthenticated user or another member |
+| likelihood | `theoretical` | no concrete trigger |
+| impact | `money_or_data` | money is lost or charged wrongly, or data is lost, corrupted or exposed |
+| impact | `security` | an access, secret or integrity boundary is crossed |
+| impact | `user_visible` | an end user sees a wrong result or a failure |
+| impact | `operator_visible` | only an operator or maintainer sees it (logs, tooling, CI) |
+| impact | `none` | no one is affected |
+| fix_cost | `trivial` | a line or two |
+| fix_cost | `small` | a contained change in one place |
+| fix_cost | `design` | a design change across modules |
+| trusted actor | `maintainers` | the project's own developers |
+| trusted actor | `admins` | the application's administrators |
+| trusted actor | `operators` | the people who run the deployment |
+| trusted actor | `ci_runner` | the CI system running the project's own workflows |
+| trusted actor | `deploy_pipeline` | the project's own deploy tooling |
+| trusted actor | `hosting_provider` | the platform the project runs on |
+| trusted actor | `same_user_processes` | other processes running as the same OS user |
+<!-- triage:end -->
+
+A round's output gives each finding's `blocking`, `why` and `value`, and the score's `blocking`, `advisory` and
+`unvalued` counts. The context file's format is in the README ("Telling Codex about your project").
+
 ## Not in the tables
 
 - **A review or command stays `busy` long after nothing should be running.** The message tells you what is holding

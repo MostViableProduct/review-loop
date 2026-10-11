@@ -22,6 +22,10 @@ can't hold is percent-encoded: for base `release/1.x`, require `review-loop/rele
   GitHub processing the merge can land the reviewed head on an unreviewed base.
 - Approvals given before a policy change (rubric, preset, version) stay valid. To review an open PR under
   the new policy, re-run the loop on it.
+- `.claude/review-context.md` decides which findings block. Claude needs your approval to edit it, but the approval
+  rules match the plain ways to do it (`Edit`, `Write`, a shell command naming the file), as they do for the kill
+  switch and `override`: a path built at run time can get past them. For a pull request it is read from the base
+  branch, so it changes the gate only once it is on that branch.
 - Without `gh` (GitHub MCP tools only), review-loop can't check or contain a new PR's head commit, so
   under `default` and `balanced` Claude is stopped after each PR it creates. Install and sign in to `gh`
   (`brew install gh && gh auth login`) for automatic checks.

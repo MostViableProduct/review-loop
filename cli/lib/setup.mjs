@@ -102,7 +102,7 @@ export async function run(args, io, ctx) {
   if (installed.version && !sameMinor(installed.version, PACKAGE_VERSION)) io.err(`Note: plugin ${installed.version} vs CLI ${PACKAGE_VERSION} — run \`review-loop update\`\n`);
   done.push("plugin");
 
-  // 5 approval rules
+  // the approval rules (ASK_RULES)
   await updateSettings((o) => {
     const perms = /** @type {Record<string, unknown>} */ (o.permissions ??= {});
     const ask = /** @type {string[]} */ (Array.isArray(perms.ask) ? perms.ask : (perms.ask = []));

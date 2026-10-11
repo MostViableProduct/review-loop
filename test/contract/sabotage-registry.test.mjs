@@ -460,3 +460,20 @@ test("sabotage.mjs: an unknown --only id or argument is a usage error (exit 2) a
     assert.equal(r.stdout, "");
   }
 });
+
+// Spec "Required sabotage rows" (value triage): each is a gate whose test must be proven able to fail.
+const VALUE_TRIAGE_IDS = [
+  "value-trailer-last-line", "classify-critical-first", "classify-accepted-risk", "classify-money-data-security", "classify-repeat-class",
+  "classify-realistic", "classify-trusted-actor", "classify-theoretical-floor", "classify-rule-order", "classify-class-dimension",
+  "score-blocking-only", "context-base-commit", "context-binding", "context-cross-session", "context-ls-tree-mode", "context-size-cap",
+  "context-delimiters", "context-focus-block", "accepted-risk-scope", "class-disposition", "dispute-advisory-guard", "record-hydration",
+  "value-page-threshold", "value-page-blocking-reset", "context-fresh-base", "event-histograms", "value-page-continue", "value-counter-more",
+  "page-context-stale", "push-context", "definitions-complete", "definitions-generated", "record-triage-closed", "record-classes-closed",
+  "skill-advisory", "prverify-context", "event-unscored-nulls", "unvalued-count", "calibration-fixture"
+];
+
+test("every value-triage sabotage the spec requires is a registry row", () => {
+  assert.equal(new Set(VALUE_TRIAGE_IDS).size, 39);
+  const ids = new Set(SABOTAGES.map((s) => s.id));
+  assert.deepEqual(VALUE_TRIAGE_IDS.filter((id) => !ids.has(id)), []);
+});
