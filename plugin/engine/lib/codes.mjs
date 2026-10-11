@@ -198,7 +198,7 @@ export const CODES = Object.freeze({
   push_not_reviewed: { category: "user_action", remedy: "HEAD has not passed review; run the loop first" },
   push_target_protected: { category: "user_action", remedy: "push to a feature branch, not a protected one" },
   repo_lookup_failed: { category: "user_action", remedy: "check that gh is signed in and the repository exists, then retry" },
-  review_pending: { category: "user_action", remedy: "let Claude finish the pending review (the review-loop:review-loop skill), then retry" },
+  review_pending: { category: "user_action", remedy: "let Claude finish the pending review (the review-loop:review-loop skill), then retry", details: ["review_context_invalid", "context_changed"] },
   rubric_source_mismatch: { category: "user_action", remedy: "restore the rubric file, or point rubricPath at a different one" },
   rubric_source_missing: { category: "user_action", remedy: "restore the rubric file, or point rubricPath at a different one" },
   review_context_invalid: { category: "user_action", remedy: "fix or remove the project's `.claude/review-context.md` as the error says (a context file that can't be read whole is never used), then re-run the review round" },

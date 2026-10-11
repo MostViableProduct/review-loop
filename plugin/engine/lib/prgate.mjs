@@ -18,6 +18,7 @@ import {
 } from "./git.mjs";
 import { identityKey, isClearedAt, writeMarker, readBaseline } from "./state.mjs";
 import { emitEvent } from "./events.mjs";
+import { gateContextDigest } from "./context.mjs";
 import { reapChildren } from "./proc.mjs";
 
 // fileURLToPath, not URL.pathname: the pathname is percent-encoded (a space reads as %20).
@@ -209,7 +210,13 @@ async function evaluateUnbounded(p) {
         return deny("merge_base_ambiguous", `${t.baseBranch} and ${t.headBranch} have more than one best merge-base; run the review-loop:review-loop skill to decide`, ambiguousKey);
       }
     }
-    if (fingerprint && isClearedAt(t.identity, fingerprint)) {
+    const context = fingerprint ? await gateContextDigest(t.identity, root, { baseSha: t.baseSha }) : null;
+    // An unreadable context is the base's to fix, not a review to run: say so, with the code the round would give.
+    if (context === "error") {
+      const invalidKey = writePending(root, t, p.session, "review_context_invalid");
+      return deny("review_context_invalid", `${t.baseBranch}'s .claude/review-context.md can't be read (a link, not a regular file, over 8 KiB, or an invalid line); fix or remove it on ${t.baseBranch}, then retry the PR`, invalidKey);
+    }
+    if (fingerprint && context !== null && isClearedAt(t.identity, fingerprint, context)) {
       return { decision: "allow", code: "reviewed", message: "", artifactKey: identityKey(t.identity) };
     }
     const key = writePending(root, t, p.session, fingerprint ? "not_reviewed_at_fingerprint" : "comparison_unverified");

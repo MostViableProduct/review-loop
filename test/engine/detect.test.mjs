@@ -28,6 +28,7 @@ function pass(identity, fingerprint) {
   const r = newRecord(identity);
   r.status = "passed";
   r.reviewedFingerprint = fingerprint;
+  r.reviewedContext = "default";
   writeRecord(r);
 }
 

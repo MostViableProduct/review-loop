@@ -20,10 +20,15 @@ const { evaluatePrVerify } = await import("../../plugin/engine/lib/prverify.mjs"
 const HOOK = path.join(path.dirname(new URL(import.meta.url).pathname), "..", "..", "plugin", "engine", "review-gate-hook.mjs");
 
 const identity = { kind: "branch", baseRepo: "o/r", baseBranch: "main", headRepo: "o/r", headBranch: "feat" };
+// The context is read at the PR's base commit, which must exist locally: an "allowed" verdict needs this repo.
+const CTX_REPO = makeRepo();
+const BASE = commitFile(CTX_REPO, "a.txt", "a");
+const BASE_REF = { "api repos/o/r/git/ref/heads/main --jq .object.sha": { stdout: BASE } };
 function reviewed(sha, status = "passed") {
   const rec = newRecord(identity);
   rec.status = status;
   rec.reviewedFingerprint = `${sha}:${MB}`;
+  rec.reviewedContext = "default";
   writeRecord(rec);
 }
 const FIELDS = "headRefOid,baseRefName,headRefName,headRepository,headRepositoryOwner,isDraft,state";
@@ -39,7 +44,7 @@ const createCall = (preset = "default", cwd = home) => ({
   toolResponse: { stdout: "https://github.com/o/r/pull/7\n" }
 });
 const mutated = (gh) => gh.log().filter((a) => a[0] === "pr" && (a[1] === "ready" || a[1] === "close"));
-const mcpCall = (toolResponse, preset = "default") => ({ cwd: home, session: "s1", preset, toolName: "mcp__github__create_pull_request", toolInput: { owner: "o", repo: "r", base: "main", head: "feat" }, toolResponse });
+const mcpCall = (toolResponse, preset = "default", cwd = home) => ({ cwd, session: "s1", preset, toolName: "mcp__github__create_pull_request", toolInput: { owner: "o", repo: "r", base: "main", head: "feat" }, toolResponse });
 
 function eventsOf(file) {
   return fs.existsSync(file) ? fs.readFileSync(file, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l)) : [];
@@ -55,9 +60,9 @@ function hookRun(preset, input, envExtra = {}) {
 test("base repo resolves like the PR gate: a single GitHub remote (no --repo, no gh default) verifies", async () => {
   reviewed(A);
   const repo = makeRepo();
-  commitFile(repo, "README.md", "x");
+  const base = commitFile(repo, "README.md", "x");
   g(repo, "remote", "add", "origin", "https://github.com/o/r.git");
-  const gh = makeFakeBin(bin, "gh", { "repo set-default --view": { code: 1, stderr: "no default" }, [VIEW_ARGS]: view(A) });
+  const gh = makeFakeBin(bin, "gh", { "repo set-default --view": { code: 1, stderr: "no default" }, [VIEW_ARGS]: view(A), "api repos/o/r/git/ref/heads/main --jq .object.sha": { stdout: base } });
   const call = { ...createCall("default", repo), toolInput: { command: `${G} pr create --base main --head feat --title t` } };
   const r = await evaluatePrVerify(call);
   assert.deepEqual([r.outcome, r.code], ["allowed", "reviewed"]);
@@ -66,10 +71,10 @@ test("base repo resolves like the PR gate: a single GitHub remote (no --repo, no
 
 test("base repo resolves like the PR gate: process GH_REPO is honored", async () => {
   reviewed(A);
-  makeFakeBin(bin, "gh", { [VIEW_ARGS]: view(A) });
+  makeFakeBin(bin, "gh", { [VIEW_ARGS]: view(A), ...BASE_REF });
   process.env.GH_REPO = "o/r";
   try {
-    const call = { ...createCall(), toolInput: { command: `${G} pr create --base main --head feat --title t` } };
+    const call = { ...createCall("default", CTX_REPO), toolInput: { command: `${G} pr create --base main --head feat --title t` } };
     assert.equal((await evaluatePrVerify(call)).code, "reviewed");
   } finally {
     delete process.env.GH_REPO;
@@ -147,29 +152,29 @@ test("kill switch: a create with review disabled is skipped: one skipped decisio
 test("kill switch created mid-session is ignored: the PR is still verified", async () => {
   reviewed(A);
   const repo = makeRepo();
-  commitFile(repo, "README.md", "x");
+  const base = commitFile(repo, "README.md", "x");
   writeFile(repo, ".claude/review-loop.off", "");
   writeBaseline("s1", repo, {}, null, false);
-  const gh = makeFakeBin(bin, "gh", { [VIEW_ARGS]: view(A) });
+  const gh = makeFakeBin(bin, "gh", { [VIEW_ARGS]: view(A), "api repos/o/r/git/ref/heads/main --jq .object.sha": { stdout: base } });
   assert.equal((await evaluatePrVerify(createCall("default", repo))).code, "reviewed");
   assert.ok(gh.log().length > 0);
 });
 
 test("MCP content-array response: the PR number is read from the JSON text part", async () => {
   reviewed(A);
-  makeFakeBin(bin, "gh", { [VIEW_ARGS]: view(A) });
+  makeFakeBin(bin, "gh", { [VIEW_ARGS]: view(A), ...BASE_REF });
   const text = JSON.stringify({ number: 7, url: "https://github.com/o/r/pull/7" });
-  assert.equal((await evaluatePrVerify(mcpCall([{ type: "text", text }]))).code, "reviewed");
-  assert.equal((await evaluatePrVerify(mcpCall({ content: [{ type: "text", text }] }))).code, "reviewed");
-  assert.equal((await evaluatePrVerify(mcpCall([{ type: "text", text: JSON.stringify({ html_url: "https://github.com/o/r/pull/7" }) }]))).code, "reviewed");
+  assert.equal((await evaluatePrVerify(mcpCall([{ type: "text", text }], "default", CTX_REPO))).code, "reviewed");
+  assert.equal((await evaluatePrVerify(mcpCall({ content: [{ type: "text", text }] }, "default", CTX_REPO))).code, "reviewed");
+  assert.equal((await evaluatePrVerify(mcpCall([{ type: "text", text: JSON.stringify({ html_url: "https://github.com/o/r/pull/7" }) }], "default", CTX_REPO))).code, "reviewed");
 });
 
 test("MCP response with no number: the PR is found by head branch; exactly one match is required", async () => {
   reviewed(A);
   const one = (sha) => ({ stdout: JSON.stringify([{ number: 7, ...prJson(sha) }]) });
   const noNumber = [{ type: "text", text: "Pull request created" }];
-  makeFakeBin(bin, "gh", { [LIST_ARGS]: one(A) });
-  assert.equal((await evaluatePrVerify(mcpCall(noNumber))).code, "reviewed");
+  makeFakeBin(bin, "gh", { [LIST_ARGS]: one(A), ...BASE_REF });
+  assert.equal((await evaluatePrVerify(mcpCall(noNumber, "default", CTX_REPO))).code, "reviewed");
   const gh = makeFakeBin(bin, "gh", { [LIST_ARGS]: one(B), [READY]: {}, [DRAFT_READ]: { stdout: "true\n" } });
   const bad = await evaluatePrVerify(mcpCall(noNumber));
   assert.deepEqual([bad.code, bad.detail], ["pr_created_head_unreviewed", "drafted"]);
@@ -201,11 +206,11 @@ test("T-PR-2: containment issues the draft call (argv pinned)", async () => {
 
 test("a record whose head matches but whose status is not passed/overridden does not vouch for the head", async () => {
   reviewed(A, "needs_fixes");
-  makeFakeBin(bin, "gh", { [VIEW_ARGS]: view(A), [READY]: {}, [DRAFT_READ]: { stdout: "true\n" } });
+  makeFakeBin(bin, "gh", { [VIEW_ARGS]: view(A), [READY]: {}, [DRAFT_READ]: { stdout: "true\n" }, ...BASE_REF });
   const r = await evaluatePrVerify(createCall());
   assert.deepEqual([r.code, r.outcome], ["pr_created_head_unreviewed", "denied"]);
   reviewed(A, "overridden");
-  assert.equal((await evaluatePrVerify(createCall())).code, "reviewed");
+  assert.equal((await evaluatePrVerify(createCall("default", CTX_REPO))).code, "reviewed");
 });
 
 test("state-aware containment: merged is uncontained and never called open; closed and already-draft need no call", async () => {
@@ -291,8 +296,8 @@ const noNumber = [{ type: "text", text: "Pull request created" }];
 
 test("head lookup is open-only: a reused branch (open new PR + old merged PR) picks the open one", async () => {
   reviewed(A);
-  const gh = makeFakeBin(bin, "gh", { [LIST_ARGS]: listOf([9, A]) });
-  assert.equal((await evaluatePrVerify(mcpCall(noNumber))).code, "reviewed");
+  const gh = makeFakeBin(bin, "gh", { [LIST_ARGS]: listOf([9, A]), ...BASE_REF });
+  assert.equal((await evaluatePrVerify(mcpCall(noNumber, "default", CTX_REPO))).code, "reviewed");
   assert.ok(gh.log().some((a) => a.join(" ") === LIST_ARGS && a.includes("open")), "lists open PRs only");
   assert.ok(!gh.log().flat().includes("all"));
 });
@@ -306,8 +311,8 @@ test("head lookup filters by head owner: several owners share the branch name", 
   const same = await evaluatePrVerify(mcpCall(noNumber));
   assert.equal(same.code, "pr_created_head_unreviewed", "no owner prefix: the base owner's PR (#2, head B)");
   assert.match(same.output.stopReason, /PR #2/);
-  makeFakeBin(bin, "gh", { [LIST_ARGS]: listOf(forkPr(1, "o", A), [2, A, { baseRefName: "dev", headRepositoryOwner: { login: "o" } }]) });
-  assert.equal((await evaluatePrVerify(mcpCall(noNumber))).code, "reviewed", "the named base filters out the other base's PR");
+  makeFakeBin(bin, "gh", { [LIST_ARGS]: listOf(forkPr(1, "o", A), [2, A, { baseRefName: "dev", headRepositoryOwner: { login: "o" } }]), ...BASE_REF });
+  assert.equal((await evaluatePrVerify(mcpCall(noNumber, "default", CTX_REPO))).code, "reviewed", "the named base filters out the other base's PR");
   const noBase = { ...mcpCall(noNumber), toolInput: { owner: "o", repo: "r", head: "feat" } };
   assert.match((await evaluatePrVerify(noBase)).output.stopReason, /several open PRs/);
 });

@@ -400,6 +400,11 @@ export async function githubRemotes(root, deadlineAt) {
     .map((r) => ({ name: r.name, url: r.url, slug: `${r.gh?.owner}/${r.gh?.repo}` }));
 }
 
+/** The local remote for a GitHub slug, else its https URL (insteadOf rules still apply). @param {string} root @param {string} slug @param {number} [deadlineAt] */
+export async function fetchSource(root, slug, deadlineAt) {
+  return (await githubRemotes(root, deadlineAt)).find((r) => r.slug === slug)?.name ?? `https://github.com/${slug}.git`;
+}
+
 /**
  * The push destination must be the reviewed head repo at push time. Checked on the EFFECTIVE push URLs — what
  * `git push` will actually contact after pushurl, insteadOf and pushInsteadOf — each of which must be a GitHub URL

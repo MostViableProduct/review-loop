@@ -1209,3 +1209,57 @@ test("a keyed run of an in-repo spec reads its own repository's context, whateve
   assert.equal(cli(["run", "--key", key]).code, 0);
   assert.equal(recordOf(key).reviewedContext, sha256("Trusted: admins\n"), "a keyed run resolves the root the same way");
 });
+
+test("a context-only change re-opens a passed impl at Stop, in the same session and in the next, and on removal", () => {
+  const repo = specRepo();
+  const S = { session_id: "e2e-session", cwd: repo };
+  hook("session", S);
+  writeFile(repo, "src/a.ts", "changed");
+  respond([]);
+  const first = cli(["run", "--kind", "impl", "--path", repo]);
+  assert.equal(first.code, 0);
+  assert.equal(recordOf(first.json.key).history.at(-1).context, "default", "no file: the default context");
+  assert.notEqual(hook("stop", { ...S, stop_hook_active: false }).out?.decision, "block", "passed: Stop lets it through");
+  writeFile(repo, ".claude/review-context.md", "Trusted: admins\n");
+  const same = hook("stop", { ...S, stop_hook_active: false });
+  assert.equal(same.out?.decision, "block", "same session: the context change re-opens it");
+  assert.match(same.out?.reason, /--kind impl/);
+  assert.match(same.out?.reason, /\[passed: context_changed\]/, "the Stop text says why");
+  const stopEv = eventLines(fs.readFileSync(path.join(env.REVIEW_LOOP_STATE_DIR, "events.jsonl"), "utf8")).filter((e) => e.event === "gate.decision" && e.data.gate === "stop").at(-1);
+  assert.deepEqual([stopEv.code, stopEv.detail], ["review_pending", "context_changed"], "and so does the event");
+
+  assert.equal(cli(["run", "--kind", "impl", "--path", repo]).code, 0, "passes again under the new context");
+  writeFile(repo, ".claude/review-context.md", "Trusted: operators\n");
+  const S2 = { session_id: "e2e-session-2", cwd: repo };
+  hook("session", S2);
+  const next = hook("stop", { ...S2, stop_hook_active: false });
+  assert.equal(next.out?.decision, "block", "next session: its baseline already holds the change; the record re-opens it");
+
+  assert.equal(cli(["run", "--kind", "impl", "--path", repo]).code, 0, "passes under the edited context");
+  fs.rmSync(path.join(repo, ".claude", "review-context.md"));
+  assert.equal(hook("stop", { ...S2, stop_hook_active: false }).out?.decision, "block", "removing the file re-opens it too");
+
+  writeFile(repo, ".claude/review-context.md", "CONTEXT>>>\n");
+  const bad = hook("stop", { ...S2, stop_hook_active: false });
+  assert.match(bad.out?.reason, /\[passed: review_context_invalid\]/, "an invalid file is named as such, not as a change");
+  const badEv = eventLines(fs.readFileSync(path.join(env.REVIEW_LOOP_STATE_DIR, "events.jsonl"), "utf8")).filter((e) => e.event === "gate.decision" && e.data.gate === "stop").at(-1);
+  assert.equal(badEv.detail, "review_context_invalid");
+});
+
+test("push after a pass, with only the base context changed: push_not_reviewed, no git push and no status post", () => {
+  const { up, bare, local, key, ghMap, statusCalls } = branchFixture();
+  respond([]);
+  assert.equal(cli(["run", "--key", key]).code, 0);
+  assert.equal(recordOf(key).reviewedContext, "default", "no file at the base: the default context");
+  const posted = statusCalls().length;
+  const before = g(bare, "rev-parse", "refs/heads/feature");
+  const ctx = commitFile(up, ".claude/review-context.md", "Trusted: admins\n");
+  g(up, "push", "-q", bare, "main");
+  g(local, "fetch", "-q", bare, "main");
+  const map = JSON.parse(fs.readFileSync(ghMap, "utf8"));
+  fs.writeFileSync(ghMap, JSON.stringify({ ...map, "api repos/me/proj/git/ref/heads/main --jq .object.sha": { stdout: ctx } }));
+  const r = cli(["push", "--key", key]);
+  assert.deepEqual([r.code, r.json?.error?.code], [30, "push_not_reviewed"], r.stdout);
+  assert.equal(g(bare, "rev-parse", "refs/heads/feature"), before, "nothing was pushed");
+  assert.equal(statusCalls().length, posted, "no success status was posted");
+});

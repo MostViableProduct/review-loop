@@ -602,6 +602,11 @@ async function cmdPush(v) {
     if (!v.ok || `${head}:${v.mergeBase}` !== rec.reviewedFingerprint) {
       throw new ReviewLoopError("push_comparison_changed", `the PR base ${identity.baseBranch} moved since the review; re-run the round before pushing`);
     }
+    // The pass also binds the base's context: one changed since the review can neither publish nor mark it reviewed.
+    const pushContext = contextDigest(await readContext(identity, /** @type {string} */ (root), { baseSha }));
+    if (pushContext !== rec.reviewedContext) {
+      throw new ReviewLoopError("push_not_reviewed", "the base's .claude/review-context.md changed since the review; re-run the round before pushing");
+    }
     try {
       const pushed = await pushBranch(identity, key, head);
       emitEvent({ source: "round", event: "round.push", code: "ok", artifact_key: key, session_id: SESSION });

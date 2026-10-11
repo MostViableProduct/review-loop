@@ -250,10 +250,13 @@ test("gate: cleared only when passed/overridden at the exact fingerprint", () =>
   const r = newRecord(ID);
   r.status = "passed";
   r.reviewedFingerprint = "abc";
+  r.reviewedContext = "default";
   writeRecord(r);
-  assert.equal(isClearedAt(ID, "abc"), true);
-  assert.equal(isClearedAt(ID, "abd"), false);
-  assert.equal(isClearedAt({ kind: "spec", path: "/r/docs/specs/b.md" }, "abc"), false, "identity includes the path");
+  assert.equal(isClearedAt(ID, "abc", "default"), true);
+  assert.equal(isClearedAt(ID, "abd", "default"), false);
+  assert.equal(isClearedAt({ kind: "spec", path: "/r/docs/specs/b.md" }, "abc", "default"), false, "identity includes the path");
+  assert.equal(isClearedAt(ID, "abc", "a".repeat(64)), false, "a different context is not cleared");
+  assert.equal(isClearedAt(ID, "abc", "error"), false, "an unreadable context is never cleared");
 });
 
 test("lock: exactly one of two racing processes wins; the loser gets busy", async () => {

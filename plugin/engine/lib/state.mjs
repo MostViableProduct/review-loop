@@ -265,11 +265,14 @@ export function writeRecord(record) {
   atomicWriteJson(recordPath(key), record, stateRoot());
 }
 
-/** @param {Identity} identity @param {string | null} fingerprint */
-export function isClearedAt(identity, fingerprint) {
+/**
+ * @param {Identity} identity @param {string | null} fingerprint
+ * @param {string} context the current gateContextDigest; "error" (unreadable) never equals a stored one
+ */
+export function isClearedAt(identity, fingerprint, context) {
   if (fingerprint === null) return false;
   const r = readRecord(identityKey(identity));
-  return !!r && (r.status === "passed" || r.status === "overridden") && r.reviewedFingerprint === fingerprint;
+  return !!r && (r.status === "passed" || r.status === "overridden") && r.reviewedFingerprint === fingerprint && r.reviewedContext === context;
 }
 
 // ---- markers: one file per identity; written by hooks, never a shared read-modify-write ----

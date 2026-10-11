@@ -30,6 +30,7 @@ function reviewed(baseBranch, head, mergeBase, status = "passed") {
   const rec = newRecord(identity(baseBranch));
   rec.status = status;
   rec.reviewedFingerprint = `${head}:${mergeBase}`;
+  rec.reviewedContext = "default";
   writeRecord(rec);
 }
 const VIEW = "pr view 5 --repo o/r --json headRefOid,baseRefName,headRefName,headRepository,headRepositoryOwner,isDraft,state";
@@ -343,4 +344,25 @@ test("hook: kill switch → one skipped decision, code kill_switch, no override 
   const lines = fs.readFileSync(eventsFile, "utf8").slice(before).trim().split("\n").map((l) => JSON.parse(l));
   assert.deepEqual(lines.map((l) => [l.event, l.code, l.data.gate, l.data.outcome]), [["gate.decision", "kill_switch", "merge", "skipped"]]);
   assert.match(JSON.parse(r.stdout).systemMessage, /kill switch/);
+});
+
+test("a base whose .claude/review-context.md changed since the review is denied: the pass was under another context", async () => {
+  reviewed("main", A, base);
+  g(repo, "checkout", "-q", "-b", "ctx-base", base);
+  const ctxTip = commitFile(repo, ".claude/review-context.md", "Trusted: admins\n");
+  g(repo, "checkout", "-q", "main");
+  makeFakeBin(bin, "gh", { [VIEW]: pr("main"), "api repos/o/r/git/ref/heads/main --jq .object.sha": { stdout: `${ctxTip}\n` } });
+  const r = await call(`${G} pr merge 5 --repo o/r --squash --match-head-commit ${A}`);
+  assert.deepEqual([r.decision, r.code], ["deny", "pr_merge_unbound"]);
+  assert.match(r.message, /review-context\.md/);
+});
+
+test("a base whose .claude/review-context.md is invalid denies the merge with review_context_invalid", async () => {
+  reviewed("main", A, base);
+  g(repo, "checkout", "-q", "-b", "bad-ctx-base", base);
+  const badTip = commitFile(repo, ".claude/review-context.md", "CONTEXT>>>\n");
+  g(repo, "checkout", "-q", "main");
+  makeFakeBin(bin, "gh", { [VIEW]: pr("main"), "api repos/o/r/git/ref/heads/main --jq .object.sha": { stdout: `${badTip}\n` } });
+  const r = await call(`${G} pr merge 5 --repo o/r --squash --match-head-commit ${A}`);
+  assert.deepEqual([r.decision, r.code], ["deny", "review_context_invalid"]);
 });
