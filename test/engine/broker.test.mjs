@@ -474,6 +474,28 @@ test("H1: the signal path never signals a broker-shaped pid broker.json names th
   }
 });
 
+test("H1: on the signal path no table read starts past the budget when the gap before it crosses the budget", { timeout: 60_000 }, async () => {
+  const bin = path.join(dir, "gap-ps");
+  fs.mkdirSync(bin, { recursive: true });
+  const arm = path.join(bin, "arm");
+  const calls = path.join(bin, "calls");
+  fs.writeFileSync(path.join(bin, "ps"), `#!/bin/sh\nif [ -e ${arm} ]; then echo "$*" >> ${calls}; fi\nexec /bin/ps "$@"\n`, { mode: 0o755 });
+  // A 2 s gap (the seam), against a 3 s budget: the second read starts at about 2 s, its gap ends at about 4 s.
+  const child = spawn(process.execPath, [ROUND, "run", "--kind", "spec", "--path", specRepo()], { env: { ...env, ...psSeam(bin), STUB_SLEEP_MS: "30000", REVIEW_LOOP_TEST_REAP_GAP_MS: "2000" }, stdio: "ignore" });
+  try {
+    assert.ok(await until(() => fs.existsSync(env.BROKER_READY), 20_000), "the companion started its broker");
+    assert.ok(await until(() => snapshots().length === 1, 5000));
+    fs.writeFileSync(arm, "");
+    const exited = new Promise((r) => child.once("exit", (_code, sig) => r(sig)));
+    child.kill("SIGTERM");
+    assert.equal(await exited, "SIGTERM");
+    const tables = fs.readFileSync(calls, "utf8").split("\n").filter((l) => / -A /.test(` ${l} `));
+    assert.equal(tables.length, 2, `the third read, due after the budget, never starts: ${JSON.stringify(tables)}`);
+  } finally {
+    if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+  }
+});
+
 test("H1: on the signal path no re-read starts past the budget, however many brokers a read matched", { timeout: 60_000 }, async () => {
   // Each re-read takes 2.5 s (the seam), against a 3 s budget: two start (about 7 s to exit, with the round's own
   // teardown), the other two are left for the next sweep; one per broker would take about 12 s.

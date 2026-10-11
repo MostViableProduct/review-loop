@@ -1117,8 +1117,14 @@ function reapCompanionBroker(root) {
   /** @type {Set<number>} */
   const done = new Set();
   const end = Date.now() + REAP_BUDGET_MS;
+  const seamGap = process.env.REVIEW_LOOP_TEST_SEAMS === "1" ? Number(process.env.REVIEW_LOOP_TEST_REAP_GAP_MS) : NaN;
+  const gap = seamGap > 0 ? seamGap : REAP_READ_GAP_MS;
   for (let read = 0; read < REAP_READS && Date.now() < end; read++) {
-    if (read > 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, REAP_READ_GAP_MS);
+    if (read > 0) {
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, gap);
+      // The gap itself can carry past the budget.
+      if (Date.now() >= end) break;
+    }
     for (const p of readProcs() ?? []) {
       if (done.has(p.pid) || p.uid !== uid || !brokerArgv(p.args, roots)) continue;
       // Only a group's leader, as in the stop: a pid broker.json names is trusted no further, so the table alone
