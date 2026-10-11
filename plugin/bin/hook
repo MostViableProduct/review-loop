@@ -2,7 +2,7 @@
 # Claude Code hook entry for the review-loop plugin. Finds node; without it, fails loud (spec §6.3).
 mode="$1"
 root=$(cd "$(dirname "$0")/.." && pwd)
-VERSION="1.0.3"
+VERSION="1.0.4"
 
 find_node() {
   if [ -n "${REVIEW_LOOP_NODE_CANDIDATES:-}" ]; then

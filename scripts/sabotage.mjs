@@ -88,6 +88,9 @@ export function writeSame(t, data, opts = {}) {
 
 const esc = (/** @type {string} */ t) => t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
+/** Whether a passing run actually ran the named test. @param {string} output @param {string} expect */
+export const ranNamed = (output, expect) => new RegExp(`^\\s*ok \\d+ - [^\\n]*${esc(expect)}`, "m").test(output);
+
 /**
  * Red only when the run failed AND the named test is among the failures. A syntax error, a missing import or an
  * unrelated assertion fails the file too, but reports a different (or file-level) `not ok` line.
@@ -105,10 +108,13 @@ const endedBySignal = (r) => typeof r.signal === "string" && !r.timedOut;
  * Asynchronous on purpose: with spawnSync the SIGINT/SIGTERM handlers could not run until every row had finished.
  * NODE_TEST_CONTEXT is dropped: when this runs under a test runner, an inherited one turns the child `node --test`
  * into a reporter for the parent, which prints no TAP and exits 0 even when its tests fail.
+ * With `expect`, only the tests whose names contain it run: a whole file per row made the registry take hours.
+ * A subtest made at run time (`t.test`) never runs that way, since its parent is filtered out: see `ranNamed`.
  * @param {string} root @param {string} test @param {AbortSignal} [abort] kills the run's process group (SIGKILL) when it fires
+ * @param {string} [expect] the row's named test
  * @returns {Promise<TestRun>}
  */
-export function nodeTest(root, test, abort) {
+export function nodeTest(root, test, abort, expect) {
   const env = { ...process.env };
   delete env.NODE_TEST_CONTEXT;
   return new Promise((resolve) => {
@@ -118,7 +124,8 @@ export function nodeTest(root, test, abort) {
     let settled = false;
     // Its own process group, killed whole: a test file's spawnSync child spinning in a loop outlives a kill of
     // node --test alone (orphans ran for hours).
-    const child = spawn(process.execPath, ["--test", "--test-reporter=tap", test], { cwd: root, env, stdio: ["ignore", "pipe", "pipe"], detached: true });
+    const only = expect === undefined ? [] : [`--test-name-pattern=${esc(expect)}`];
+    const child = spawn(process.execPath, ["--test", "--test-reporter=tap", ...only, test], { cwd: root, env, stdio: ["ignore", "pipe", "pipe"], detached: true });
     const killGroup = () => {
       try {
         // Never a missing, 0 or 1 pid: kill(-0) would hit this runner's own group, kill(-1) every user process.
@@ -210,7 +217,7 @@ async function waitSingleLink(abs, maxMs, abort) {
  * A find that doesn't match exactly once, a refused path, a file whose identity changed, or a failed restore stops the
  * run at once.
  * @param {{ root?: string, rows?: readonly Sabotage[], only?: string | null, out?: (s: string) => void,
- *   runTest?: (root: string, test: string, abort?: AbortSignal) => TestRun | Promise<TestRun>,
+ *   runTest?: (root: string, test: string, abort?: AbortSignal, expect?: string) => TestRun | Promise<TestRun>,
  *   io?: { readSame: typeof readSame, writeSame: typeof writeSame }, abort?: AbortSignal, linkWaitMs?: number }} [opts]
  * @returns {Promise<number>}
  */
@@ -239,7 +246,13 @@ export async function runSabotage(opts = {}) {
     }
     const edit = applyEdits(orig, s);
     if ("error" in edit) { out(`FAIL ${s.id}: ${edit.error}\n`); return 1; }
-    const baseline = await runTest(root, s.test, abort);
+    // The scoped run missed the named test (a subtest, whose parent the pattern skipped): this row runs the whole file.
+    let scope = /** @type {string | undefined} */ (s.expect);
+    let baseline = await runTest(root, s.test, abort, scope);
+    if (scope !== undefined && baseline.status === 0 && !ranNamed(baseline.stdout, s.expect) && !abort.aborted && !endedBySignal(baseline)) {
+      scope = undefined;
+      baseline = await runTest(root, s.test, abort, scope);
+    }
     if (abort.aborted || endedBySignal(baseline)) { out(`INTERRUPTED  ${s.id} (before its break was applied)\nsabotage: interrupted\n`); return EXIT_INTERRUPTED; }
     if (baseline.status !== 0) { bad.push(`${s.id} (baseline red)`); out(`BASELINE RED  ${s.id}\n`); continue; }
     await waitLinks(s.file);
@@ -260,7 +273,7 @@ export async function runSabotage(opts = {}) {
         if (err instanceof IdentityError) identityChanged = message(err);
         throw err;
       }
-      const r = await runTest(root, s.test, abort);
+      const r = await runTest(root, s.test, abort, scope);
       interrupted = abort.aborted || endedBySignal(r);
       verdict = classify(r.status, `${r.stdout}\n${r.stderr}`, s.expect);
     } catch (err) {

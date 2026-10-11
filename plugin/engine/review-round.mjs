@@ -26,7 +26,7 @@ import {
 } from "./lib/state.mjs";
 import { EXIT, OPTION_LABELS, applyRoundResult, applyDecision, awaitHuman, resetIfNewLoop, withoutWaived, exitForAwaiting } from "./lib/policy.mjs";
 import { scoreFindings, parseDimensionTag } from "./lib/scoring.mjs";
-import { verifyPin, verifyUsage, runCompanion, parseCompanionOutput, companionFailureText, writePin, pinFile, installedTreeDigest, snapshotVerified, stopCompanionBroker, sweepStaleSnapshots } from "./lib/pin.mjs";
+import { verifyPin, verifyUsage, runCompanion, parseCompanionOutput, companionFailureText, writePin, pinFile, installedTreeDigest, snapshotVerified, stopCompanionBroker, sweepStaleSnapshots, afterSnapshotSecond, countOrphanBrokers, stopOrphan, STOP_DEADLINE_MS, SWEEP_MANUAL_DEADLINE_MS, SNAPSHOT_NAME, sweepEventData } from "./lib/pin.mjs";
 import { loadRubricSection, buildFocus } from "./lib/rubric.mjs";
 import { prepare, pushBranch, HumanNeeded, NON_RETRYABLE } from "./lib/round.mjs";
 import { repoRoot, headSha, implFingerprint, mergeBaseValidity, readArtifact } from "./lib/git.mjs";
@@ -146,6 +146,8 @@ async function cmdRun(v) {
   /** @type {{ root: string, cleanup: () => void } | null} */
   let plugin = null;
   try {
+    // First, before any early return: a round that has nothing to review still clears what killed rounds left.
+    await sweepSnapshots(key);
     // We hold the lock, so a record left "reviewing" belongs to a holder that died mid-round.
     if (rec.status === "reviewing") {
       rec.status = "op_error";
@@ -169,12 +171,15 @@ async function cmdRun(v) {
       return out({ ...base, status: rec.status, round: rec.round, awaiting: { ...awaitingView(rec), stale } }, exitForAwaiting(rec.awaiting.reason));
     }
 
-    await sweepSnapshots(key);
     let pluginRoot;
     try {
       verifyPin();
-      plugin = snapshotVerified(stateSubdir("ws"));
+      // Test seam: the snapshot is made just after a second begins, so a companion started without the wait below
+      // would share that second.
+      if (process.env.REVIEW_LOOP_TEST_SEAMS === "1" && process.env.REVIEW_LOOP_TEST_SNAPSHOT_AT_SECOND_START === "1") await new Promise((r) => setTimeout(r, 1000 - (Date.now() % 1000) + 5));
+      plugin = snapshotVerified(stateSubdir("ws"), key);
       pluginRoot = plugin.root;
+      await afterSnapshotSecond(pluginRoot);
       await verifyUsage(pluginRoot);
     } catch (err) {
       if (!PIN_CODES.has(errorCode(err))) throw err;
@@ -315,27 +320,131 @@ async function cmdRun(v) {
     const output = err instanceof ReviewLoopError && typeof err.details.output === "string" && err.details.output ? { output: err.details.output } : {};
     return out({ ...base, status: "op_error", error: { code, message: /** @type {Error} */ (err).message, retryable: !NON_RETRYABLE.has(code), attempts: rec.errorAttempts, ...output } }, EXIT.OP_ERROR);
   } finally {
-    if (plugin && (await stopCompanionBroker(plugin.root)) > 0) {
-      emitEvent({ source: "round", event: "hook.error", code: "broker_stop_failed", session_id: SESSION, artifact_key: key, data: { stage: "broker_stop_failed" } });
+    // The lock goes whatever the cleanup does: a throw here would otherwise strand it for the next round to reclaim.
+    try {
+      const stop = plugin ? await stopCompanionBroker(plugin.root, { deadline: performance.now() + STOP_DEADLINE_MS }) : null;
+      if (stop?.quarantined) reportQuarantined(key);
+      const kept = stop !== null && (stop.left > 0 || stop.unattributed > 0);
+      if (kept) reportStop(key, path.basename(/** @type {{ root: string }} */ (plugin).root), /** @type {import("./lib/pin.mjs").StopResult} */ (stop));
+      prep && !prep.nothing && prep.cleanup();
+      // A snapshot whose broker tree may still run is kept: it is the only evidence that ties the tree to this round,
+      // and the next sweep retries it once this (its owner) has exited.
+      if (!kept && plugin) {
+        /** @type {string | null} */
+        let left = "temp_unremoved";
+        try {
+          if (plugin.cleanup()) left = null;
+        } catch {
+          left = "failed_remove";
+        }
+        if (left) reportStop(key, path.basename(plugin.root), { left: 0, unattributed: 0, reason: left });
+      }
+    } finally {
+      lock.release();
     }
-    prep && !prep.nothing && prep.cleanup();
-    plugin?.cleanup();
-    lock.release();
   }
 }
 
 /**
- * Clears what rounds killed before their finally left in ws/ (see sweepStaleSnapshots); logs counts only, and only when
- * there was something to clear.
- * @param {string} key
+ * A damaged broker.json was set aside and the stop went on the process table (see brokerRegistry): `hook.error`, so it
+ * is never silent. No path or content; a lost line is said on stderr.
+ * @param {string | null} key
  */
-async function sweepSnapshots(key) {
-  const s = await sweepStaleSnapshots(stateSubdir("ws"));
-  if (s.swept + s.brokersLeft + s.failed === 0) return;
-  const data = { swept: s.swept, brokers_left: s.brokersLeft, failed: s.failed };
+function reportQuarantined(key) {
+  if (!emitEvent({ source: "round", event: "hook.error", code: "broker_registry_quarantined", session_id: SESSION, artifact_key: key, data: { stage: "broker_registry_quarantined" } })) {
+    process.stderr.write(`review-loop: event_write_failed ${JSON.stringify({ event: "hook.error", code: "broker_registry_quarantined", artifact_key: key })}\n`);
+  }
+}
+
+/**
+ * The detail of a stop that left a snapshot in place, for every path that keeps one (the round's own stop and both
+ * sweeps): `hook.error` `broker_stop_failed` whenever something may still run (counted, or a sweep step that threw
+ * and so counted nothing: `failed_<step>`), plus `round.broker_stop` with the detail. Counts and a bounded reason only; a lost line is still said on stderr, so it is never silent.
+ * @param {string | null} key @param {string} snapshot @param {{ left: number, unattributed: number, reason: string | null }} s
+ */
+function reportStop(key, snapshot, s) {
+  if ((s.left + s.unattributed > 0 || (s.reason ?? "").startsWith("failed_")) && !emitEvent({ source: "round", event: "hook.error", code: "broker_stop_failed", session_id: SESSION, artifact_key: key, data: { stage: "broker_stop_failed" } })) {
+    process.stderr.write(`review-loop: event_write_failed ${JSON.stringify({ event: "hook.error", code: "broker_stop_failed", artifact_key: key })}\n`);
+  }
+  const data = { reason: s.reason ?? "members_left", left: s.left, unattributed: s.unattributed, snapshot };
+  if (!emitEvent({ source: "round", event: "round.broker_stop", code: "broker_stop_failed", session_id: SESSION, artifact_key: key, data })) {
+    process.stderr.write(`review-loop: event_write_failed ${JSON.stringify({ event: "round.broker_stop", code: "broker_stop_failed", artifact_key: key, left: s.left, unattributed: s.unattributed })}\n`);
+  }
+}
+
+/**
+ * Clears what rounds killed before their finally left in ws/ (see sweepStaleSnapshots). Logs one round.sweep whenever
+ * ws/ holds any snapshot (so which partition each round looked at is on record), plus one round.broker_stop per
+ * snapshot it had to keep. Counts only.
+ * @param {string | null} key @param {{ all?: boolean, deadlineMs?: number }} [opts]
+ */
+async function sweepSnapshots(key, opts = {}) {
+  const s = await sweepStaleSnapshots(stateSubdir("ws"), opts);
+  // Each under the round that made the snapshot (owner.json's key), never the sweeping round's, as round.broker_stop.
+  for (const origin of s.quarantined) reportQuarantined(origin);
+  for (const st of s.stops) reportStop(st.origin, st.snapshot, st);
+  const data = sweepEventData(s);
+  const bad = data.brokers_left + data.unattributed + data.failed + data.unverified > 0 || data.incomplete === 1;
+  // counted is the last count (a full sweep re-counts after acting, down to 0), so held says whether it acted.
+  if (s.counted === 0 && s.held === 0 && !bad) return s;
   // Two literal sites, so scripts/list-codes.mjs (and T-OBS-3) sees the code.
-  if (s.brokersLeft + s.failed > 0) emitEvent({ source: "round", event: "round.sweep", code: "snapshot_sweep_incomplete", session_id: SESSION, artifact_key: key, data });
-  else emitEvent({ source: "round", event: "round.sweep", code: "ok", session_id: SESSION, artifact_key: key, data });
+  const ok = bad
+    ? emitEvent({ source: "round", event: "round.sweep", code: "snapshot_sweep_incomplete", session_id: SESSION, artifact_key: key, data })
+    : emitEvent({ source: "round", event: "round.sweep", code: "ok", session_id: SESSION, artifact_key: key, data });
+  if (!ok) process.stderr.write(`review-loop: event_write_failed ${JSON.stringify({ event: "round.sweep", code: bad ? "snapshot_sweep_incomplete" : "ok", artifact_key: key, ...data })}\n`);
+  return s;
+}
+
+/**
+ * `sweep`: every partition of ws/, now, without a lock (it acts only on snapshots whose owner is gone). Exit 0 only
+ * when everything was examined, nothing is left, and no broker runs from a snapshot that is gone.
+ */
+/**
+ * An operator command's outcome as an event; a line that cannot be written is said on stderr instead.
+ * @param {string} event @param {string} code @param {Record<string, unknown>} data
+ */
+function report(event, code, data) {
+  if (!emitEvent({ source: "round", event, code, session_id: SESSION, artifact_key: null, data })) {
+    process.stderr.write(`review-loop: event_write_failed ${JSON.stringify({ event, code, ...data })}\n`);
+  }
+}
+
+async function cmdSweep() {
+  const s = await sweepSnapshots(null, { all: true, deadlineMs: SWEEP_MANUAL_DEADLINE_MS });
+  const o = countOrphanBrokers(stateSubdir("ws"));
+  report("round.orphans", o.verified && o.count === 0 ? "ok" : "orphaned_brokers", { verified: o.verified ? 1 : 0, count: o.count });
+  const skipped = [...s.skipped.values()];
+  const inUse = skipped.filter((k) => k === "in_use").length;
+  const unverified = skipped.length - inUse;
+  // A snapshot of a live round (in_use) is not a leftover; one that could not be judged (unverified) is not clean.
+  const clean = s.brokersLeft + s.unattributed + s.failed + unverified === 0 && !s.incomplete && o.verified && o.count === 0;
+  out(
+    {
+      status: clean ? "clean" : "incomplete", swept: s.swept, brokers_left: s.brokersLeft, unattributed: s.unattributed, failed: s.failed + (o.verified ? 0 : 1),
+      incomplete: s.incomplete || !o.verified, orphans_detected: o.count, in_use: inUse, unverified
+    },
+    clean ? EXIT.PASS : EXIT.SWEEP_INCOMPLETE
+  );
+}
+
+/**
+ * `stop-orphan`: the operator's command for one broker whose snapshot is gone, built by `review-loop doctor`. It
+ * re-checks the process right before each signal (see stopOrphan); nothing runs it automatically.
+ * @param {Record<string, string | boolean | undefined>} v
+ */
+async function cmdStopOrphan(v) {
+  const snapshot = typeof v.snapshot === "string" && SNAPSHOT_NAME.test(v.snapshot) ? v.snapshot : null;
+  const int = (/** @type {unknown} */ x) => (typeof x === "string" && /^[1-9]\d{0,9}$/.test(x) ? Number(x) : null);
+  const pid = int(v.pid);
+  const started = int(v.started);
+  const argsSha = typeof v["args-sha"] === "string" && /^[0-9a-f]{64}$/.test(v["args-sha"]) ? v["args-sha"] : null;
+  if (snapshot === null || pid === null || pid <= 1 || started === null || argsSha === null) {
+    throw new ReviewLoopError("bad_args", "stop-orphan needs --snapshot plugin-XXXXXX --pid <n> --started <epoch-seconds> --args-sha <64 hex>, as `review-loop doctor` prints them");
+  }
+  const status = await stopOrphan(stateSubdir("ws"), { snapshot, pid, started, argsSha });
+  report("round.stop_orphan", status === "stopped" ? "ok" : "orphaned_brokers", { status });
+  // pgid: the group the command acted on, for `ps -o pid,pgid,lstart,args -g <pgid>` (with leader_gone: what is left).
+  out({ status, pgid: pid }, status === "stopped" ? EXIT.PASS : EXIT.SWEEP_INCOMPLETE);
 }
 
 /** @param {{ kind: string }} identity */
@@ -484,7 +593,12 @@ const USAGE = `usage:
   review-round.mjs override (--key <k> | --kind --path) [--reason <text>]
   review-round.mjs push --key <k>
   review-round.mjs repin
-  review-round.mjs status [--cwd <dir>] [--session <id>]`;
+  review-round.mjs status [--cwd <dir>] [--session <id>]
+  review-round.mjs sweep
+  review-round.mjs stop-orphan --snapshot <plugin-XXXXXX> --pid <n> --started <epoch-seconds> --args-sha <hex>
+
+exit codes: 0 pass/clean, 10 needs fixes, 20 checkpoint, 21 stall, 22 needs a human, 30 operational error,
+  40 plugin pin, 50 busy (another round holds the lock), 60 sweep or stop-orphan incomplete`;
 
 async function main() {
   const [cmd, ...rest] = process.argv.slice(2);
@@ -499,7 +613,11 @@ async function main() {
       finding: { type: "string" },
       reason: { type: "string" },
       cwd: { type: "string" },
-      session: { type: "string" }
+      session: { type: "string" },
+      snapshot: { type: "string" },
+      pid: { type: "string" },
+      started: { type: "string" },
+      "args-sha": { type: "string" }
     },
     strict: true
   });
@@ -521,6 +639,10 @@ async function main() {
       return out({ pinned: writePin() }, EXIT.PASS);
     case "status":
       return cmdStatus(values);
+    case "sweep":
+      return cmdSweep();
+    case "stop-orphan":
+      return cmdStopOrphan(values);
     default:
       process.stderr.write(USAGE + "\n");
       process.exitCode = 2;

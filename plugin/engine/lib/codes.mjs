@@ -137,8 +137,11 @@ export const CODES = Object.freeze({
     category: "internal", remedy: "report a bug, naming the failed check (the detail) and the line printed above it",
     details: ["stop_blocks", "pr_gate_denies", "clean_repo_passes", "events_schema_v1", "git_failed", "hook_failed"]
   },
+  broker_registry_quarantined: { category: "internal", remedy: "a review round's Codex companion left a damaged broker.json: it was set aside (broker.json.corrupt-<time>, in that round's snapshot) and the round's brokers were found and stopped from the process table instead; nothing to do unless it recurs, then report a bug" },
   broker_stop_failed: { category: "internal", remedy: "a Codex app-server broker from a review round may still be running: find it with `ps -ax | grep app-server-broker` and stop it, then report a bug" },
-  snapshot_sweep_incomplete: { category: "internal", remedy: "a killed round's snapshot under the state dir's ws/ could not be cleaned up yet; the next round retries. If it repeats, check `ps -ax | grep app-server-broker`, then report a bug" },
+  snapshot_sweep_incomplete: { category: "internal", remedy: "a killed round's snapshot under the state dir's ws/ could not be cleaned up yet; the next round retries. Run `node \"$(review-loop engine-path)/review-round.mjs\" sweep` to finish now, then `review-loop doctor`; if it repeats, report a bug" },
+  snapshot_owner_unknown: { category: "internal", remedy: "ps could not name this round's process, so no Codex review was started; check that `ps -p $$` works, then re-run the review round" },
+  orphaned_brokers: { category: "user_action", remedy: "run `node \"$(review-loop engine-path)/review-round.mjs\" sweep`; for any broker still listed, check it with `ps -o pid,pgid,args -g <pgid>` and stop it with the `stop-orphan` command `review-loop doctor` prints for it" },
   // engine: arguments
   bad_args: { category: "usage", remedy: "run `node \"$(review-loop engine-path)/review-round.mjs\" --help` for the flags" },
   invalid_decision: { category: "usage", remedy: "choose one of the options the page offered" },
@@ -221,14 +224,26 @@ const oneOf = (/** @type {readonly string[]} */ list) => (/** @type {unknown} */
 const int = (/** @type {number} */ min, /** @type {number} */ max) => (/** @type {unknown} */ v) => (Number.isInteger(v) && /** @type {number} */ (v) >= min && /** @type {number} */ (v) <= max ? v : null);
 const num = (/** @type {number} */ min, /** @type {number} */ max) => (/** @type {unknown} */ v) => (typeof v === "number" && Number.isFinite(v) && v >= min && v <= max ? v : null);
 const bool = (/** @type {unknown} */ v) => (typeof v === "boolean" ? v : null);
+/** A `ws/plugin-*` snapshot's name: mkdtemp's six random characters, no path. */
+const snapshotName = (/** @type {unknown} */ v) => (typeof v === "string" && /^plugin-[A-Za-z0-9]{6}$/.test(v) ? v : null);
 const token = (/** @type {unknown} */ v) => (typeof v === "string" && /^[A-Za-z0-9._:/-]{1,64}$/.test(v) && !v.startsWith("/") ? v : null);
 
 export const GATES = Object.freeze(["stop", "pr", "prompt", "prverify", "merge"]);
 export const OUTCOMES = Object.freeze(["blocked", "warned", "denied", "allowed", "skipped"]);
-export const STAGES = Object.freeze(["detection_failed", "snapshot_degraded", "hook_input_error", "hook_error", "prune_failed", "summary_write_failed", "lock_invalid", "lock_marker_cleanup", "lock_release_deferred", "status_post_failed", "broker_stop_failed", "session", "track", "prompt", "stop", "pr", "prverify"]);
+export const STAGES = Object.freeze(["detection_failed", "snapshot_degraded", "hook_input_error", "hook_error", "prune_failed", "summary_write_failed", "lock_invalid", "lock_marker_cleanup", "lock_release_deferred", "status_post_failed", "broker_stop_failed", "broker_registry_quarantined", "session", "track", "prompt", "stop", "pr", "prverify"]);
 export const COMMANDS_ENUM = Object.freeze(["setup", "config", "doctor", "update", "uninstall", "migrate", "selftest", "engine-path", "version", "help"]);
 export const KINDS = Object.freeze(["spec", "plan", "impl", "pr"]);
 export const DECISION_OPTIONS = Object.freeze(["continue", "more", "accept", "stop", "accept-finding", "waive", "repin", "override", "merge", "pull"]);
+/** Why a broker stop left a snapshot in place (see stopCompanionBroker). */
+export const BROKER_STOP_REASONS = Object.freeze([
+  "ps_unavailable", "registry_unreadable", "deadline", "unknown_rows", "members_left", "unattributed", "temp_unremoved",
+  // A sweep step that threw (pin.mjs sweepOne): which step, never the error's text.
+  "failed_judge", "failed_companion", "failed_broker", "failed_remove"
+]);
+/** The most snapshots a sweep looks at (pin.mjs SWEEP_LIST_MAX, pinned equal by a test): every count fits. */
+const SWEEP_COUNT_MAX = 65_536;
+/** `review-round.mjs stop-orphan`'s outcomes (only "stopped" is a success). */
+export const STOP_ORPHAN_STATUSES = Object.freeze(["stopped", "mismatch", "still_running", "unverified", "leader_gone"]);
 export const PAUSE_REASONS = Object.freeze(["checkpoint", "stall", "dispute_deadlock", "criss_cross", "push_rejected", "head_diverged", "plugin_pin"]);
 
 /** @param {unknown} v */
@@ -259,7 +274,17 @@ export const EVENT_CATALOG = Object.freeze({
   "round.decision": { sources: ["round"], data: { kind: oneOf(KINDS), option: oneOf(DECISION_OPTIONS), reason: oneOf(PAUSE_REASONS) } },
   "round.dispute": { sources: ["round"], data: { kind: oneOf(KINDS) } },
   "round.push": { sources: ["round"], data: {} },
-  "round.sweep": { sources: ["round"], data: { swept: int(0, 10_000), brokers_left: int(0, 10_000), failed: int(0, 10_000) } },
+  "round.sweep": {
+    sources: ["round"],
+    data: {
+      swept: int(0, SWEEP_COUNT_MAX), brokers_left: int(0, SWEEP_COUNT_MAX), failed: int(0, SWEEP_COUNT_MAX), unattributed: int(0, SWEEP_COUNT_MAX),
+      incomplete: int(0, 1), held: int(0, SWEEP_COUNT_MAX), partition: int(0, 4095), partitions: int(1, 4096),
+      in_use: int(0, SWEEP_COUNT_MAX), unverified: int(0, SWEEP_COUNT_MAX)
+    }
+  },
+  "round.stop_orphan": { sources: ["round"], data: { status: oneOf(STOP_ORPHAN_STATUSES) } },
+  "round.orphans": { sources: ["round"], data: { verified: int(0, 1), count: int(0, 10_000) } },
+  "round.broker_stop": { sources: ["round"], data: { reason: oneOf(BROKER_STOP_REASONS), left: int(0, 10_000), unattributed: int(0, 10_000), snapshot: snapshotName } },
   "hook.error": { sources: ["hook", "round", "cli"], data: { stage: oneOf(STAGES), mode: oneOf(STAGES) } },
   "config.invalid": { sources: ["hook", "cli", "round"], data: {} },
   override: { sources: ["hook", "round", "cli"], data: { kind: oneOf(["branch", "artifact"]), action: oneOf(["kill_switch", "kill_switch_ignored", "manual", "skip_review"]) } },

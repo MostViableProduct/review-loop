@@ -13,7 +13,7 @@ import { assertConfigOwner } from "./configguard.mjs";
 import { LIVE_REMEDY, liveCheck } from "./livecheck.mjs";
 import { configPath, readConfig } from "../../plugin/engine/lib/config.mjs";
 import { loadRubricSection, resolveRubricPath } from "../../plugin/engine/lib/rubric.mjs";
-import { readPin, verifyPin } from "../../plugin/engine/lib/pin.mjs";
+import { countOrphanBrokers, readPin, verifyPin } from "../../plugin/engine/lib/pin.mjs";
 import { eventsPath, eventsPathProblem, PACKAGE_VERSION, stateDirProblem } from "../../plugin/engine/lib/events.mjs";
 import { claudeConfigDir, stateRoot } from "../../plugin/engine/lib/paths.mjs";
 import { ReviewLoopError } from "../../plugin/engine/lib/errors.mjs";
@@ -263,6 +263,13 @@ export const DOCTOR_CHECKS = [
     const left = leftoverTemps();
     return left.length ? fail("settings_tmp_leftover", `delete ${left[0]}; settings.json itself is intact`, { warn: true, note: `${left.length} leftover temp file(s)` }) : pass();
   } },
+  { id: "orphaned_brokers", async run() {
+    // Read-only: it counts, and prints the operator's commands; it never signals or sweeps.
+    const o = countOrphanBrokers(path.join(stateRoot(), "ws"));
+    if (!o.verified) return fail("orphaned_brokers", "check that `ps -A` runs in a terminal and that the state dir's ws/ folder is readable, and inspect any ws/plugin-* entry that is not a directory of yours (`ls -la` it: a link, a file, another user's), then re-run doctor", { warn: true, note: "unverified: the process table or ws/ could not be read, or a ws/ entry is not a snapshot directory" });
+    if (o.count === 0 && o.kept === 0) return pass();
+    return fail("orphaned_brokers", orphanFix(o), { warn: true, note: `${o.count} Codex broker(s) running from a removed snapshot; ${o.kept} snapshot(s) of an ended round still to clean` });
+  } },
   { id: "live", async run(ctx) {
     if (!ctx.live) return fail("setup_complete_unverified", "review-loop doctor --live", { warn: true, note: "not run: it is one billed Codex review" });
     const r = await liveCheck(ctx.io);
@@ -271,6 +278,30 @@ export const DOCTOR_CHECKS = [
     return fail("live_check_failed", LIVE_REMEDY[r.detail], { note: r.detail });
   } }
 ];
+
+/**
+ * The operator's commands for `orphaned_brokers`: the sweep first, then, per broker whose snapshot is gone, how to
+ * look at its tree and the `stop-orphan` command that re-checks it right before signalling. A broker whose snapshot
+ * was deleted by hand could still belong to a running round, which is why doctor never stops one itself.
+ * @param {ReturnType<typeof countOrphanBrokers>} o
+ */
+function orphanFix(o) {
+  const engine = 'node "$(review-loop engine-path)/review-round.mjs"';
+  const lines = [`${engine} sweep`];
+  for (const b of o.orphans.slice(0, 10)) {
+    if (b.kind === "not_leader") {
+      // stop-orphan signals only a broker that leads its own group; this one shares its launcher's group.
+      lines.push(`      broker ${b.pid} (snapshot ${b.snapshot} removed) does not lead its process group, so stop-orphan will not act on it; inspect: ps -o pid,pgid,lstart,args -g ${b.pgid}`);
+      continue;
+    }
+    lines.push(
+      `      then, if broker ${b.pid} is still listed: ps -o pid,pgid,args -g ${b.pgid}`,
+      `      and if that tree is a leftover (no review running): ${engine} stop-orphan --snapshot ${b.snapshot} --pid ${b.pid} --started ${b.started} --args-sha ${b.argsSha}`
+    );
+  }
+  if (o.orphans.length > 10) lines.push(`      (${o.orphans.length - 10} more: run doctor again after these)`);
+  return lines.join("\n");
+}
 
 /** Only the error's class, never its message or path. @param {unknown} err */
 const errorClass = (err) => (err instanceof Error ? err.name : "other");

@@ -1,10 +1,10 @@
 #!/usr/bin/env node
-// The exit-code and troubleshooting tables in docs/TROUBLESHOOTING.md are generated from plugin/engine/lib/codes.mjs
-// (spec §8.3; the README held them until the user docs were split).
+// The exit-code and troubleshooting tables in docs/TROUBLESHOOTING.md, and the event-type table in docs/EVENTS.md,
+// are generated from plugin/engine/lib/codes.mjs (spec §8.3; the README held them until the user docs were split).
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { CODES, CLI_EXIT, exitFor } from "../plugin/engine/lib/codes.mjs";
+import { CODES, CLI_EXIT, EVENT_CATALOG, exitFor } from "../plugin/engine/lib/codes.mjs";
 
 const ROOT = fileURLToPath(new URL("..", import.meta.url));
 
@@ -36,6 +36,12 @@ export function troubleshootingTable() {
     .sort(([a], [b]) => a.localeCompare(b))
     .map(([c, m]) => `| \`${c}\` | ${exitFor(c)} | ${cell(m.remedy)} | ${(m.details ?? []).map((d) => `\`${d}\``).join(", ")} |`);
   return ["| Code | Exit | What to do | Details |", "|---|---|---|---|", ...rows].join("\n");
+}
+
+/** Every event type in the catalog, with its writers and data fields, in catalog order. */
+export function eventsTable() {
+  const rows = Object.entries(EVENT_CATALOG).map(([e, spec]) => `| \`${e}\` | ${spec.sources.join(", ")} | ${Object.keys(spec.data).map((f) => `\`${f}\``).join(", ") || "—"} |`);
+  return ["| Event | Written by | Data fields |", "|---|---|---|", ...rows].join("\n");
 }
 
 /** Every code with per-detail remedies (today `live_check_failed`): one row per detail. */
@@ -79,30 +85,42 @@ function main(args) {
       fileSet = true;
     } else return usage(`unknown or repeated argument ${JSON.stringify(a.slice(0, 40))}`);
   }
-  let before;
-  try {
-    before = fs.readFileSync(file, "utf8");
-  } catch (err) {
-    return usage(`cannot read ${file} (${err instanceof Error && "code" in err ? String(err.code) : "error"})`);
-  }
-  let after = before;
-  for (const [name, body] of [["exit-codes", exitTable()], ["troubleshooting", troubleshootingTable()], ["live-check", detailTable()]]) {
-    const next = splice(after, name, body);
-    if (next === null) {
-      process.stdout.write(`${path.basename(file)} is missing the ${name} markers\n`);
-      return 1;
+  const TROUBLE_BLOCKS = [["exit-codes", exitTable()], ["troubleshooting", troubleshootingTable()], ["live-check", detailTable()]];
+  // --file names one troubleshooting page (a test's copy); without it, both generated pages are covered.
+  const targets = fileSet ? [[file, TROUBLE_BLOCKS]] : [[file, TROUBLE_BLOCKS], [path.join(ROOT, "docs", "EVENTS.md"), [["events", eventsTable()]]]];
+  /** @type {Array<[string, string]>} */
+  const writes = [];
+  let stale = false;
+  for (const [target, blocks] of /** @type {Array<[string, Array<[string, string]>]>} */ (targets)) {
+    let before;
+    try {
+      before = fs.readFileSync(target, "utf8");
+    } catch (err) {
+      return usage(`cannot read ${target} (${err instanceof Error && "code" in err ? String(err.code) : "error"})`);
     }
-    after = next;
+    let after = before;
+    for (const [name, body] of blocks) {
+      const next = splice(after, name, body);
+      if (next === null) {
+        process.stdout.write(`${path.basename(target)} is missing the ${name} markers\n`);
+        return 1;
+      }
+      after = next;
+    }
+    if (after !== before) {
+      stale = true;
+      writes.push([target, after]);
+    }
   }
   if (check) {
-    if (after !== before) {
+    if (stale) {
       process.stdout.write("troubleshooting tables are stale: run `node scripts/gen-readme-tables.mjs`\n");
       return 1;
     }
     process.stdout.write("troubleshooting tables are current\n");
     return 0;
   }
-  if (after !== before) fs.writeFileSync(file, after);
+  for (const [target, text] of writes) fs.writeFileSync(target, text);
   process.stdout.write("troubleshooting tables written\n");
   return 0;
 }
