@@ -40,6 +40,9 @@ export const OPTION_LABELS = Object.freeze({
   pull: "Pull remote changes and re-review (no force)"
 });
 
+/** The most finding classes a record keeps (spec D4): the most recently raised. */
+export const CLASS_CAP = 50;
+
 /** @param {string} reason */
 export function exitForAwaiting(reason) {
   if (reason === "checkpoint") return EXIT.CHECKPOINT;
@@ -75,13 +78,14 @@ export function sameFinding(a, b) {
 }
 
 /**
- * A new loop starts when the artifact changed after a terminal outcome.
+ * A new loop starts when the artifact, or the context it was reviewed under, changed after a terminal outcome.
  * @param {ReturnType<typeof import("./state.mjs").newRecord>} rec
  * @param {string} fingerprint
+ * @param {string} context the current contextDigest
  */
-export function resetIfNewLoop(rec, fingerprint) {
+export function resetIfNewLoop(rec, fingerprint, context) {
   const terminal = rec.status === "passed" || rec.status === "overridden" || rec.status === "stopped";
-  if (terminal && rec.reviewedFingerprint !== fingerprint) {
+  if (terminal && (rec.reviewedFingerprint !== fingerprint || rec.reviewedContext !== context)) {
     Object.assign(rec, {
       status: "pending",
       round: 0,
@@ -90,9 +94,11 @@ export function resetIfNewLoop(rec, fingerprint) {
       uncappedStart: null,
       bestSumTenths: null,
       sinceImprovement: 0,
+      sinceValue: 0,
       history: [],
       disputes: [],
       waivers: [],
+      classes: [],
       awaiting: null,
       lastError: null,
       errorAttempts: 0
@@ -117,9 +123,10 @@ export function withoutWaived(findings, waivers) {
  * @param {{ pass: boolean, dimensions: Array<{ name: string, tenths: number }>, sum: number }} scored
  * @param {Array<{ title: string, file?: string | null, severity: string }>} findings  already waiver-filtered
  * @param {string} fingerprint
+ * @param {{ context: string }} meta the contextDigest the round was reviewed under
  * @returns {number} exit code
  */
-export function applyRoundResult(rec, scored, findings, fingerprint) {
+export function applyRoundResult(rec, scored, findings, fingerprint, meta) {
   rec.round += 1;
   rec.fingerprint = fingerprint;
   rec.lastError = null;
@@ -130,6 +137,7 @@ export function applyRoundResult(rec, scored, findings, fingerprint) {
     sumTenths,
     dims: Object.fromEntries(scored.dimensions.map((d) => [d.name, d.tenths])),
     findings: findings.length,
+    context: meta.context,
     at: new Date().toISOString()
   });
 
@@ -141,15 +149,16 @@ export function applyRoundResult(rec, scored, findings, fingerprint) {
   if (scored.pass) {
     rec.status = "passed";
     rec.reviewedFingerprint = fingerprint;
+    rec.reviewedContext = meta.context;
     rec.awaiting = null;
     return EXIT.PASS;
   }
 
   const deadlock = rec.disputes.find((d) => d.raisedAgain >= 2);
-  if (deadlock) return awaitHuman(rec, "dispute_deadlock", { title: deadlock.title, file: deadlock.file ?? null });
+  if (deadlock) return awaitHuman(rec, "dispute_deadlock", { title: deadlock.title, file: deadlock.file ?? null }, fingerprint, meta.context);
 
   if (rec.mode === "capped") {
-    if (rec.round >= rec.nextCheckpoint) return awaitHuman(rec, "checkpoint", { round: rec.round });
+    if (rec.round >= rec.nextCheckpoint) return awaitHuman(rec, "checkpoint", { round: rec.round }, fingerprint, meta.context);
   } else {
     if (rec.bestSumTenths === null || sumTenths > rec.bestSumTenths) {
       rec.bestSumTenths = sumTenths;
@@ -157,8 +166,8 @@ export function applyRoundResult(rec, scored, findings, fingerprint) {
     } else {
       rec.sinceImprovement += 1;
     }
-    if (rec.sinceImprovement >= 3) return awaitHuman(rec, "stall", { round: rec.round });
-    if (rec.uncappedStart !== null && rec.round >= rec.uncappedStart + 20) return awaitHuman(rec, "checkpoint", { round: rec.round });
+    if (rec.sinceImprovement >= 3) return awaitHuman(rec, "stall", { round: rec.round }, fingerprint, meta.context);
+    if (rec.uncappedStart !== null && rec.round >= rec.uncappedStart + 20) return awaitHuman(rec, "checkpoint", { round: rec.round }, fingerprint, meta.context);
   }
   rec.status = "needs_fixes";
   rec.awaiting = null;
@@ -169,13 +178,15 @@ export function applyRoundResult(rec, scored, findings, fingerprint) {
  * @param {ReturnType<typeof import("./state.mjs").newRecord>} rec
  * @param {string} reason
  * @param {Record<string, unknown>} [detail]
+ * @param {string | null} [fingerprint]
+ * @param {string | null} [context] the contextDigest a scored page was raised under; null for a page with no score
  */
-export function awaitHuman(rec, reason, detail = {}, fingerprint = rec.fingerprint ?? null) {
+export function awaitHuman(rec, reason, detail = {}, fingerprint = rec.fingerprint ?? null, context = null) {
   const options = OPTIONS[/** @type {keyof typeof OPTIONS} */ (reason)];
   if (!options) throw new ReviewLoopError("unknown_page_reason", `no page options defined for "${reason}"`);
   rec.status = "awaiting_human";
-  // The page is a decision about THIS fingerprint; accept/override later require the artifact to still be at it.
-  rec.awaiting = { reason, detail, options: [...options], fingerprint };
+  // The page is a decision about THIS fingerprint and context; accept/override later require both to still hold.
+  rec.awaiting = { reason, detail, options: [...options], fingerprint, context };
   return exitForAwaiting(reason);
 }
 
@@ -184,8 +195,9 @@ export function awaitHuman(rec, reason, detail = {}, fingerprint = rec.fingerpri
  * @param {ReturnType<typeof import("./state.mjs").newRecord>} rec
  * @param {string} option
  * @param {string | null} currentFingerprint
+ * @param {string | null} currentContext the contextDigest now; never "error" (contextNow throws instead)
  */
-export function applyDecision(rec, option, currentFingerprint) {
+export function applyDecision(rec, option, currentFingerprint, currentContext) {
   if (rec.status !== "awaiting_human" || !rec.awaiting) {
     throw new ReviewLoopError("invalid_decision", "this artifact is not awaiting a decision");
   }
@@ -194,8 +206,9 @@ export function applyDecision(rec, option, currentFingerprint) {
   if (!allowed.includes(option)) {
     throw new ReviewLoopError("invalid_decision", `"${option}" is not an option for ${reason}; allowed: ${allowed.join(", ")}`);
   }
-  if ((option === "accept" || option === "override") && (!currentFingerprint || rec.awaiting.fingerprint !== currentFingerprint)) {
-    throw new ReviewLoopError("decision_stale", "the artifact changed since this page was shown (or its state is unknown); re-run the round for a current page");
+  const contextMoved = typeof rec.awaiting.context === "string" && rec.awaiting.context !== currentContext;
+  if ((option === "accept" || option === "override") && (!currentFingerprint || rec.awaiting.fingerprint !== currentFingerprint || contextMoved)) {
+    throw new ReviewLoopError("decision_stale", "the artifact or its .claude/review-context.md changed since this page was shown (or its state is unknown); re-run the round for a current page");
   }
   const detail = /** @type {{ title?: string, file?: string | null }} */ (rec.awaiting.detail ?? {});
   rec.awaiting = null;
@@ -216,9 +229,10 @@ export function applyDecision(rec, option, currentFingerprint) {
       break;
     case "accept":
     case "override":
-      if (!currentFingerprint) throw new ReviewLoopError("invalid_decision", "cannot override: current fingerprint unknown");
+      if (!currentFingerprint || currentContext === null) throw new ReviewLoopError("invalid_decision", "cannot override: the current fingerprint or context is unknown");
       rec.status = "overridden";
       rec.reviewedFingerprint = currentFingerprint;
+      rec.reviewedContext = currentContext;
       break;
     case "stop":
       rec.status = "stopped";

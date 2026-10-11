@@ -2,6 +2,7 @@
 // (a stub inside a copy of the real plugin, pinned with the same pin code) and `gh` (a PATH stub).
 import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import { spawnSync, spawn } from "node:child_process";
@@ -93,6 +94,8 @@ const respond = (findings, extra = {}) =>
   fs.writeFileSync(stubOut, JSON.stringify({ result: { verdict: findings.length ? "needs-attention" : "approve", summary: "s", findings, next_steps: [] }, parseError: null, ...extra }));
 const finding = (title, severity = "medium", file = "docs/specs/feature.md") => ({ severity, title, body: "b", file, line_start: 1, line_end: 2, confidence: 0.9, recommendation: "r" });
 const stubCalls = () => fs.readFileSync(stubLog, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l));
+const sha256 = (/** @type {string} */ s) => crypto.createHash("sha256").update(s).digest("hex");
+const recordOf = (/** @type {string} */ key) => JSON.parse(fs.readFileSync(path.join(env.REVIEW_LOOP_STATE_DIR, "records", `${key}.json`), "utf8"));
 
 function specRepo() {
   const repo = makeRepo();
@@ -882,7 +885,7 @@ if (m.stdout) console.log(m.stdout); if (m.stderr) console.error(m.stderr); proc
   const key = /--key (\w+)/.exec(gate.out.hookSpecificOutput.permissionDecisionReason)?.[1];
   assert.ok(key, gate.out.hookSpecificOutput.permissionDecisionReason);
   const statusCalls = () => (fs.existsSync(ghLog) ? fs.readFileSync(ghLog, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l)) : []).filter((c) => c[3]?.startsWith("repos/me/proj/statuses/"));
-  return { a, bare, local, key, refsBefore, ghMap, f1, statusCalls };
+  return { a, up, bare, local, key, refsBefore, ghMap, f1, statusCalls };
 }
 
 test("branch loop: gate denies → round unshallows head, fetches base by exact ref, reviews --base <merge-base>; refs/remotes untouched", () => {
@@ -1088,4 +1091,121 @@ test("statuses: spec and impl rounds (no PR) post nothing", () => {
   writeFile(repo, "src/a.ts", "changed");
   assert.equal(cli(["run", "--kind", "impl", "--path", repo], onPath).code, 10);
   assert.deepEqual(gh.log(), []);
+});
+
+test("an unreadable .claude/review-context.md fails the round before any Codex call, and is not retryable", () => {
+  const repo = specRepo();
+  const spec = writeFile(repo, "docs/specs/feature.md", "x");
+  writeFile(repo, ".claude/review-context.md", "Trusted: everyone\n");
+  respond([]);
+  const r = cli(["run", "--kind", "spec", "--path", spec, "--project-root", repo]);
+  assert.deepEqual([r.code, r.json?.error?.code, r.json?.error?.retryable], [30, "review_context_invalid", false], r.stdout);
+  assert.equal(stubCalls().length, 0, "no Codex call");
+  assert.doesNotMatch(r.stdout, /everyone/, "the error names the path and the reason, never the content");
+});
+
+test("a context change after a pass makes the next run review again; a 900 KiB spec still reviews beside a context file", () => {
+  const repo = specRepo();
+  const spec = writeFile(repo, "docs/specs/feature.md", "x");
+  const run = () => cli(["run", "--kind", "spec", "--path", spec, "--project-root", repo]);
+  respond([]);
+  assert.equal(run().code, 0);
+  const same = run();
+  assert.deepEqual([same.code, same.json.status, stubCalls().length], [0, "passed", 1], "unchanged: the pass stands, no Codex call");
+  writeFile(repo, ".claude/review-context.md", "Trusted: admins\n");
+  const again = run();
+  assert.deepEqual([again.code, again.json.round, stubCalls().length], [0, 1, 2], "a new loop, reviewed under the new context");
+  assert.equal(recordOf(again.json.key).reviewedContext, sha256("Trusted: admins\n"));
+  fs.writeFileSync(spec, "y".repeat(900 * 1024));
+  assert.equal(run().code, 0, "the context's 8 KiB cap is its own, not the artifact's");
+});
+
+test("a page shown, the context changed, then accept: decision_stale, and the record is byte-identical", () => {
+  const repo = specRepo();
+  const spec = writeFile(repo, "docs/specs/feature.md", "x");
+  const args = ["--kind", "spec", "--path", spec, "--project-root", repo];
+  respond([finding("[Usability] x", "low")]);
+  let r = cli(["run", ...args]);
+  for (let i = 2; i <= 10; i++) r = cli(["run", ...args]);
+  assert.equal(r.code, 20, r.stdout);
+  writeFile(repo, ".claude/review-context.md", "Trusted: admins\n");
+  const shown = cli(["run", ...args]);
+  assert.deepEqual([shown.code, shown.json.awaiting.stale], [20, true], "the re-shown page says accept will be refused");
+  const file = path.join(env.REVIEW_LOOP_STATE_DIR, "records", `${r.json.key}.json`);
+  const before = fs.readFileSync(file);
+  const accept = cli(["decide", ...args, "--option", "accept"]);
+  assert.deepEqual([accept.code, accept.json?.error?.code], [30, "decision_stale"], accept.stdout);
+  assert.ok(fs.readFileSync(file).equals(before), "the record is byte-identical");
+  fs.rmSync(path.join(repo, ".claude", "review-context.md"));
+  assert.equal(cli(["decide", ...args, "--option", "accept"]).json.status, "overridden", "back at the page's context, accept works");
+});
+
+test("accept after the PR base was rewritten, with the context unchanged: decision_stale, and the record is byte-identical", () => {
+  const { up, bare, local, key, ghMap } = branchFixture();
+  respond([finding("[Usability] x", "low")]);
+  let r;
+  for (let i = 1; i <= 10; i++) r = cli(["run", "--key", key]);
+  assert.equal(r.json?.awaiting?.reason, "checkpoint", r.stdout);
+  // A base with no common history: the PR's comparison is a different one, while neither base has a context file.
+  g(up, "checkout", "-q", "--orphan", "rewritten");
+  const rewritten = commitFile(up, "z.txt", "z");
+  g(up, "push", "-q", "-f", bare, "rewritten:main");
+  g(local, "fetch", "-q", bare, "main");
+  const map = JSON.parse(fs.readFileSync(ghMap, "utf8"));
+  fs.writeFileSync(ghMap, JSON.stringify({ ...map, "api repos/me/proj/git/ref/heads/main --jq .object.sha": { stdout: rewritten } }));
+  const file = path.join(env.REVIEW_LOOP_STATE_DIR, "records", `${key}.json`);
+  const before = fs.readFileSync(file);
+  const accept = cli(["decide", "--key", key, "--option", "accept"]);
+  assert.deepEqual([accept.code, accept.json?.error?.code], [30, "decision_stale"], accept.stdout);
+  assert.ok(fs.readFileSync(file).equals(before), "the record is byte-identical");
+});
+
+test("a PR round reads its context at the base prepareBranch resolved, not the marker's older base", () => {
+  const { up, bare, key, ghMap } = branchFixture();
+  const fresh = commitFile(up, ".claude/review-context.md", "Trusted: admins\n");
+  g(up, "push", "-q", bare, "main");
+  const map = JSON.parse(fs.readFileSync(ghMap, "utf8"));
+  fs.writeFileSync(ghMap, JSON.stringify({ ...map, "api repos/me/proj/git/ref/heads/main --jq .object.sha": { stdout: fresh } }));
+  respond([]);
+  const r = cli(["run", "--key", key]);
+  assert.equal(r.code, 0, r.stdout);
+  assert.equal(recordOf(key).reviewedContext, sha256("Trusted: admins\n"), "the fresh base's file; the marker's base has none");
+});
+
+test("an in-repo spec's context comes from its own repository, whatever --project-root names", () => {
+  const repo = specRepo();
+  const other = specRepo();
+  const spec = writeFile(repo, "docs/specs/feature.md", "x");
+  writeFile(repo, ".claude/review-context.md", "Trusted: admins\n");
+  writeFile(other, ".claude/review-context.md", "Trusted: operators\n");
+  respond([]);
+  const r = cli(["run", "--kind", "spec", "--path", spec, "--project-root", other]);
+  assert.equal(r.code, 0, r.stdout);
+  assert.equal(recordOf(r.json.key).reviewedContext, sha256("Trusted: admins\n"), "the spec's repository, not the named one");
+  const focus = stubCalls().at(-1).args.find((/** @type {string} */ a) => a.startsWith("ARTIFACT UNDER REVIEW"));
+  assert.ok(focus?.includes(`PROJECT ROOT (read-only context; read whatever you need to verify claims): ${recordOf(r.json.key).meta.projectRoot}`));
+  assert.ok(!focus?.includes(other), "the other project is not named in the focus either");
+});
+
+test("a keyed run of an in-repo spec reads its own repository's context, whatever a stored project root says", () => {
+  const repo = specRepo();
+  const other = specRepo();
+  const spec = writeFile(repo, "docs/specs/feature.md", "x");
+  writeFile(repo, ".claude/review-context.md", "Trusted: admins\n");
+  writeFile(other, ".claude/review-context.md", "Trusted: operators\n");
+  respond([finding("[Reliability] retry storm", "medium")]);
+  const first = cli(["run", "--kind", "spec", "--path", spec, "--project-root", repo]);
+  assert.equal(first.code, 10, first.stdout);
+  const key = first.json.key;
+  // As a 1.0.x record written under --project-root <other> holds it.
+  const file = path.join(env.REVIEW_LOOP_STATE_DIR, "records", `${key}.json`);
+  const stale = JSON.parse(fs.readFileSync(file, "utf8"));
+  fs.writeFileSync(file, JSON.stringify({ ...stale, meta: { ...stale.meta, projectRoot: other } }), { mode: 0o600 });
+  const o = cli(["override", "--key", key]);
+  assert.equal(o.code, 0, o.stdout);
+  assert.deepEqual([recordOf(key).reviewedFingerprint, recordOf(key).reviewedContext], [sha256(fs.readFileSync(spec)), sha256("Trusted: admins\n")], "override reads the spec and its context under the spec's own root");
+  fs.appendFileSync(spec, "!");
+  respond([]);
+  assert.equal(cli(["run", "--key", key]).code, 0);
+  assert.equal(recordOf(key).reviewedContext, sha256("Trusted: admins\n"), "a keyed run resolves the root the same way");
 });

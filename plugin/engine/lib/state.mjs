@@ -5,7 +5,9 @@ import { ReviewLoopError } from "./errors.mjs";
 import { atomicWriteJson, readJsonValidated, isObject, sha256hex, assertNoLinkedParent } from "./fsutil.mjs";
 import { stateRoot, stateSubdir } from "./paths.mjs";
 import { emitEvent } from "./events.mjs";
-import { OPTIONS } from "./policy.mjs";
+import { OPTIONS, CLASS_CAP } from "./policy.mjs";
+import { DIMENSIONS } from "./scoring.mjs";
+import { LIKELIHOODS, WHYS, classKey } from "./value.mjs";
 import { isTreeRef } from "./pin.mjs";
 import { trustedPs, processIdent } from "./proc.mjs";
 
@@ -61,6 +63,74 @@ const isInt = (/** @type {unknown} */ n) => Number.isInteger(n) && /** @type {nu
 const isStrOrNull = (/** @type {unknown} */ s) => s === null || typeof s === "string";
 const isIntOrNull = (/** @type {unknown} */ n) => n === null || isInt(n);
 
+const isCount = (/** @type {unknown} */ n) => Number.isInteger(n) && /** @type {number} */ (n) >= 0 && /** @type {number} */ (n) <= 10_000;
+/** A context as a record keeps it: a file's sha256, "default" or "none". Never "error" (see gateContextDigest). */
+const isContextTag = (/** @type {unknown} */ v) => v === "default" || v === "none" || (typeof v === "string" && /^[0-9a-f]{64}$/.test(v));
+/** @param {Record<string, unknown>} o @param {readonly string[]} keys */
+const hasExactly = (o, keys) => Object.keys(o).length === keys.length && keys.every((k) => Object.hasOwn(o, k));
+const TRIAGE_KEYS = Object.freeze(["blocking", "advisory", "unvalued", "why", "likelihoods"]);
+const CLASS_KEYS = Object.freeze(["label", "key", "dimension", "rounds", "disposition"]);
+
+/** `<Dimension>:<normalized label>`, exactly as classKey builds it. @param {unknown} k */
+function isClassKey(k) {
+  if (typeof k !== "string") return false;
+  const i = k.indexOf(":");
+  const dimension = k.slice(0, i);
+  const label = k.slice(i + 1);
+  return i > 0 && DIMENSIONS.includes(dimension) && label.length >= 3 && label.length <= 80 && classKey(dimension, label) === k;
+}
+const isClassOrNull = (/** @type {unknown} */ k) => k === null || isClassKey(k);
+
+/** A history entry's triage: exact keys, bounded counts, and sums that agree. @param {unknown} t */
+function isTriage(t) {
+  if (!isObject(t) || !hasExactly(t, TRIAGE_KEYS)) return false;
+  if (![t.blocking, t.advisory, t.unvalued].every(isCount) || /** @type {number} */ (t.unvalued) > /** @type {number} */ (t.blocking)) return false;
+  if (!isObject(t.why) || !hasExactly(t.why, WHYS) || !Object.values(t.why).every(isCount)) return false;
+  const total = Object.values(t.why).reduce((/** @type {number} */ s, n) => s + /** @type {number} */ (n), 0);
+  return (
+    total === /** @type {number} */ (t.blocking) + /** @type {number} */ (t.advisory) &&
+    Array.isArray(t.likelihoods) &&
+    t.likelihoods.length === t.blocking &&
+    t.likelihoods.every((l) => l === null || LIKELIHOODS.includes(l))
+  );
+}
+
+/** @param {unknown} c */
+function isClassEntry(c) {
+  return (
+    isObject(c) &&
+    hasExactly(c, CLASS_KEYS) &&
+    typeof c.label === "string" &&
+    c.label.length <= 80 &&
+    typeof c.dimension === "string" &&
+    DIMENSIONS.includes(c.dimension) &&
+    c.key === classKey(c.dimension, c.label) &&
+    isClassKey(c.key) &&
+    Array.isArray(c.rounds) &&
+    c.rounds.length >= 1 &&
+    c.rounds.length <= 100 &&
+    c.rounds.every((r, i, all) => Number.isInteger(r) && r >= 1 && (i === 0 || r > all[i - 1])) &&
+    (c.disposition === "raised" || c.disposition === "disputed" || c.disposition === "waived")
+  );
+}
+
+/** @param {unknown} v */
+function isClasses(v) {
+  return Array.isArray(v) && v.length <= CLASS_CAP && v.every(isClassEntry) && new Set(v.map((c) => c.key)).size === v.length;
+}
+
+/** @param {unknown} f */
+function isLastFinding(f) {
+  return (
+    isObject(f) &&
+    typeof f.title === "string" &&
+    (f.file === undefined || isStrOrNull(f.file)) &&
+    typeof f.severity === "string" &&
+    (f.class === undefined || isClassOrNull(f.class)) &&
+    (f.blocking === undefined || typeof f.blocking === "boolean")
+  );
+}
+
 /** @param {unknown} v */
 export function isRecord(v) {
   return (
@@ -84,12 +154,17 @@ export function isRecord(v) {
       (isObject(v.meta.codex) && isStrOrNull(v.meta.codex.model) && isStrOrNull(v.meta.codex.effort) && isStrOrNull(v.meta.codex.source))) &&
     isStrOrNull(v.fingerprint) &&
     isStrOrNull(v.reviewedFingerprint) &&
+    // 1.1.0 fields: absent in a record 1.0.x wrote (hydrateRecord fills them), exact when present.
+    (v.reviewedContext === undefined || v.reviewedContext === null || isContextTag(v.reviewedContext)) &&
+    (v.sinceValue === undefined || isCount(v.sinceValue)) &&
+    (v.classes === undefined || isClasses(v.classes)) &&
+    (v.lastFindings === undefined || (Array.isArray(v.lastFindings) && v.lastFindings.every(isLastFinding))) &&
     Array.isArray(v.history) &&
-    v.history.every((h) => isObject(h) && isInt(h.round) && isInt(h.sumTenths)) &&
+    v.history.every((h) => isObject(h) && isInt(h.round) && isInt(h.sumTenths) && (h.triage === undefined || isTriage(h.triage)) && (h.context === undefined || isContextTag(h.context))) &&
     Array.isArray(v.disputes) &&
-    v.disputes.every((d) => isObject(d) && typeof d.title === "string" && typeof d.reason === "string" && isInt(d.raisedAgain)) &&
+    v.disputes.every((d) => isObject(d) && typeof d.title === "string" && typeof d.reason === "string" && isInt(d.raisedAgain) && (d.class === undefined || isClassOrNull(d.class))) &&
     Array.isArray(v.waivers) &&
-    v.waivers.every((w) => isObject(w) && typeof w.title === "string") &&
+    v.waivers.every((w) => isObject(w) && typeof w.title === "string" && (w.class === undefined || isClassOrNull(w.class))) &&
     (v.awaiting === null || isAwaiting(v.awaiting))
   );
 }
@@ -105,7 +180,8 @@ function isAwaiting(/** @type {unknown} */ a) {
     (a.detail === undefined || isObject(a.detail)) &&
     // repin trusts detail.tree as the identity of what the user approved: exact shape, or absent (repin then refuses).
     (a.reason !== "plugin_pin" || a.detail === undefined || a.detail.tree === undefined || a.detail.tree === null || isTreeRef(a.detail.tree)) &&
-    (a.fingerprint === undefined || isStrOrNull(a.fingerprint))
+    (a.fingerprint === undefined || isStrOrNull(a.fingerprint)) &&
+    (a.context === undefined || a.context === null || isContextTag(a.context))
   );
 }
 
@@ -123,9 +199,13 @@ export function newRecord(identity, meta = {}) {
     sinceImprovement: 0,
     fingerprint: null,
     reviewedFingerprint: null,
+    reviewedContext: /** @type {string | null} */ (null),
     history: [],
     disputes: [],
     waivers: [],
+    lastFindings: [],
+    classes: [],
+    sinceValue: 0,
     awaiting: null,
     lastError: null,
     errorAttempts: 0,
@@ -149,7 +229,26 @@ const markerPath = (/** @type {string} */ key) => path.join(stateRoot(), "marker
 
 /** @param {string} key */
 export function readRecord(key) {
-  return readJsonValidated(recordPath(key), isRecord, stateRoot());
+  const r = readJsonValidated(recordPath(key), isRecord, stateRoot());
+  return r === null ? null : hydrateRecord(r);
+}
+
+/**
+ * Fills what 1.1.0 added to a record 1.0.x wrote, before any policy code sees it, so every field is present in
+ * memory and the next write carries it. The record version stays 1.
+ * @param {ReturnType<typeof newRecord>} rec
+ */
+export function hydrateRecord(rec) {
+  rec.sinceValue ??= 0;
+  rec.classes ??= [];
+  // Identity holds no project root; meta says whether there was a project (and so a "default" context) at all.
+  if (rec.reviewedContext === undefined) rec.reviewedContext = typeof rec.meta.projectRoot === "string" ? "default" : "none";
+  // A 1.0.x finding was blocking under 1.0.x rules, and carried no class.
+  rec.lastFindings = (rec.lastFindings ?? []).map((f) => ({ ...f, class: f.class ?? null, blocking: f.blocking ?? true }));
+  rec.disputes = rec.disputes.map((d) => ({ ...d, class: d.class ?? null }));
+  rec.waivers = rec.waivers.map((w) => ({ ...w, class: w.class ?? null }));
+  if (rec.awaiting && rec.awaiting.context === undefined) rec.awaiting.context = null;
+  return rec;
 }
 
 /**

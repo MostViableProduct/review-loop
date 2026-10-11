@@ -64,7 +64,7 @@ export class HumanNeeded extends Error {
 /**
  * @typedef {import("./state.mjs").Identity} Identity
  * @typedef {{ nothing: true } | { nothing: false, fingerprint: string, cwd: string, targetArgs: string[], label: string,
- *   instructions: string, coveredScope: string, projectRoot: string | null, cleanup: () => void }} Prepared
+ *   instructions: string, coveredScope: string, projectRoot: string | null, baseSha?: string, cleanup: () => void }} Prepared
  */
 
 /**
@@ -216,6 +216,7 @@ async function prepareBranch(identity, key) {
     targetArgs: ["--base", mb],
     label: identityLabel(identity),
     projectRoot: root,
+    baseSha,
     instructions:
       `Review the pull-request diff ${mb.slice(0, 12)}..HEAD (${identity.headRepo}:${identity.headBranch} → ${identity.baseRepo}:${identity.baseBranch}). ` +
       `This is exactly the diff GitHub will show for the PR.`,

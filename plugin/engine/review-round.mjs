@@ -32,6 +32,7 @@ import { prepare, pushBranch, HumanNeeded, NON_RETRYABLE } from "./lib/round.mjs
 import { repoRoot, headSha, implFingerprint, mergeBaseValidity, readArtifact } from "./lib/git.mjs";
 import { pendingForSession, identityForTouchedPath } from "./lib/detect.mjs";
 import { ghBranchSha } from "./lib/github.mjs";
+import { readContext, contextDigest } from "./lib/context.mjs";
 import { postVerdict } from "./lib/status.mjs";
 
 const SESSION = process.env.CLAUDE_SESSION_ID ?? null;
@@ -55,6 +56,14 @@ async function resolveIdentity(v) {
     const marker = readMarker(v.key);
     const identity = rec?.identity ?? marker?.identity;
     if (!identity) throw new ReviewLoopError("unknown_key", `no record or marker for key ${v.key}`);
+    // A stored root (a marker's, or a 1.0.x record's from an older --project-root) never picks another project's context:
+    // an impl is its own root, and an in-repo spec or plan has its repository's.
+    if (identity.kind === "impl") return { identity, projectRoot: identity.path };
+    if (identity.kind === "spec" || identity.kind === "plan") {
+      const dir = path.dirname(identity.path);
+      const own = fs.existsSync(dir) ? await repoRoot(dir) : null;
+      if (own) return { identity, projectRoot: own };
+    }
     return { identity, projectRoot: marker?.projectRoot ?? /** @type {string | null} */ (rec?.meta?.projectRoot ?? null) };
   }
   const kind = v.kind;
@@ -74,7 +83,9 @@ async function resolveIdentity(v) {
   if (identity?.kind !== kind) {
     throw new ReviewLoopError("bad_args", `${abs} is not a ${kind} (specs/**/*.md, *-design.md, *-spec.md; plans/**/*.md, *-plan.md, ~/.claude/plans/*.md)`);
   }
-  const projectRoot = typeof v["project-root"] === "string" ? path.resolve(v["project-root"]) : root;
+  // In a repository the artifact's own root is the project root: the context file under it decides what blocks, so
+  // --project-root may name a root only for a plan outside any repository (~/.claude/plans), as the hooks print it.
+  const projectRoot = root ?? (typeof v["project-root"] === "string" ? path.resolve(v["project-root"]) : null);
   return { identity, projectRoot };
 }
 
@@ -96,19 +107,41 @@ function awaitingView(rec) {
 
 /**
  * Current fingerprint without running a review (for accept/override).
- * @param {import("./lib/state.mjs").Identity} identity @param {string} key @param {ReturnType<typeof newRecord>} rec
+ * @param {import("./lib/state.mjs").Identity} identity
+ * @param {string | null} projectRoot what resolveIdentity resolved: the artifact's own repository, never a stored root
+ * @param {{ root: string, baseSha: string } | null} base a PR's, from branchBaseNow; null for any other kind
  */
-async function fingerprintNow(identity, key, rec) {
-  const projectRoot = typeof rec.meta?.projectRoot === "string" ? rec.meta.projectRoot : null;
+async function fingerprintNow(identity, projectRoot, base) {
   if (identity.kind === "spec" || identity.kind === "plan") return sha256hex(readArtifact(identity.path, projectRoot));
   if (identity.kind === "impl") return (await implFingerprint(identity.path))?.fingerprint ?? null;
-  const marker = readMarker(key);
-  const root = marker?.projectRoot;
-  const baseSha = /** @type {{ baseSha?: string }} */ (marker?.extra ?? {}).baseSha;
-  if (!root || !baseSha) return null;
-  const head = await headSha(root);
-  const v = head ? await mergeBaseValidity(root, head, baseSha) : null;
+  if (!base) return null;
+  const head = await headSha(base.root);
+  const v = head ? await mergeBaseValidity(base.root, head, base.baseSha) : null;
   return v?.ok ? `${head}:${v.mergeBase}` : null;
+}
+
+/**
+ * A PR's base as of now, resolved once per decision: the branch's current commit on GitHub, as prepareBranch resolves
+ * it for a round. The fingerprint and the context are both checked against it, so they describe one comparison.
+ * @param {{ kind: "branch", baseRepo: string, baseBranch: string }} identity @param {string} key @param {string | null} projectRoot
+ * @returns {Promise<{ root: string, baseSha: string }>}
+ */
+async function branchBaseNow(identity, key, projectRoot) {
+  const root = readMarker(key)?.projectRoot ?? projectRoot;
+  if (!root) throw new ReviewLoopError("pr_base_unverifiable", "no repository is recorded for this PR, so its base can't be read; re-run the round");
+  return { root, baseSha: await ghBranchSha(identity.baseRepo, identity.baseBranch, root, { notFound: "pr_base_unverifiable", failed: "pr_base_unverifiable" }) };
+}
+
+/**
+ * The context now, for accept/override (spec D1). A PR's is read at `base`, the commit branchBaseNow resolved. An
+ * unreadable context throws review_context_invalid, so no decision ever binds one that wasn't read.
+ * @param {import("./lib/state.mjs").Identity} identity @param {string | null} projectRoot what resolveIdentity resolved
+ * @param {{ root: string, baseSha: string } | null} base a PR's, from branchBaseNow; null for any other kind
+ */
+async function contextNow(identity, projectRoot, base) {
+  if (identity.kind !== "branch") return contextDigest(await readContext(identity, projectRoot));
+  if (!base) throw new ReviewLoopError("pr_base_unverifiable", "the PR's base was not resolved; re-run the round");
+  return contextDigest(await readContext(identity, base.root, { baseSha: base.baseSha }));
 }
 
 /**
@@ -158,8 +191,12 @@ async function cmdRun(v) {
       clearMarker(key, identity);
       return out({ ...base, status: "nothing_to_review" }, EXIT.PASS);
     }
-    resetIfNewLoop(rec, prep.fingerprint);
-    if ((rec.status === "passed" || rec.status === "overridden") && rec.reviewedFingerprint === prep.fingerprint) {
+    // Read once, before any page or Codex call, so everything this round decides uses one context. A PR's is read at
+    // the base prepareBranch just resolved, never the marker's (it can be older than the base the diff is against).
+    const context = await readContext(identity, prep.projectRoot, { baseSha: prep.baseSha });
+    const contextTag = contextDigest(context);
+    resetIfNewLoop(rec, prep.fingerprint, contextTag);
+    if ((rec.status === "passed" || rec.status === "overridden") && rec.reviewedFingerprint === prep.fingerprint && rec.reviewedContext === contextTag) {
       clearMarker(key, identity);
       return out({ ...base, status: rec.status, round: rec.round, coveredScope: prep.coveredScope }, EXIT.PASS);
     }
@@ -167,7 +204,7 @@ async function cmdRun(v) {
     // clears it and a further-changed one is re-paged with the tree as it is now (a repin binds to that tree).
     if (rec.status === "awaiting_human" && rec.awaiting && rec.awaiting.reason !== "plugin_pin") {
       // Still the same page — but say so when the artifact moved on: accept/override on it will be refused.
-      const stale = rec.awaiting.fingerprint !== prep.fingerprint;
+      const stale = rec.awaiting.fingerprint !== prep.fingerprint || (typeof rec.awaiting.context === "string" && rec.awaiting.context !== contextTag);
       return out({ ...base, status: rec.status, round: rec.round, awaiting: { ...awaitingView(rec), stale } }, exitForAwaiting(rec.awaiting.reason));
     }
 
@@ -239,7 +276,7 @@ async function cmdRun(v) {
 
     const findings = withoutWaived(parsed.findings, rec.waivers);
     const scored = scoreFindings(findings);
-    const exit = applyRoundResult(rec, scored, findings, prep.fingerprint);
+    const exit = applyRoundResult(rec, scored, findings, prep.fingerprint, { context: contextTag });
     rec.lastFindings = findings.map((f) => ({ title: f.title, file: f.file, severity: f.severity }));
     rec.meta = { ...(rec.meta ?? {}), codex: { model: eff.model, effort: eff.effort, source: eff.source } };
     writeRecord(rec);
@@ -474,7 +511,7 @@ async function withLockedRecord(v, fn) {
   const lock = acquireLock(key, SESSION);
   try {
     const rec = readRecord(key) ?? newRecord(identity, { projectRoot });
-    return await fn(rec, key, identity);
+    return await fn(rec, key, identity, projectRoot);
   } finally {
     lock.release();
   }
@@ -484,12 +521,15 @@ async function withLockedRecord(v, fn) {
 async function cmdDecide(v) {
   if (typeof v.option !== "string") throw new ReviewLoopError("bad_args", "--option is required");
   const option = v.option;
-  return withLockedRecord(v, async (rec, key, identity) => {
-    const fp = option === "accept" || option === "override" ? await fingerprintNow(identity, key, rec) : rec.fingerprint;
+  return withLockedRecord(v, async (rec, key, identity, projectRoot) => {
+    const binding = option === "accept" || option === "override";
+    const base = binding && identity.kind === "branch" ? await branchBaseNow(identity, key, projectRoot) : null;
+    const fp = binding ? await fingerprintNow(identity, projectRoot, base) : rec.fingerprint;
     // applyDecision validates that this record is awaiting a page that offers `option`; only then may repin bless
     // the changed plugin files (the page showed them via awaiting.detail).
     const tree = /** @type {{ tree?: { version: string, digest: string } | null }} */ (rec.awaiting?.detail ?? {}).tree;
-    const reason = applyDecision(rec, option, fp);
+    const ctx = binding ? await contextNow(identity, projectRoot, base) : null;
+    const reason = applyDecision(rec, option, fp, ctx);
     if (option === "repin") {
       if (!tree) throw new ReviewLoopError("decision_stale", "the pin page recorded no plugin tree to approve; re-run the round");
       writePin(tree.version, tree);
@@ -528,11 +568,14 @@ async function cmdDispute(v) {
 /** "skip review" / kill switch: a visible, logged override at the current fingerprint. */
 async function cmdOverride(v) {
   const reason = typeof v.reason === "string" && v.reason.trim() ? v.reason.trim() : "user said skip review";
-  return withLockedRecord(v, async (rec, key, identity) => {
-    const fp = await fingerprintNow(identity, key, rec);
+  return withLockedRecord(v, async (rec, key, identity, projectRoot) => {
+    const base = identity.kind === "branch" ? await branchBaseNow(identity, key, projectRoot) : null;
+    const fp = await fingerprintNow(identity, projectRoot, base);
     if (!fp) throw new ReviewLoopError("override_unverifiable", "cannot compute the current fingerprint to override");
+    const context = await contextNow(identity, projectRoot, base);
     rec.status = "overridden";
     rec.reviewedFingerprint = fp;
+    rec.reviewedContext = context;
     rec.awaiting = null;
     rec.meta = { ...(rec.meta ?? {}), override: { reason, at: new Date().toISOString() } };
     writeRecord(rec);

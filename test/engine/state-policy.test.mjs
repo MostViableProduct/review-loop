@@ -30,7 +30,7 @@ const observe = (/** @type {string} */ file) => {
   const st = fs.lstatSync(file);
   return { raw: fs.readFileSync(file, "utf8"), mtimeMs: st.mtimeMs, ino: st.ino };
 };
-import { applyRoundResult, applyDecision, resetIfNewLoop, sameFinding, withoutWaived, EXIT } from "../../plugin/engine/lib/policy.mjs";
+import { applyRoundResult, applyDecision, resetIfNewLoop, awaitHuman, sameFinding, withoutWaived, EXIT } from "../../plugin/engine/lib/policy.mjs";
 import { scoreFindings } from "../../plugin/engine/lib/scoring.mjs";
 import { tmpDir } from "./helpers.mjs";
 import { sha256hex } from "../../plugin/engine/lib/fsutil.mjs";
@@ -45,7 +45,7 @@ beforeEach(() => {
 
 const ID = { kind: "spec", path: "/r/docs/specs/a.md" };
 const low = (t = "[Usability] x") => ({ severity: "low", title: t, file: "a.md" });
-const round = (rec, findings, fp = "fp") => applyRoundResult(rec, scoreFindings(findings), findings, fp);
+const round = (rec, findings, fp = "fp", context = "default") => applyRoundResult(rec, scoreFindings(findings), findings, fp, { context });
 
 test("a pending summary with any item field the prompt hook reads missing or mistyped is quarantined and read as absent", () => {
   const good = { key: "k", kind: "spec", label: "spec x", status: "pending", reason: null, command: "node x" };
@@ -462,7 +462,7 @@ test("capped mode: checkpoint at 10 → '10 more' → checkpoint at 20 with the 
   for (let i = 1; i < 10; i++) assert.equal(round(r, [low()]), EXIT.NEEDS_FIXES);
   assert.equal(round(r, [low()]), EXIT.CHECKPOINT);
   assert.deepEqual(r.awaiting?.options, ["continue", "more", "accept", "stop"]);
-  applyDecision(r, "more", "fp");
+  applyDecision(r, "more", "fp", "default");
   for (let i = 11; i < 20; i++) assert.equal(round(r, [low()]), EXIT.NEEDS_FIXES);
   assert.equal(round(r, [low()]), EXIT.CHECKPOINT);
   assert.equal(r.round, 20);
@@ -472,7 +472,7 @@ test("capped mode: checkpoint at 10 → '10 more' → checkpoint at 20 with the 
 test("uncapped mode: a stall (no improvement for 3 rounds) pages with the same options", () => {
   const r = newRecord(ID);
   for (let i = 0; i < 10; i++) round(r, [low()]);
-  applyDecision(r, "continue", "fp");
+  applyDecision(r, "continue", "fp", "default");
   assert.equal(r.mode, "uncapped");
   assert.equal(round(r, [low()]), EXIT.NEEDS_FIXES);
   assert.equal(round(r, [low()]), EXIT.NEEDS_FIXES);
@@ -483,7 +483,7 @@ test("uncapped mode: a stall (no improvement for 3 rounds) pages with the same o
 test("uncapped mode: improvement resets the stall counter; ceiling is 20 rounds after it began", () => {
   const r = newRecord(ID);
   for (let i = 0; i < 10; i++) round(r, [{ severity: "critical", title: "[Safety] a" }]);
-  applyDecision(r, "continue", "fp");
+  applyDecision(r, "continue", "fp", "default");
   const exits = ["high", "medium", "low", "low", "low", "low"].map((sev) => round(r, [{ severity: sev, title: "[Safety] a" }]));
   // high/medium/low each improve (counter stays 0); then three flat rounds → stall on the third.
   assert.deepEqual(exits, [10, 10, 10, 10, 10, 21]);
@@ -493,7 +493,7 @@ test("uncapped mode: improvement resets the stall counter; ceiling is 20 rounds 
 test("uncapped ceiling alone: 20 improving-or-flat rounds without a 3-round stall still checkpoint", () => {
   const r = newRecord(ID);
   for (let i = 0; i < 10; i++) round(r, [{ severity: "critical", title: "[Safety] a" }]);
-  applyDecision(r, "continue", "fp");
+  applyDecision(r, "continue", "fp", "default");
   r.sinceImprovement = 0;
   let exit;
   for (let i = 0; i < 20; i++) {
@@ -523,7 +523,7 @@ test("waive: the waived finding is excluded from later scoring", () => {
   r.disputes.push({ title: "[Safety] x", file: "a.md", reason: "r", raisedAgain: 2 });
   r.status = "awaiting_human";
   r.awaiting = { reason: "dispute_deadlock", detail: { title: "[Safety] x", file: "a.md" }, options: ["accept-finding", "waive", "stop"] };
-  applyDecision(r, "waive", "fp");
+  applyDecision(r, "waive", "fp", "default");
   const remaining = withoutWaived([{ severity: "high", title: "[Safety] x", file: "a.md" }], r.waivers);
   assert.equal(remaining.length, 0);
   assert.equal(round(r, remaining), EXIT.PASS);
@@ -533,11 +533,11 @@ test("decisions: invalid option rejected; accept clears only at the fingerprint 
   const r = newRecord(ID);
   for (let i = 0; i < 10; i++) round(r, [low()], "fp-scored");
   assert.equal(r.awaiting?.fingerprint, "fp-scored");
-  assert.throws(() => applyDecision(r, "waive", "fp-scored"), { code: "invalid_decision" });
-  assert.throws(() => applyDecision(r, "accept", "fp-edited-after-the-page"), { code: "decision_stale" });
-  assert.throws(() => applyDecision(r, "accept", null), { code: "decision_stale" });
+  assert.throws(() => applyDecision(r, "waive", "fp-scored", "default"), { code: "invalid_decision" });
+  assert.throws(() => applyDecision(r, "accept", "fp-edited-after-the-page", "default"), { code: "decision_stale" });
+  assert.throws(() => applyDecision(r, "accept", null, "default"), { code: "decision_stale" });
   assert.equal(r.status, "awaiting_human", "a refused decision leaves the page in place");
-  applyDecision(r, "accept", "fp-scored");
+  applyDecision(r, "accept", "fp-scored", "default");
   assert.equal(r.status, "overridden");
   assert.equal(r.reviewedFingerprint, "fp-scored");
 });
@@ -545,8 +545,8 @@ test("decisions: invalid option rejected; accept clears only at the fingerprint 
 test("a changed artifact after a terminal outcome starts a fresh loop", () => {
   const r = newRecord(ID);
   round(r, [], "fp1");
-  assert.equal(resetIfNewLoop(r, "fp1"), false);
-  assert.equal(resetIfNewLoop(r, "fp2"), true);
+  assert.equal(resetIfNewLoop(r, "fp1", "default"), false);
+  assert.equal(resetIfNewLoop(r, "fp2", "default"), true);
   assert.equal(r.round, 0);
   assert.equal(r.status, "pending");
 });
@@ -1050,4 +1050,103 @@ test("lock section: no leftovers — after a won race only the lock remains, aft
   assert.deepEqual(fs.readdirSync(locksDir()).filter((n) => n.startsWith(key)), [`${key}.lock`]);
   h.release();
   assert.deepEqual(fs.readdirSync(locksDir()).filter((n) => n.startsWith(key)), []);
+});
+
+test("records: each malformed 1.1.0 field quarantines the record at read", () => {
+  const good = () => {
+    const r = newRecord({ kind: "spec", path: "/r/docs/specs/q.md" }, { projectRoot: "/r" });
+    r.reviewedContext = "default";
+    return r;
+  };
+  const triage = { blocking: 1, advisory: 1, unvalued: 0, why: { critical: 0, unvalued: 0, accepted_risk: 0, money_data_security: 0, repeat_class: 0, realistic: 1, low_value: 1 }, likelihoods: ["plausible"] };
+  const cls = (/** @type {number} */ n) => ({ label: `class ${n}`, key: `Safety:class ${n}`, dimension: "Safety", rounds: [1], disposition: "raised" });
+  /** @type {Array<[string, (r: ReturnType<typeof good>) => void]>} */
+  const bad = [
+    ["an extra triage key", (r) => { r.history.push({ round: 1, sumTenths: 900, triage: { ...triage, extra: 1 } }); }],
+    ["a why sum that doesn't match", (r) => { r.history.push({ round: 1, sumTenths: 900, triage: { ...triage, why: { ...triage.why, low_value: 2 } } }); }],
+    ["a likelihood outside the enum", (r) => { r.history.push({ round: 1, sumTenths: 900, triage: { ...triage, likelihoods: ["likely"] } }); }],
+    ["a classes key with an unknown dimension", (r) => { r.classes = [{ ...cls(1), key: "Security:class 1", dimension: "Security" }]; }],
+    ["a duplicate class key", (r) => { r.classes = [cls(1), cls(1)]; }],
+    ["a 51st class", (r) => { r.classes = Array.from({ length: 51 }, (_, i) => cls(i)); }],
+    ["a non-boolean blocking", (r) => { r.lastFindings = [{ title: "[Safety] x", file: "a.md", severity: "high", class: null, blocking: /** @type {boolean} */ (/** @type {unknown} */ ("yes")) }]; }],
+    ["a bad context digest", (r) => { r.reviewedContext = "error"; }],
+    ["a bad history context", (r) => { r.history.push({ round: 1, sumTenths: 900, context: "abc" }); }],
+    ["a negative sinceValue", (r) => { r.sinceValue = -1; }],
+    ["a dispute class that isn't a class key", (r) => { r.disputes.push({ title: "t", reason: "r", raisedAgain: 0, class: "no dimension here" }); }]
+  ];
+  for (const [what, mutate] of bad) {
+    const r = good();
+    mutate(r);
+    writeRecord(r);
+    assert.equal(readRecord(identityKey(r.identity)), null, what);
+  }
+  const ok = good();
+  ok.history.push({ round: 1, sumTenths: 900, triage, context: "default" });
+  ok.classes = [cls(1)];
+  writeRecord(ok);
+  assert.ok(readRecord(identityKey(ok.identity)), "a well-formed record reads");
+});
+
+test("records written by 1.0.x hydrate: reviewedContext from meta.projectRoot, and every new field present", () => {
+  /** @type {Array<[{ kind: "spec" | "plan", path: string }, Record<string, unknown>, string]>} */
+  const cases = [
+    [{ kind: "spec", path: "/r/docs/specs/a.md" }, { projectRoot: "/r" }, "default"],
+    [{ kind: "plan", path: "/r/docs/plans/a.md" }, { projectRoot: "/r" }, "default"],
+    [{ kind: "plan", path: "/home/u/.claude/plans/a.md" }, {}, "none"]
+  ];
+  for (const [identity, meta, want] of cases) {
+    const r = /** @type {Record<string, unknown>} */ (newRecord(identity, meta));
+    for (const k of ["reviewedContext", "sinceValue", "classes", "lastFindings"]) delete r[k];
+    Object.assign(r, { status: "passed", reviewedFingerprint: "fp", lastFindings: [{ title: "[Safety] x", file: "a.md", severity: "high" }] });
+    /** @type {Array<Record<string, unknown>>} */ (r.disputes).push({ title: "[Safety] x", file: "a.md", reason: "r", raisedAgain: 0 });
+    writeRecord(/** @type {ReturnType<typeof newRecord>} */ (r));
+    const back = readRecord(identityKey(identity));
+    assert.ok(back, identity.path);
+    assert.equal(back.reviewedContext, want, identity.path);
+    assert.deepEqual([back.sinceValue, back.classes], [0, []]);
+    assert.deepEqual(back.lastFindings, [{ title: "[Safety] x", file: "a.md", severity: "high", class: null, blocking: true }]);
+    assert.equal(back.disputes[0].class, null);
+  }
+});
+
+test("a pass binds the context it was reviewed under; a changed context starts a new loop", () => {
+  const r = newRecord(ID);
+  round(r, []);
+  assert.deepEqual([r.status, r.reviewedContext, r.history.at(-1)?.context], ["passed", "default", "default"]);
+  assert.equal(resetIfNewLoop(r, "fp", "default"), false, "same fingerprint and context: the pass stands");
+  assert.equal(resetIfNewLoop(r, "fp", "a".repeat(64)), true, "a context change re-opens it");
+  assert.deepEqual([r.status, r.round], ["pending", 0]);
+});
+
+test("accept and override are refused when the context changed since the page; stop and continue are not refused when the context changed", () => {
+  const page = () => {
+    const r = newRecord(ID);
+    r.round = 9;
+    round(r, [{ severity: "low", title: "[Usability] x" }]);
+    assert.equal(r.awaiting?.reason, "checkpoint");
+    return r;
+  };
+  const r = page();
+  assert.equal(r.awaiting?.context, "default");
+  const before = JSON.stringify(r);
+  assert.throws(() => applyDecision(r, "accept", "fp", "b".repeat(64)), { code: "decision_stale" });
+  assert.equal(JSON.stringify(r), before, "nothing changed");
+  // No scored page offers override today; a page that does, raised under a context, is held to it the same way.
+  const offers = newRecord(ID);
+  awaitHuman(offers, "criss_cross", {}, "fp", "default");
+  const offered = JSON.stringify(offers);
+  assert.throws(() => applyDecision(offers, "override", "fp", "b".repeat(64)), { code: "decision_stale" });
+  assert.equal(JSON.stringify(offers), offered, "nothing changed");
+  applyDecision(r, "accept", "fp", "default");
+  assert.deepEqual([r.status, r.reviewedFingerprint, r.reviewedContext], ["overridden", "fp", "default"]);
+  for (const option of ["stop", "continue", "more"]) {
+    const p = page();
+    applyDecision(p, option, "fp", "b".repeat(64));
+    assert.notEqual(p.status, "awaiting_human", option);
+  }
+  const pin = newRecord(ID);
+  awaitHuman(pin, "plugin_pin", {}, "fp");
+  assert.equal(pin.awaiting?.context, null, "a page with no score records no context");
+  applyDecision(pin, "override", "fp", "c".repeat(64));
+  assert.equal(pin.reviewedContext, "c".repeat(64), "override binds the context current at the decision");
 });
