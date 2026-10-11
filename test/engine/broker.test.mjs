@@ -93,7 +93,8 @@ if (args[0] === "help") { console.log("Usage:\\n  ${usage}"); } else {
 }
 
 // The fake `codex app-server`: node (through a link named codex) runs this file from its cwd.
-const APP_SERVER = `import fs from "node:fs"; import { spawn } from "node:child_process";
+// CommonJS: Node before 22.7 runs an extensionless file as CommonJS and does not detect ESM syntax.
+const APP_SERVER = `const fs = require("node:fs"); const { spawn } = require("node:child_process");
 if (process.env.FAKE_BROKER_CHILD === "2") {
   const g = spawn("/bin/sleep", ["300"], { stdio: "ignore" });
   fs.appendFileSync(process.env.BROKER_KIDS, JSON.stringify({ pid: g.pid, grand: true }) + "\\n");
@@ -1600,9 +1601,14 @@ test("R2: a ws/plugin-* directory not shaped like a snapshot (plugin-old, plugin
     fs.utimesSync(d, old, old);
     return d;
   });
+  // A copy holding nothing but the pin's files: only its name keeps it from being swept as a legacy snapshot.
+  const copy = path.join(ws(), "plugin-copy");
+  legacySnapshot(copy);
+  fs.utimesSync(copy, old, old);
   const r = spawnSync(process.execPath, [ROUND, "sweep"], { env, encoding: "utf8" });
   assert.equal(JSON.parse(r.stdout).swept, 0, r.stdout);
   for (const d of theirs) assert.ok(fs.existsSync(path.join(d, "keep.txt")), `${path.basename(d)}: a name snapshotVerified never makes is not a snapshot`);
+  assert.ok(fs.existsSync(copy), "plugin-copy: a pin's files alone do not make a snapshot of a name snapshotVerified never makes");
 });
 
 test("R2: a sweep step that throws on a real error (EACCES) emits hook.error as well as its round.broker_stop", { timeout: 60_000 }, async () => {

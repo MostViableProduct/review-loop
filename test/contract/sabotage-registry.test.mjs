@@ -217,10 +217,36 @@ test("runner (−): a break that fails the file for another reason (syntax error
   assert.equal(f.gate(), GATE);
 });
 
-test("runner (−): a break that fails a different test than the named one is a wrong failure, exit 1", async () => {
+test("runner (−): a break that fails only a different test than the named one does not prove the row, exit 1", async () => {
   const f = fixture();
   assert.equal(await runSabotage({ root: f.root, rows: [row({ id: "other", expect: "G-2" })], out: f.out }), 1);
-  assert.match(f.text(), /^WRONG_FAILURE {2}other$/m);
+  // Only the named test runs, and it stays green: the test the break does fail is never counted for this row.
+  assert.match(f.text(), /^STAYED_GREEN {2}other$/m);
+  assert.equal(f.gate(), GATE);
+});
+
+test("runner: a row runs only its named test, so another test failing in the same file leaves its baseline green", async () => {
+  const f = fixture();
+  fs.writeFileSync(path.join(f.root, "mixed.test.mjs"), `${GATE_TEST}test("X-9: broken elsewhere", () => { throw new Error("red"); });\n`);
+  assert.equal(await runSabotage({ root: f.root, rows: [row({ id: "mixed", test: "mixed.test.mjs" })], out: f.out }), 0, f.text());
+  assert.match(f.text(), /^red \(expected\) {2}mixed$/m);
+});
+
+test("runner: a row naming a subtest made at run time is proven on the whole file, since the pattern skips its parent", async () => {
+  const f = fixture();
+  fs.writeFileSync(path.join(f.root, "sub.test.mjs"), `import test from "node:test";\nimport assert from "node:assert/strict";\nimport { LIMIT } from "./gate.mjs";\ntest("parent", async (t) => { await t.test("S-1: the limit, as a subtest", () => assert.equal(LIMIT, 3)); });\n`);
+  assert.equal(await runSabotage({ root: f.root, rows: [row({ id: "sub", test: "sub.test.mjs", expect: "S-1" })], out: f.out }), 0, f.text());
+  assert.match(f.text(), /^red \(expected\) {2}sub$/m);
+  assert.equal(f.gate(), GATE);
+});
+
+test("runner: a named test whose name holds regex characters is matched literally", async () => {
+  const f = fixture();
+  const name = "P (1): a+b? [x] $3.*";
+  // A failing neighbour: an unescaped pattern matches nothing, and the whole-file fallback then runs it, red.
+  fs.writeFileSync(path.join(f.root, "meta.test.mjs"), `import test from "node:test";\nimport assert from "node:assert/strict";\nimport { LIMIT } from "./gate.mjs";\ntest(${JSON.stringify(name)}, () => assert.equal(LIMIT, 3));\ntest("X-9: broken elsewhere", () => { throw new Error("red"); });\n`);
+  assert.equal(await runSabotage({ root: f.root, rows: [row({ id: "meta", test: "meta.test.mjs", expect: name })], out: f.out }), 0, f.text());
+  assert.match(f.text(), /^red \(expected\) {2}meta$/m);
 });
 
 test("runner (−): a link swapped in after the break is applied is refused, never written; exit 1 names the file", async () => {
