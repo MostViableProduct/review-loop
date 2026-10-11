@@ -253,6 +253,19 @@ test("classify: an accepted risk applies only inside its dimension and class; ou
   assert.deepEqual([unknown.blocking, unknown.flags.unknownAcceptedRisk], [true, true]);
 });
 
+test("classify: a finding that blocked last round and is raised again is judged afresh, never as a repeat of its own class", () => {
+  const prior = ctx({ prior: [classKey("Reliability", "retry policy")] });
+  const unfixed = { ...f("high", "[Reliability] retry is unbounded", val({ class: "retry policy" })), blockedLastRound: true };
+  assert.deepEqual([classify(unfixed, prior).why, classify(unfixed, prior).blocking], ["realistic", true]);
+  assert.equal(classify({ ...unfixed, blockedLastRound: false }, prior).why, "repeat_class", "another instance of the class is still a repeat");
+});
+
+test("parseValue: the class label is bounded as the record stores it, after normalizing", () => {
+  // "İ" lower-cases to two code units, so this 80-character label is 81 once normalized.
+  assert.deepEqual(parseValue(TRAILER.replace("class=cache key collision;", `class=İ${"x".repeat(79)};`)), { ok: false, reason: "bad_class" });
+  assert.equal(parseValue(TRAILER.replace("class=cache key collision;", `class=${"x".repeat(80)};`)).ok, true);
+});
+
 test("normalizeLabel and classKey: trimmed, whitespace collapsed, lower-cased, dimension-scoped", () => {
   assert.equal(normalizeLabel("  Retry\t Policy \n"), "retry policy");
   assert.equal(classKey("Safety", "Retry  Policy"), "Safety:retry policy");

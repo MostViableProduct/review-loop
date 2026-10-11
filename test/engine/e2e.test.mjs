@@ -1217,6 +1217,27 @@ test("a keyed run of an in-repo spec reads its own repository's context, whateve
   assert.equal(recordOf(key).reviewedContext, sha256("Trusted: admins\n"), "a keyed run resolves the root the same way");
 });
 
+test("an untouched ~/.claude/plans plan passed under one project's context is not re-opened by a session in another", () => {
+  const home = tmpDir("rl-e2e-home-");
+  const plans = path.join(home, ".claude", "plans");
+  fs.mkdirSync(plans, { recursive: true, mode: 0o700 });
+  const plan = path.join(plans, "shared.md");
+  fs.writeFileSync(plan, "a plan");
+  const a = specRepo();
+  writeFile(a, ".claude/review-context.md", "Trusted: admins\n");
+  respond([]);
+  const r = cli(["run", "--kind", "plan", "--path", plan, "--project-root", a], { HOME: home });
+  assert.equal(r.code, 0, r.stdout);
+  assert.equal(recordOf(r.json.key).reviewedContext, sha256("Trusted: admins\n"));
+  const b = specRepo();
+  const S = { session_id: "e2e-session-b", cwd: b, stop_hook_active: false };
+  hookRaw("session", JSON.stringify(S), { HOME: home });
+  const stop = hookRaw("stop", JSON.stringify(S), { HOME: home });
+  assert.notEqual(stop.out?.decision, "block", JSON.stringify(stop.out));
+  fs.appendFileSync(plan, "!");
+  assert.equal(hookRaw("stop", JSON.stringify(S), { HOME: home }).out?.decision, "block", "an edited plan still blocks");
+});
+
 test("a context-only change re-opens a passed impl at Stop, in the same session and in the next, and on removal", () => {
   const repo = specRepo();
   const S = { session_id: "e2e-session", cwd: repo };
@@ -1380,13 +1401,29 @@ test("prior classes: two findings of one class in one round are both judged as n
   assert.equal(cli(["dispute", ...args, "--finding", "0", "--reason", "keys include the inode"]).code, 0);
   fs.appendFileSync(spec, "!");
   respond([
-    valued("[Reliability] cache key collision on delete", "medium", { l: "plausible", i: "user_visible", c: "Cache  Keying" }),
+    valued("[Reliability] stale entries outlive a TTL change", "medium", { l: "plausible", i: "user_visible", c: "Cache  Keying" }),
     valued("[Reliability] cache key collision on create", "medium", { l: "real_path", i: "user_visible", c: "cache keying" })
   ]);
   const r2 = cli(["run", ...args]);
   assert.deepEqual(r2.json.findings.map((/** @type {{ why: string }} */ f) => f.why), ["repeat_class", "realistic"]);
   const focus = stubCalls()[1].args.find((/** @type {string} */ a) => a.startsWith("ARTIFACT UNDER REVIEW"));
   assert.ok(focus?.includes("- cache keying [Reliability]: raised in rounds 1; disputed"), focus);
+});
+
+test("an unfixed blocking finding still blocks the next round under its own class; another instance of the class is advisory", () => {
+  const repo = specRepo();
+  const spec = writeFile(repo, "docs/specs/feature.md", "x");
+  const args = ["--kind", "spec", "--path", spec, "--project-root", repo];
+  const unfixed = valued("[Reliability] retry is unbounded", "high", { l: "plausible", i: "user_visible", c: "retry policy" });
+  respond([unfixed]);
+  assert.equal(cli(["run", ...args]).code, 10);
+  fs.appendFileSync(spec, "!");
+  respond([unfixed, valued("[Reliability] reconnect has no jitter", "medium", { l: "plausible", i: "user_visible", c: "retry policy" })]);
+  const r2 = cli(["run", ...args]);
+  assert.deepEqual([r2.json.score.pass, r2.json.score.blocking], [false, 1], r2.stdout);
+  assert.deepEqual(r2.json.findings.map((/** @type {{ why: string }} */ f) => f.why), ["realistic", "repeat_class"]);
+  // Two failing rounds with only a plausible finding blocking: the value page, never a pass.
+  assert.deepEqual([r2.code, r2.json.awaiting?.reason], [21, "diminishing_returns"]);
 });
 
 test("a record written by 1.0.x completes rounds, pages diminishing_returns, and reloads with every new field present", () => {

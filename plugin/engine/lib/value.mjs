@@ -55,7 +55,7 @@ export const RULES = Object.freeze([
   { why: "unvalued", blocking: true, when: "the finding has no valid VALUE line" },
   { why: "accepted_risk", blocking: false, when: "it cites an accepted risk whose dimension and class both equal its own" },
   { why: "money_data_security", blocking: true, when: "impact is money_or_data or security, and likelihood is real_path, plausible or requires_misconfig" },
-  { why: "repeat_class", blocking: false, when: "its dimension and class were raised in an earlier round, and likelihood is not real_path" },
+  { why: "repeat_class", blocking: false, when: "its dimension and class were raised in an earlier round, it is not last round's blocking finding raised again, and likelihood is not real_path" },
   { why: "realistic", blocking: true, when: "severity is high or medium, and likelihood is real_path or plausible" },
   { why: "low_value", blocking: false, when: "anything else" }
 ]);
@@ -100,7 +100,8 @@ export function parseValue(body) {
   if (!LIKELIHOODS.includes(likelihood)) return { ok: false, reason: "bad_likelihood" };
   if (!IMPACTS.includes(impact)) return { ok: false, reason: "bad_impact" };
   if (!FIX_COSTS.includes(fixCost)) return { ok: false, reason: "bad_fix_cost" };
-  if (cls.length < 3 || cls.length > 80) return { ok: false, reason: "bad_class" };
+  // The record bounds the label as normalized, and lower-casing can lengthen it ("İ" is two code units after).
+  if (cls.length < 3 || cls.length > 80 || normalizeLabel(cls).length > 80) return { ok: false, reason: "bad_class" };
   if (actor !== "none" && (actor.length < 2 || actor.length > 60)) return { ok: false, reason: "bad_actor" };
   if (acceptedRisk !== "none" && !/^AR-\d{1,3}$/.test(acceptedRisk)) return { ok: false, reason: "bad_accepted_risk" };
   if (trigger.length < 1 || trigger.length > 240) return { ok: false, reason: "bad_trigger" };
@@ -110,7 +111,8 @@ export function parseValue(body) {
 /**
  * Blocking or advisory (spec D3). Codex's labels pass through two engine-side floors first, so the owner's inputs,
  * not Codex's word, decide who is out of scope and when a security, money or data finding may stop blocking.
- * @param {{ severity: string, title: string, value: Value | null }} finding
+ * @param {{ severity: string, title: string, value: Value | null, blockedLastRound?: boolean }} finding blockedLastRound: the
+ *   same finding blocked the previous round, so its class being "prior" is its own doing, not another instance
  * @param {TriageContext} ctx
  * @returns {Triage}
  */
@@ -142,7 +144,7 @@ export function classify(finding, ctx) {
     else flags.acceptedRiskOutOfScope = true;
   }
   if (HARMS.has(v.impact) && (likelihood === "real_path" || likelihood === "plausible" || likelihood === "requires_misconfig")) return done("money_data_security");
-  if (ctx.priorClasses.has(key) && likelihood !== "real_path") return done("repeat_class");
+  if (!finding.blockedLastRound && ctx.priorClasses.has(key) && likelihood !== "real_path") return done("repeat_class");
   if ((finding.severity === "high" || finding.severity === "medium") && (likelihood === "real_path" || likelihood === "plausible")) return done("realistic");
   return done("low_value");
 }

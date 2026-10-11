@@ -92,5 +92,6 @@ test("focus: prior finding classes, with their rounds and disposition", () => {
   const focus = focusWith({ classes: [{ label: "secrets-listing file-type hardening", dimension: "Safety", rounds: [9, 11], disposition: "disputed" }] });
   assert.ok(focus.includes("- secrets-listing file-type hardening [Safety]: raised in rounds 9, 11; disputed"));
   assert.ok(focus.includes("Do not raise another instance of a listed class unless its likelihood is real_path; reuse the label exactly when you do"));
+  assert.ok(focus.includes("A finding from the last round that is still present is not another instance: raise it again as before"), "an unfixed finding is re-raised, not dropped");
   assert.match(focusWith({}), /PRIOR FINDING CLASSES[^\n]*\n\(none\)/);
 });

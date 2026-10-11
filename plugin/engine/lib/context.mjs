@@ -46,7 +46,12 @@ export function parseContext(text) {
       if (!trusted.every((n) => TRUSTED_ACTORS.includes(n))) throw invalid(`Trusted: may list only ${TRUSTED_ACTORS.join(", ")}`);
       continue;
     }
-    if (!line.startsWith("- AR-")) continue;
+    // A near miss fails loudly: skipped, it would leave the owner believing an actor trusted or a risk accepted.
+    if (/^\s*trusted\s*:/i.test(line)) throw invalid("a line starts like `Trusted:` but is not `Trusted: <actor>, <actor>`");
+    if (!line.startsWith("- AR-")) {
+      if (/^\s*[-*+]\s*AR-\d/i.test(line)) throw invalid("an accepted-risk line must start with `- AR-` at the start of the line");
+      continue;
+    }
     const m = AR_LINE.exec(line);
     if (!m) throw invalid("an accepted-risk line does not match `- AR-<n> (<YYYY-MM-DD>) [<Dimension>] class=<label>: <text>`");
     if (accepted.has(m[1])) throw invalid("an accepted-risk id is defined twice");
@@ -64,17 +69,14 @@ function fromText(text, digest) {
 /** @param {string} root @returns {Context} */
 function fromTree(root) {
   const abs = path.join(root, CONTEXT_REL);
-  let dir;
   let st;
   try {
-    dir = fs.lstatSync(path.dirname(abs), { throwIfNoEntry: false });
     st = fs.lstatSync(abs, { throwIfNoEntry: false });
   } catch {
     throw invalid("its path cannot be looked up");
   }
-  // safeReadFile refuses a linked .claude only once there is a file to read, so check the directory first: an absent
-  // file behind a linked (or non-directory) .claude is refused, never taken for the default.
-  if (dir !== undefined && !dir.isDirectory()) throw invalid("its .claude directory is a link or not a directory");
+  // No file, even behind a linked .claude (shared across worktrees, or dotfiles), is the default: nothing is read, and
+  // trusting no actor is already the most conservative context. A file behind the link is refused by safeReadFile.
   if (st === undefined) return { kind: "default" };
   // Links on the path or below the root, non-regular files and the size are all checked before a byte is read.
   const buf = safeReadFile(abs, CONTEXT_MAX_BYTES, { missing: CODE, symlink: CODE, linkedParent: CODE, tooLarge: CODE, notFile: CODE }, { within: root });

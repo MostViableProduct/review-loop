@@ -214,7 +214,7 @@ waved through. Then the first matching rule decides:
 | 2 | the finding has no valid VALUE line | blocks | `unvalued` |
 | 3 | it cites an accepted risk whose dimension and class both equal its own | advisory | `accepted_risk` |
 | 4 | impact is money_or_data or security, and likelihood is real_path, plausible or requires_misconfig | blocks | `money_data_security` |
-| 5 | its dimension and class were raised in an earlier round, and likelihood is not real_path | advisory | `repeat_class` |
+| 5 | its dimension and class were raised in an earlier round, it is not last round's blocking finding raised again, and likelihood is not real_path | advisory | `repeat_class` |
 | 6 | severity is high or medium, and likelihood is real_path or plausible | blocks | `realistic` |
 | 7 | anything else | advisory | `low_value` |
 

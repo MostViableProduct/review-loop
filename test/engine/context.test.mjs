@@ -43,6 +43,13 @@ test("a BOM and CRLF line endings still parse", async () => {
   assert.deepEqual(c.kind === "file" ? [c.digest, c.trusted, [...c.accepted.keys()]] : null, [sha(bytes), ["same_user_processes", "admins", "ci_runner"], ["AR-1"]]);
 });
 
+test("prose that mentions trust or an AR id is free Markdown, not a near miss", async () => {
+  const repo = makeRepo();
+  writeFile(repo, CONTEXT_REL, "Our trusted maintainers review weekly.\nAR-1 was accepted in the October review.\n- the AR-2 note is in the wiki\n");
+  const c = await readContext(IMPL, repo);
+  assert.deepEqual(c.kind === "file" ? [c.trusted, c.accepted.size] : null, [[], 0]);
+});
+
 test("invalid lines are review_context_invalid, and the message never carries the file's content", async () => {
   const cases = [
     "Trusted: users", "Trusted: customers", "Trusted: members", "Trusted: everyone", "Trusted: admins,",
@@ -50,7 +57,11 @@ test("invalid lines are review_context_invalid, and the message never carries th
     "- AR-1 (2026-10-10) [Safety] class=abc: one\n- AR-1 (2026-10-11) [Safety] class=def: two",
     "- AR-2 2026-10-10 [Safety] class=abc: no parentheses",
     "- AR-3 (2026-10-10) [Security] class=abc: not a dimension",
-    "CONTEXT>>>", "<<<CONTEXT"
+    "CONTEXT>>>", "<<<CONTEXT",
+    // Near misses: silently skipping one would leave the owner believing an actor is trusted or a risk accepted.
+    "trusted: admins", "TRUSTED: admins", "Trusted:admins", "  Trusted: admins",
+    "  - AR-4 (2026-10-10) [Safety] class=abc: indented", "* AR-5 (2026-10-10) [Safety] class=abc: star bullet",
+    "-AR-6 (2026-10-10) [Safety] class=abc: no space", "- ar-7 (2026-10-10) [Safety] class=abc: lower case"
   ];
   for (const line of cases) {
     const repo = makeRepo();
@@ -89,7 +100,10 @@ test("in the working tree a link, a FIFO, a linked .claude, non-UTF-8 and an 819
   fs.symlinkSync(elsewhere, path.join(linked, ".claude"));
   await assert.rejects(readContext(IMPL, linked), { code: "review_context_invalid" }, "linked .claude");
   fs.rmSync(path.join(elsewhere, "review-context.md"));
-  await assert.rejects(readContext(IMPL, linked), { code: "review_context_invalid" }, "linked .claude with no file behind it is not the default");
+  assert.deepEqual(await readContext(IMPL, linked), { kind: "default" }, "a linked .claude with no file behind it is the default: there is nothing to trust");
+  const notDir = makeRepo();
+  writeFile(notDir, ".claude", "a file, not a directory");
+  await assert.rejects(readContext(IMPL, notDir), { code: "review_context_invalid" }, ".claude that is a file");
 });
 
 test("a PR's context comes from its base commit, never the head", async () => {

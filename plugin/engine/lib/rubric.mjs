@@ -102,7 +102,7 @@ export function buildFocus(p) {
     "re-raise it (same title) only with new, concrete evidence:",
     disputeBlock,
     "",
-    "PRIOR FINDING CLASSES. Do not raise another instance of a listed class unless its likelihood is real_path; reuse the label exactly when you do:",
+    "PRIOR FINDING CLASSES. Do not raise another instance of a listed class unless its likelihood is real_path; reuse the label exactly when you do. A finding from the last round that is still present is not another instance: raise it again as before:",
     classBlock
   ]
     .filter((l) => l !== null)

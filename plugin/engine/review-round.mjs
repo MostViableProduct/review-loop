@@ -24,7 +24,7 @@ import {
   stateSubdir,
   assertKey
 } from "./lib/state.mjs";
-import { EXIT, optionLabel, updateClasses, refreshDispositions, applyRoundResult, applyDecision, awaitHuman, resetIfNewLoop, withoutWaived, exitForAwaiting } from "./lib/policy.mjs";
+import { EXIT, optionLabel, updateClasses, refreshDispositions, applyRoundResult, applyDecision, awaitHuman, resetIfNewLoop, withoutWaived, exitForAwaiting, sameFinding } from "./lib/policy.mjs";
 import { parseValue, classify, triageCounts, classKey } from "./lib/value.mjs";
 import { scoreFindings, parseDimensionTag } from "./lib/scoring.mjs";
 import { verifyPin, verifyUsage, runCompanion, parseCompanionOutput, companionFailureText, writePin, pinFile, installedTreeDigest, snapshotVerified, stopCompanionBroker, sweepStaleSnapshots, afterSnapshotSecond, countOrphanBrokers, stopOrphan, STOP_DEADLINE_MS, SWEEP_MANUAL_DEADLINE_MS, SNAPSHOT_NAME, sweepEventData } from "./lib/pin.mjs";
@@ -289,7 +289,9 @@ async function cmdRun(v) {
     const rows = findings.map((f) => {
       const parsedValue = parseValue(f.body);
       const value = parsedValue.ok ? parsedValue.value : null;
-      return { finding: f, severity: f.severity, dimension: parseDimensionTag(f.title).dimension, value, triage: classify({ severity: f.severity, title: f.title, value }, triageCtx) };
+      // Read before rec.lastFindings is replaced below: a finding left unfixed must not turn into a repeat of its own class.
+      const blockedLastRound = (rec.lastFindings ?? []).some((p) => p.blocking && sameFinding(p, f));
+      return { finding: f, severity: f.severity, dimension: parseDimensionTag(f.title).dimension, value, triage: classify({ severity: f.severity, title: f.title, value, blockedLastRound }, triageCtx) };
     });
     const blocking = rows.filter((r) => r.triage.blocking).map((r) => r.finding);
     const counts = triageCounts(rows);

@@ -401,6 +401,22 @@ These are copied from the spec, and every task implicitly includes them.
   reads "assume a small team and internet-facing users, and trust no actor", matching the empty trusted set.
 - Value-triage verification item 12: a `checkpoint` page comes from a scored round, so the unscored-page test uses
   `plugin_pin`, the unscored page an e2e test can raise.
+- Value-triage final review (fixes to the plan, each pinned by the sabotage row named):
+  - Rule 5 skips a finding that `sameFinding`-matches a blocking entry of the previous round's `lastFindings`
+    (`classify`'s `blockedLastRound`). D4 aims rule 5 at "another instance of a listed class"; without this, a
+    plausible blocker left unfixed turned advisory one round later and the gate could pass with it. The focus adds
+    "A finding from the last round that is still present is not another instance: raise it again as before".
+    Rows `classify-unfixed-exempt`, `round-unfixed-exempt`, `focus-unfixed-reraise`.
+  - The Stop gate's context check skips `~/.claude/plans`: those plans are listed whatever the project, so each
+    project's context re-opened every untouched plan reviewed under another's (the spec assumed such a plan has no
+    project root). A plan the session edits is still reviewed. Row `plans-context-scope`.
+  - A linked `.claude` with no context file behind it is the default (the plan refused it, failing every review and
+    override in a repo whose `.claude` is shared). Nothing is read, and the default trusts no actor; a file behind the
+    link is still refused. Row `context-linked-dir-default`.
+  - `parseValue` also bounds the class label as normalized, the form `isClassKey` checks: lower-casing can lengthen a
+    label, and an over-long key quarantined the record. Row `class-label-normalized`.
+  - `parseContext` rejects a near-miss `Trusted:` or accepted-risk line (case, spacing, indent, another bullet) instead
+    of skipping it. Rows `context-near-miss-trusted`, `context-near-miss-ar`.
 
 ## Probes
 

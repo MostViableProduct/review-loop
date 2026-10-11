@@ -334,8 +334,10 @@ async function scanSession(session, cwd) {
     }
     for (const a of list) if (baseline.artifacts[a.key] !== a.fingerprint) candidates.push(a);
     // A context changed since a pass re-opens it even when this session's baseline already holds the change (it was
-    // made between sessions): the record, not the baseline, says which context the pass was bound to.
-    for (const a of list) {
+    // made between sessions): the record, not the baseline, says which context the pass was bound to. Not for
+    // ~/.claude/plans: its plans are listed whatever the project, so each project's context would re-open every
+    // untouched plan reviewed under another's. A plan this session edits is still a candidate above.
+    for (const a of baseRoot === CLAUDE_PLANS_DIR ? [] : list) {
       if (candidates.some((c) => c.key === a.key)) continue;
       const rec = readRecord(a.key);
       if (rec && (rec.status === "passed" || rec.status === "overridden") && rec.reviewedFingerprint === a.fingerprint && rec.reviewedContext !== (await contextOf(a))) candidates.push(a);
