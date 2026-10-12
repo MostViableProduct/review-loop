@@ -64,6 +64,8 @@ jobs:
           CONTENT_GATE_DENYLIST: ${{ secrets.CONTENT_GATE_DENYLIST }}
         run: node scripts/content-gate.mjs --tracked --require-private
       - run: npm test
+      # A zone other than UTC: without one, row snapshot-owner-tz-pin's break (ps without TZ=UTC) changes nothing.
+      - run: sudo systemsetup -settimezone America/New_York && date
       - run: npm run sabotage
       - name: Build the tarball from the allowlisted set, then re-gate it
         id: tarball

@@ -241,6 +241,23 @@ test("BSD `sed -i ''` appears only in jobs that run on macOS (both repos)", () =
   assert.ok(checked >= 5, `found ${checked} jobs`);
 });
 
+test("every job that runs `npm run sabotage` sets a time zone other than UTC in an earlier step", () => {
+  // Runners are on UTC, where row snapshot-owner-tz-pin's break (ps without TZ=UTC) changes nothing and stays green.
+  /** @type {string[]} */
+  const found = [];
+  for (const f of fs.readdirSync(".github/workflows")) {
+    for (const j of jobs(fs.readFileSync(path.join(".github/workflows", f), "utf8"))) {
+      const s = steps(j.text);
+      const at = s.findIndex((t) => /^ {6}- run: npm run sabotage$/m.test(t));
+      if (at < 0) continue;
+      found.push(`${f}:${j.name}`);
+      const zone = s.slice(0, at).some((t) => /systemsetup -settimezone (?!UTC\b|GMT\b)\S+/.test(t));
+      assert.ok(zone, `${f} job ${j.name} runs sabotage without first setting a zone other than UTC`);
+    }
+  }
+  assert.deepEqual(found.sort(), ["release.yml:release", "sabotage.yml:sabotage"]);
+});
+
 test("the tap gets a formula only from tap-formula, naming the release archive; before the first release it has none", () => {
   const release = jobs(RELEASE_YML).find((j) => j.name === "release")?.text ?? "";
   const tap = jobs(RELEASE_YML).find((j) => j.name === "tap-bump")?.text ?? "";
