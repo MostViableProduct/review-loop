@@ -25,7 +25,7 @@ import {
   assertKey
 } from "./lib/state.mjs";
 import { EXIT, optionLabel, updateClasses, refreshDispositions, applyRoundResult, applyDecision, awaitHuman, resetIfNewLoop, withoutWaived, exitForAwaiting, sameFinding } from "./lib/policy.mjs";
-import { parseValue, classify, triageCounts, classKey } from "./lib/value.mjs";
+import { parseValue, classify, triageCounts, classKey, selectReported } from "./lib/value.mjs";
 import { scoreFindings, parseDimensionTag } from "./lib/scoring.mjs";
 import { verifyPin, verifyUsage, runCompanion, parseCompanionOutput, companionFailureText, writePin, pinFile, installedTreeDigest, snapshotVerified, stopCompanionBroker, sweepStaleSnapshots, afterSnapshotSecond, countOrphanBrokers, stopOrphan, STOP_DEADLINE_MS, SWEEP_MANUAL_DEADLINE_MS, SNAPSHOT_NAME, sweepEventData } from "./lib/pin.mjs";
 import { loadRubricSection, buildFocus } from "./lib/rubric.mjs";
@@ -295,10 +295,11 @@ async function cmdRun(v) {
     });
     const blocking = rows.filter((r) => r.triage.blocking).map((r) => r.finding);
     const counts = triageCounts(rows);
+    const report = selectReported(rows);
     const scored = scoreFindings(blocking);
     const exit = applyRoundResult(rec, scored, blocking, prep.fingerprint, { context: contextTag, triage: counts.history });
     rec.lastFindings = rows.map((r) => ({ title: r.finding.title, file: r.finding.file, severity: r.finding.severity, class: r.value ? classKey(r.dimension, r.value.class) : null, blocking: r.triage.blocking }));
-    updateClasses(rec, rows.flatMap((r) => (r.value ? [{ dimension: r.dimension, label: r.value.class }] : [])));
+    updateClasses(rec, report.reported.flatMap(({ row: r }) => (r.value ? [{ dimension: r.dimension, label: r.value.class }] : [])));
     rec.meta = { ...(rec.meta ?? {}), codex: { model: eff.model, effort: eff.effort, source: eff.source } };
     writeRecord(rec);
     if (exit === EXIT.PASS) clearMarker(key, identity);
@@ -327,7 +328,10 @@ async function cmdRun(v) {
         duration_ms: Date.now() - started,
         scored: true,
         ...contextFields(context),
-        ...counts.event
+        ...counts.event,
+        advisory_shown: report.shown,
+        advisory_omitted: report.omitted,
+        accepted_risk_distinct: report.distinct
       }
     });
 
@@ -348,9 +352,12 @@ async function cmdRun(v) {
           blocking: counts.history.blocking,
           advisory: counts.history.advisory,
           unvalued: counts.history.unvalued,
+          advisory_shown: report.shown,
+          advisory_omitted: report.omitted,
+          accepted_risk_distinct: report.distinct,
           dimensions: scored.dimensions.map((d) => ({ name: d.name, score: d.score, worst: d.worst, count: d.count }))
         },
-        findings: rows.map((r, i) => ({
+        findings: report.reported.map(({ row: r, i }) => ({
           i,
           dimension: r.dimension,
           severity: r.finding.severity,

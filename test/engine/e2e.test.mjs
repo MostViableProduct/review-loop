@@ -1479,3 +1479,157 @@ test("round.result: a context-invalid round and a plugin_pin page are unscored; 
   const b = roundResults().at(-1).data.context_digest;
   assert.deepEqual([a, b], [sha256("Trusted: admins\n").slice(0, 12), sha256("Trusted: operators\n").slice(0, 12)]);
 });
+
+const CTX_AR = (/** @type {number} */ n) => Array.from({ length: n }, (_, k) => `- AR-${k + 1} (2026-10-29) [Usability] class=ar class ${k + 1}: accepted`).join("\n") + "\n";
+const adv = (/** @type {string} */ title, /** @type {string} */ c, /** @type {string} */ impact = "user_visible", /** @type {string} */ ar = "none") => valued(title, "low", { l: "plausible", i: impact, c, ar });
+const runSpec = (/** @type {string | null} */ ctx = null) => {
+  const repo = specRepo();
+  const spec = writeFile(repo, "docs/specs/feature.md", "x");
+  if (ctx !== null) writeFile(repo, ".claude/review-context.md", ctx);
+  return () => cli(["run", "--kind", "spec", "--path", spec, "--project-root", repo]);
+};
+
+test("advisory cap: eight advisory findings report five, and the rest are counted, recorded and absent from history likelihoods", () => {
+  const run = runSpec();
+  respond(Array.from({ length: 8 }, (_, n) => adv(`[Usability] copy ${n}`, `copy ${n}`)));
+  const r = run();
+  assert.deepEqual([r.code, r.json.status, r.json.findings.length], [0, "passed", 5], r.stdout);
+  assert.deepEqual(r.json.findings.map((/** @type {{ i: number }} */ x) => x.i), [0, 1, 2, 3, 4]);
+  assert.deepEqual([r.json.score.advisory, r.json.score.advisory_shown, r.json.score.advisory_omitted], [8, 5, 3]);
+  const ev = roundResults().at(-1).data;
+  assert.deepEqual([ev.advisory, ev.advisory_shown, ev.advisory_omitted, ev.accepted_risk_distinct, ev.likelihoods.plausible], [8, 5, 3, 0, 8]);
+  const rec = recordOf(r.json.key);
+  assert.equal(rec.lastFindings.length, 8, "the record keeps every finding");
+  assert.equal(rec.classes.length, 5, "but only the shown findings' classes enter the class memory");
+  assert.ok(rec.lastFindings.every((/** @type {{ title: string, file: string, severity: string, class: string | null, blocking: boolean }} */ x) => x.title && x.file && x.severity && x.class && x.blocking === false));
+  assert.deepEqual(rec.history.at(-1).triage.likelihoods, [], "history likelihoods hold blocking findings only");
+});
+
+test("advisory cap: blocking findings are never omitted", () => {
+  const run = runSpec();
+  respond([
+    ...Array.from({ length: 8 }, (_, n) => adv(`[Usability] copy ${n}`, `copy ${n}`)),
+    valued("[Safety] a real bug", "high", { l: "real_path", i: "user_visible", c: "bug one" }),
+    valued("[Safety] another real bug", "high", { l: "real_path", i: "user_visible", c: "bug two" })
+  ]);
+  const r = run();
+  assert.deepEqual([r.code, r.json.findings.length, r.json.score.blocking, r.json.score.advisory_omitted], [10, 7, 2, 3], r.stdout);
+});
+
+test("advisory cap: a real-path low blocks through the production path, and the event keeps the distinction", () => {
+  const run = runSpec();
+  respond([valued("[Usability] vague copy", "low", { l: "real_path", i: "user_visible", c: "copy" })]);
+  const r = run();
+  assert.deepEqual([r.code, r.json.status, r.json.findings[0].why, r.json.findings[0].blocking], [10, "needs_fixes", "real_path_low", true], r.stdout);
+  assert.ok(r.json.score.dimensions.find((/** @type {{ name: string }} */ d) => d.name === "Usability").score <= 9.1);
+  const rec = recordOf(r.json.key);
+  assert.equal(rec.history.at(-1).triage.why.realistic, 1, "folded into realistic in the record");
+  assert.ok(!("real_path_low" in rec.history.at(-1).triage.why));
+  assert.equal(roundResults().at(-1).data.why_real_path_low, 1);
+});
+
+test("advisory cap: a real-path low downgraded by an in-scope accepted risk is advisory (rule 3 before the real-path rule) and is shown", () => {
+  const run = runSpec(CTX_AR(1));
+  respond([valued("[Usability] ar real path", "low", { l: "real_path", i: "operator_visible", c: "ar class 1", ar: "AR-1" })]);
+  const r = run();
+  assert.deepEqual([r.code, r.json.status, r.json.findings[0].why, r.json.findings[0].blocking], [0, "passed", "accepted_risk", false], r.stdout);
+  assert.match(r.json.findings[0].accepted_risk_text, /AR-1 \(2026-10-29\) \[Usability\] class=ar class 1: accepted/);
+  assert.deepEqual([r.json.score.advisory_shown, r.json.score.accepted_risk_distinct], [1, 1]);
+  const ev = roundResults().at(-1).data;
+  assert.deepEqual([ev.why_accepted_risk, ev.why_real_path_low, ev.accepted_risk_distinct], [1, 0, 1]);
+});
+
+test("advisory cap: six accepted risks are all reported, with five other advisory findings", () => {
+  const run = runSpec(CTX_AR(6));
+  respond([
+    ...Array.from({ length: 6 }, (_, n) => adv(`[Usability] ar finding ${n + 1}`, `ar class ${n + 1}`, "operator_visible", `AR-${n + 1}`)),
+    ...Array.from({ length: 6 }, (_, n) => adv(`[Usability] other ${n}`, `other class ${n}`))
+  ]);
+  const r = run();
+  assert.equal(r.code, 0, r.stdout);
+  assert.deepEqual(r.json.findings.map((/** @type {{ i: number }} */ x) => x.i), [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+  assert.deepEqual(r.json.findings.slice(0, 6).map((/** @type {{ why: string }} */ x) => x.why), Array(6).fill("accepted_risk"));
+  assert.match(r.json.findings[0].accepted_risk_text, /AR-1 \(2026-10-29\) \[Usability\] class=ar class 1: accepted/);
+  assert.equal(r.json.score.accepted_risk_distinct, 6, "the CLI score carries the same distinct count as the event");
+  const ev = roundResults().at(-1).data;
+  assert.deepEqual([ev.advisory_shown, ev.advisory_omitted, ev.accepted_risk_distinct, ev.why_accepted_risk], [11, 1, 6, 6]);
+});
+
+test("advisory cap: eight findings citing one accepted risk report one representative and five others", () => {
+  const run = runSpec(CTX_AR(1));
+  respond([
+    ...Array.from({ length: 8 }, (_, n) => adv(`[Usability] ar finding ${n}`, "ar class 1", "operator_visible", "AR-1")),
+    ...Array.from({ length: 7 }, (_, n) => adv(`[Usability] other ${n}`, `other class ${n}`))
+  ]);
+  const r = run();
+  assert.deepEqual(r.json.findings.map((/** @type {{ i: number }} */ x) => x.i), [0, 8, 9, 10, 11, 12], r.stdout);
+  const ev = roundResults().at(-1).data;
+  assert.deepEqual([ev.advisory_shown, ev.advisory_omitted, ev.accepted_risk_distinct], [6, 9, 1]);
+});
+
+test("advisory cap: a finding citing an accepted risk of another dimension is not a representative", () => {
+  const run = runSpec("- AR-1 (2026-10-29) [Usability] class=copy: accepted\n");
+  respond([
+    valued("[Reliability] copy", "low", { l: "plausible", i: "none", c: "copy", ar: "AR-1" }),
+    ...Array.from({ length: 6 }, (_, n) => adv(`[Usability] other ${n}`, `other class ${n}`))
+  ]);
+  const r = run();
+  assert.deepEqual(r.json.findings.map((/** @type {{ i: number }} */ x) => x.i), [1, 2, 3, 4, 5]);
+  const ev = roundResults().at(-1).data;
+  assert.deepEqual([ev.accepted_risk_distinct, ev.advisory_omitted, ev.accepted_risk_out_of_scope], [0, 2, 1]);
+});
+
+test("advisory cap: a dispute uses the original index the report shows, past an omitted advisory finding", () => {
+  const repo = specRepo();
+  const spec = writeFile(repo, "docs/specs/feature.md", "x");
+  const args = ["--kind", "spec", "--path", spec, "--project-root", repo];
+  respond([
+    ...Array.from({ length: 6 }, (_, n) => adv(`[Usability] copy ${n}`, `copy ${n}`)),
+    valued("[Safety] real bug", "high", { l: "real_path", i: "user_visible", c: "bug one" })
+  ]);
+  const r = cli(["run", ...args]);
+  assert.equal(r.code, 10, r.stdout);
+  const bug = r.json.findings.find((/** @type {{ blocking: boolean }} */ x) => x.blocking);
+  assert.equal(bug.i, 6, "the blocking finding keeps its original index; advisory #5 was omitted");
+  const omitted = cli(["dispute", ...args, "--finding", "5", "--reason", "not evidence"]);
+  assert.deepEqual([omitted.code, omitted.json?.error?.code], [30, "dispute_advisory"], omitted.stdout);
+  assert.deepEqual(recordOf(r.json.key).disputes, [], "disputing the omitted advisory index changes nothing");
+  assert.equal(cli(["dispute", ...args, "--finding", String(bug.i), "--reason", "fixed at src/a.ts:1"]).code, 0);
+  assert.equal(recordOf(r.json.key).disputes[0].title, "[Safety] real bug");
+});
+
+test("advisory cap: an omitted advisory class is not remembered; a shown one still downgrades its repeat", () => {
+  const repo = specRepo();
+  const spec = writeFile(repo, "docs/specs/feature.md", "x");
+  const args = ["--kind", "spec", "--path", spec, "--project-root", repo];
+  // Round 1 must fail: a changed artifact after a pass starts a fresh record, which would clear the class memory under test.
+  respond([
+    valued("[Safety] a real bug", "high", { l: "real_path", i: "user_visible", c: "bug one" }),
+    ...Array.from({ length: 6 }, (_, n) => adv(`[Usability] copy ${n}`, `copy ${n}`))
+  ]);
+  assert.equal(cli(["run", ...args]).code, 10);
+  fs.appendFileSync(spec, "!");
+  respond([
+    valued("[Usability] copy 5 again", "high", { l: "plausible", i: "user_visible", c: "copy 5" }),
+    valued("[Usability] copy 0 again", "high", { l: "plausible", i: "user_visible", c: "copy 0" })
+  ]);
+  const r2 = cli(["run", ...args]);
+  assert.deepEqual(r2.json.findings.map((/** @type {{ why: string }} */ f) => f.why), ["realistic", "repeat_class"], r2.stdout);
+  assert.equal(r2.code, 10, "the omitted class's repeat blocks");
+});
+
+test("a passed record carrying 1.1.0's history stays passed after the upgrade: exit 0, no Codex call", () => {
+  const repo = specRepo();
+  const spec = writeFile(repo, "docs/specs/feature.md", "x");
+  const args = ["--kind", "spec", "--path", spec, "--project-root", repo];
+  respond([]);
+  const first = cli(["run", ...args]);
+  assert.equal(first.code, 0);
+  const file = path.join(env.REVIEW_LOOP_STATE_DIR, "records", `${first.json.key}.json`);
+  const rec = JSON.parse(fs.readFileSync(file, "utf8"));
+  rec.history = JSON.parse(fs.readFileSync("test/fixtures/record-1.1.0.json", "utf8")).history;
+  fs.writeFileSync(file, JSON.stringify(rec));
+  const calls = stubCalls().length;
+  const again = cli(["run", ...args]);
+  assert.deepEqual([again.code, again.json.status, stubCalls().length], [0, "passed", calls]);
+});
