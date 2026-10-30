@@ -207,3 +207,43 @@ export function triageCounts(rows) {
     }
   };
 }
+
+/** Advisory findings a round reports, besides one per accepted risk (spec D2). The owner chose 5. */
+export const ADVISORY_REPORT_CAP = 5;
+
+/** Position in an enum's order; a null, missing or unknown value ranks after every member. @param {readonly string[]} order @param {string | null | undefined} k */
+const rankIn = (order, k) => {
+  const n = k === null || k === undefined ? -1 : order.indexOf(k);
+  return n === -1 ? order.length : n;
+};
+
+/**
+ * Which rows the round's report shows (spec D2): every blocking row; the first advisory row for each accepted risk that
+ * downgraded a finding (the representatives); and the first ADVISORY_REPORT_CAP of the other advisory rows, ranked by
+ * severity, impact, likelihood, then Codex's own order. `i` is the row's index in `rows`: a dispute indexes
+ * `lastFindings` by it, so it must not shift when the cap drops other rows. Presentation only: classification,
+ * scoring and the record see every row.
+ * @template {TriageRow} R
+ * @param {R[]} rows
+ * @returns {{ reported: Array<{ row: R, i: number }>, shown: number, omitted: number, distinct: number }}
+ */
+export function selectReported(rows) {
+  const indexed = rows.map((row, i) => ({ row, i }));
+  const advisory = indexed.filter((x) => !x.row.triage.blocking);
+  const seen = new Set();
+  const reps = [];
+  const rest = [];
+  for (const x of advisory) {
+    const id = x.row.triage.why === "accepted_risk" ? x.row.value?.accepted_risk : undefined;
+    if (id !== undefined && !seen.has(id)) { seen.add(id); reps.push(x); } else rest.push(x);
+  }
+  rest.sort((a, b) =>
+    rankIn(SEVERITIES, a.row.severity) - rankIn(SEVERITIES, b.row.severity) ||
+    rankIn(IMPACTS, a.row.value?.impact) - rankIn(IMPACTS, b.row.value?.impact) ||
+    rankIn(LIKELIHOODS, a.row.triage.likelihood) - rankIn(LIKELIHOODS, b.row.triage.likelihood) ||
+    a.i - b.i);
+  const kept = rest.slice(0, ADVISORY_REPORT_CAP);
+  const chosen = new Set([...reps, ...kept].map((x) => x.i));
+  const reported = indexed.filter((x) => x.row.triage.blocking || chosen.has(x.i));
+  return { reported, shown: reps.length + kept.length, omitted: advisory.length - reps.length - kept.length, distinct: reps.length };
+}
