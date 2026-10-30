@@ -77,6 +77,8 @@ on:
       - "plugin/skills/review-loop/SKILL.md"
       - "test/contract/skill.test.mjs"
       - "docs/superpowers/specs/2026-10-10-value-triage-design.md"
+      - ".github/workflows/sabotage.yml"
+      - "test/contract/ci-runners.test.mjs"
       # The gate tests: a test edited to keep its name but lose its assertion re-runs the sabotage it must catch.
       - "test/contract/events.test.mjs"
       - "test/contract/content-discipline.test.mjs"
@@ -190,6 +192,8 @@ on:
       - "plugin/skills/review-loop/SKILL.md"
       - "test/contract/skill.test.mjs"
       - "docs/superpowers/specs/2026-10-10-value-triage-design.md"
+      - ".github/workflows/sabotage.yml"
+      - "test/contract/ci-runners.test.mjs"
 permissions:
   contents: read
 concurrency:
@@ -197,7 +201,7 @@ concurrency:
   cancel-in-progress: true
 jobs:
   sabotage:
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0

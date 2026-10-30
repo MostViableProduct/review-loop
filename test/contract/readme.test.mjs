@@ -90,7 +90,7 @@ test("CONTRIBUTING.md states the Intel CI runner ci.yml uses, and the Rosetta fa
   assert.ok(labels.length > 0, "ci.yml's matrix has an Intel leg");
   for (const label of new Set(labels)) assert.ok(CONTRIBUTING.includes(`\`${label}\``), `CONTRIBUTING.md names the Intel runner ${label}`);
   assert.ok(CONTRIBUTING.includes("`arch -x86_64`"), "CONTRIBUTING.md states the Rosetta fallback");
-  assert.ok(CONTRIBUTING.includes("`macos-14` (arm64)"), "CONTRIBUTING.md names the arm64 runner");
+  assert.ok(CONTRIBUTING.includes("`macos-15` (arm64)"), "CONTRIBUTING.md names the arm64 runner");
   assert.ok(README.includes("Apple silicon or Intel"), "the README tells users both are supported");
 });
 
