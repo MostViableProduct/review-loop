@@ -14,9 +14,9 @@ land on `main` only through a pull request with CI passing.
 
 ## Where CI runs
 
-Apple silicon and Intel Macs are both supported. CI runs every push on `macos-14` (arm64) and on the Intel
+Apple silicon and Intel Macs are both supported. CI runs every push on `macos-15` (arm64) and on the Intel
 runner `macos-15-intel` (x86_64); if GitHub stops offering an Intel runner, the Intel leg falls back to Node
-under Rosetta (`arch -x86_64`) on `macos-14`.
+under Rosetta (`arch -x86_64`) on `macos-15`.
 
 ## The content gate
 

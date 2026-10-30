@@ -6,7 +6,7 @@ permissions:
   contents: read
 jobs:
   release:
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 90
     permissions:
       contents: write
@@ -157,7 +157,7 @@ jobs:
     # The only job that can read TAP_PR_TOKEN (spec §9): it lives in the `release` environment, which requires a
     # reviewer's approval before this job starts. The repo's own GITHUB_TOKEN gets no scopes here.
     needs: release
-    runs-on: macos-14
+    runs-on: macos-15
     timeout-minutes: 15
     environment: release
     permissions: {}
