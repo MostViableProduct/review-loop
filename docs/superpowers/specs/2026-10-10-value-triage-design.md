@@ -33,6 +33,9 @@ Every other finding is still reported, recorded and counted, but sets no band. W
 up nothing blocking on a realistic path, the loop pages the owner with an "Accept" recommendation instead of
 continuing.
 
+*Amended by 1.2.0 (docs/superpowers/specs/2026-10-29-real-path-lows-and-advisory-cap-design.md): a finding is still
+recorded and counted, but is reported in full only within the report cap; a `low` finding on a `real_path` blocks.*
+
 ## Non-negotiables
 
 - A critical finding always blocks, at any likelihood, and no accepted-risk line downgrades it.
@@ -43,6 +46,8 @@ continuing.
   JSON output, which the skill reports to the user. The record keeps it as a `lastFindings` entry of title, file,
   severity, class and blocking flag until the next round replaces it, and as counts in the record's history and in
   the `round.result` event. That is the same retention blocking findings have today.
+  *Amended by 1.2.0 (docs/superpowers/specs/2026-10-29-real-path-lows-and-advisory-cap-design.md): "never dropped
+  silently" stands: an advisory finding is always counted; its full text appears only within the report cap.*
 - No new dependencies. Every new invariant gets a `node --test` case and a sabotage row that goes red.
 
 ## Design
@@ -231,6 +236,12 @@ It decides with the first rule that matches, on the effective likelihood:
 | 6 | severity `high` or `medium`, and likelihood `real_path` or `plausible` | blocking | `realistic` |
 | 7 | anything else | advisory | `low_value` |
 
+*Amended by 1.2.0 (docs/superpowers/specs/2026-10-29-real-path-lows-and-advisory-cap-design.md): rule 7 is split. A `low`
+finding whose effective likelihood is `real_path` is blocking with `why: real_path_low` (placed after rule 6); every other
+rule-7 finding stays `low_value`. "A `low` finding no longer blocks on its own" below holds for non-real-path lows only.
+The persisted history keeps these seven `why` keys (`real_path_low` is counted under `realistic` there); only the
+`round.result` event gains `why_real_path_low`, `advisory_shown`, `advisory_omitted` and `accepted_risk_distinct`.*
+
 These rules have consequences, intended and stated here so review can challenge them:
 
 - **A `low` finding no longer blocks on its own.** Only rule 4 (money, data or security) can make a low block. Today
@@ -280,6 +291,10 @@ total`). `unvalued` counts every finding whose `value` is `null`, whichever rule
 no valid trailer is `why: critical` and still counts as unvalued. Every unvalued finding blocks, so
 `unvalued ≤ blocking`. The skill's exit-10 step changes in one way: advisory
 findings are reported to the user in one line each, never "fixed" by default, and never disputed (they don't block).
+
+*Amended by 1.2.0 (docs/superpowers/specs/2026-10-29-real-path-lows-and-advisory-cap-design.md): advisory findings are
+reported one line each only within the report cap (5, plus one per accepted risk); the rest are counted in
+`score.advisory_omitted`. They are still counted, recorded and never disputed.*
 
 ### D4. Prior findings, summarized as classes
 
@@ -368,6 +383,9 @@ file the engine doesn't execute.
     apart in the event log. The text itself never goes in any event.
 
   The `docs/EVENTS.md` table is regenerated (`node scripts/gen-readme-tables.mjs`).
+  *Amended by 1.2.0 (docs/superpowers/specs/2026-10-29-real-path-lows-and-advisory-cap-design.md): `round.result` also
+  carries `why_real_path_low`, `advisory_shown`, `advisory_omitted` and `accepted_risk_distinct`. The persisted history
+  keeps the seven `why` keys listed here; the event is where `real_path_low` is counted separately.*
 - **New codes.** `review_context_invalid` (an operational error), `dispute_advisory` (a usage error) and
   `event_shape_invalid` (an internal error) are registered in `CODES`, with remedies, so `list-codes` and the
   troubleshooting tables cover them.

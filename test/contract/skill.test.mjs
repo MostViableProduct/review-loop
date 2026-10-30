@@ -10,8 +10,17 @@ const SKILL = fs.readFileSync("plugin/skills/review-loop/SKILL.md", "utf8").repl
 test("SKILL.md: only blocking findings are fixed or disputed; advisory ones are listed, not changed, never disputed", () => {
   for (const s of [
     "Only **blocking** findings (`findings[].blocking: true`) hold the gate; fix or dispute those alone.",
-    "**Advisory** findings (`blocking: false`): list each to the user in one line with its `why` and `value.likelihood`. Don't change code for one unless the user asks, and never dispute one (the engine refuses it with `dispute_advisory`)."
+    "**Advisory** findings (`blocking: false`): list each reported advisory finding to the user in one line with its `why` and `value.likelihood` (`findings` holds only the reported ones)."
   ]) assert.ok(SKILL.includes(s), s);
+  assert.ok(SKILL.includes("Don't change code for one unless the user asks, and never dispute one (the engine refuses it with `dispute_advisory`)."));
+});
+
+test("SKILL.md: advisory findings are listed as reported, and omitted ones are count-only, on the pass path and the fix path", () => {
+  const OMITTED = "N more advisory findings were left out of this report (cap 5, plus one per accepted risk); their counts are in `score`";
+  assert.equal(SKILL.split(OMITTED).length - 1, 2, "the omission line is in the exit-0 row and in the exit-10 step");
+  assert.ok(!SKILL.includes("list each to the user in one line"), "the unqualified wording is gone");
+  assert.ok(SKILL.includes("list each reported advisory finding as in step 3"));
+  assert.ok(SKILL.includes("`advisory_shown` of `advisory`"));
 });
 
 test("SKILL.md: the result report shows the blocking, advisory and unvalued counts", () => {

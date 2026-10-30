@@ -43,7 +43,8 @@ comes with the command that fixes it.
    This is expected. Claude starts a review on its own.
 3. **Claude runs a review round.** A round is one Codex review and usually takes 2–8 minutes in the background.
    Claude reads the findings, fixes the valid ones, argues the wrong ones with evidence, and runs the next round.
-   Findings that don't block (unlikely, already accepted, or low value) are listed for you, not fixed.
+   Findings that don't block (unlikely, already accepted, or low value) are listed for you, up to 5 per round (plus
+   one for each accepted risk that downgraded a finding) with a count of the rest, and are not fixed.
 4. **The work passes when all 11 scores reach 9.2.** Claude shows you the score table and carries on.
 5. **Pull requests are held to the same bar.** Claude can't open a pull request until its exact changes have
    passed. With `gh` signed in, review-loop then marks the commit on GitHub as reviewed (a

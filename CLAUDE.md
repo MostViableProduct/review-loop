@@ -158,6 +158,15 @@ These are copied from the spec, and every task implicitly includes them.
   rounds with only plausible, lower-stakes findings blocking, and recommends no option. Events carry counts, enums and a 12-hex digest prefix only, and a
   `round.result` whose counts don't agree (`roundResultProblems`) is never written (stderr names
   `event_shape_invalid`).
+- A `low` finding whose effective likelihood is `real_path` blocks (`why: real_path_low`, after rules 1–6). A record's
+  `history[].triage.why` keeps 1.1.0's seven keys: `real_path_low` is counted under `realistic` there
+  (`HISTORY_WHY_FOLD`), and only `round.result` carries `why_real_path_low`, so 1.1.0 and 1.2.0 read each other's records.
+- The round result's `findings` is capped by `selectReported` (`value.mjs`): every blocking row, the first row per
+  accepted risk that downgraded a finding, and `ADVISORY_REPORT_CAP` (5) other advisory rows. Each reported row keeps its
+  index in `lastFindings`. Classification, scoring, `lastFindings` and the counts see every row; the class summary records only the
+  reported findings' classes, so an omitted class never makes a later finding `repeat_class`.
+  `round.result` carries `advisory_shown`, `advisory_omitted` and `accepted_risk_distinct`, and `roundResultProblems`
+  checks the partition exactly.
 
 ## Deviations from the spec
 
