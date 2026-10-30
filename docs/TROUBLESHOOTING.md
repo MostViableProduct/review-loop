@@ -216,7 +216,8 @@ waved through. Then the first matching rule decides:
 | 4 | impact is money_or_data or security, and likelihood is real_path, plausible or requires_misconfig | blocks | `money_data_security` |
 | 5 | its dimension and class were raised in an earlier round, it is not last round's blocking finding raised again, and likelihood is not real_path | advisory | `repeat_class` |
 | 6 | severity is high or medium, and likelihood is real_path or plausible | blocks | `realistic` |
-| 7 | anything else | advisory | `low_value` |
+| 7 | severity is low and likelihood is real_path | blocks | `real_path_low` |
+| 8 | anything else | advisory | `low_value` |
 
 | Field | Value | Meaning |
 |---|---|---|

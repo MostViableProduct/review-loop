@@ -66,3 +66,9 @@ test("arithmetic string reconciles with the dimension table", () => {
   assert.equal(r.sum, sum);
   assert.match(r.arithmetic, new RegExp(`^${sum.toFixed(1)} / ${DIMENSIONS.length} = `));
 });
+
+test("a blocking real-path low holds the gate: its dimension scores 9.1 or less", () => {
+  const r = scoreFindings([{ severity: "low", title: "[Usability] vague copy" }]);
+  assert.equal(r.pass, false);
+  assert.ok((r.dimensions.find((d) => d.name === "Usability")?.score ?? 10) <= 9.1);
+});

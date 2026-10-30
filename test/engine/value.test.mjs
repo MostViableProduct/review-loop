@@ -4,7 +4,7 @@ import { DIMENSIONS, SEVERITIES } from "../../plugin/engine/lib/scoring.mjs";
 import {
   LIKELIHOODS, IMPACTS, FIX_COSTS, TRUSTED_ACTORS, WHYS, RULES,
   SEVERITY_TEXT, LIKELIHOOD_TEXT, IMPACT_TEXT, FIX_COST_TEXT, TRUSTED_ACTOR_TEXT,
-  parseValue, classify, classKey, normalizeLabel, triageCounts
+  HISTORY_WHYS, parseValue, classify, classKey, normalizeLabel, triageCounts
 } from "../../plugin/engine/lib/value.mjs";
 
 const TRAILER = "VALUE likelihood=plausible; impact=user_visible; fix_cost=small; class=cache key collision; actor=none; accepted_risk=none; trigger=two users share a cache key";
@@ -154,9 +154,9 @@ const TABLE = [
   ["medium", "theoretical", "none", null, "low_value", "accepted_risk", "repeat_class"],
   ["low", "real_path", "money_or_data", null, "money_data_security", "accepted_risk", "money_data_security"],
   ["low", "real_path", "security", null, "money_data_security", "accepted_risk", "money_data_security"],
-  ["low", "real_path", "user_visible", null, "low_value", "accepted_risk", "low_value"],
-  ["low", "real_path", "operator_visible", null, "low_value", "accepted_risk", "low_value"],
-  ["low", "real_path", "none", null, "low_value", "accepted_risk", "low_value"],
+  ["low", "real_path", "user_visible", null, "real_path_low", "accepted_risk", "real_path_low"],
+  ["low", "real_path", "operator_visible", null, "real_path_low", "accepted_risk", "real_path_low"],
+  ["low", "real_path", "none", null, "real_path_low", "accepted_risk", "real_path_low"],
   ["low", "plausible", "money_or_data", null, "money_data_security", "accepted_risk", "money_data_security"],
   ["low", "plausible", "security", null, "money_data_security", "accepted_risk", "money_data_security"],
   ["low", "plausible", "user_visible", null, "low_value", "accepted_risk", "repeat_class"],
@@ -203,6 +203,30 @@ test("classify: the expected-result table covers every severity × likelihood ×
       assert.equal(t.blocking, RULES.find((r) => r.why === why)?.blocking, `${s} ${l} ${i} blocking`);
     }
   }
+});
+
+test("classify: a real-path low blocks; earlier rules and other likelihoods keep their own why", () => {
+  const KEY = classKey("Usability", "error copy");
+  const AR = /** @type {[string, { dimension: string, classKey: string, text: string }]} */ (["AR-1", { dimension: "Usability", classKey: KEY, text: "- AR-1 (2026-10-29) [Usability] class=error copy: accepted" }]);
+  const run = (/** @type {Record<string, string>} */ over, /** @type {ReturnType<typeof ctx>} */ c = ctx()) => classify(f("low", "[Usability] vague copy", val({ class: "error copy", ...over })), c);
+  assert.deepEqual([run({ likelihood: "real_path" }).blocking, run({ likelihood: "real_path" }).why], [true, "real_path_low"]);
+  assert.equal(run({ likelihood: "plausible" }).why, "low_value");
+  assert.equal(run({ likelihood: "real_path", accepted_risk: "AR-1" }, ctx({ accepted: [AR] })).why, "accepted_risk");
+  assert.equal(run({ likelihood: "real_path", impact: "security" }).why, "money_data_security");
+  assert.equal(run({ likelihood: "real_path" }, ctx({ prior: [KEY] })).why, "real_path_low", "repeat_class never applies to a real_path finding");
+  assert.equal(classify(f("low", "[Usability] vague copy", null), ctx()).why, "unvalued");
+});
+
+test("triageCounts: history.why has exactly 1.1.0's seven keys, counts a real-path low under realistic, and the event keeps real_path_low", () => {
+  const KEYS_1_1_0 = ["critical", "unvalued", "accepted_risk", "money_data_security", "repeat_class", "realistic", "low_value"];
+  const value = val({ likelihood: "real_path" });
+  const row = { severity: "low", dimension: "Usability", value, triage: classify(f("low", "[Usability] vague copy", value), ctx()) };
+  const { history, event } = triageCounts([row]);
+  assert.deepEqual(Object.keys(history.why).sort(), [...KEYS_1_1_0].sort());
+  assert.deepEqual([...HISTORY_WHYS].sort(), [...KEYS_1_1_0].sort());
+  assert.equal(history.why.realistic, 1);
+  assert.equal(Object.values(history.why).reduce((a, b) => a + b, 0), history.blocking + history.advisory);
+  assert.deepEqual([event.why_real_path_low, event.why_realistic], [1, 0]);
 });
 
 test("classify: an unvalued finding blocks, unless critical decides first; its likelihood is null", () => {

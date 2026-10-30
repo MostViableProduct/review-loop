@@ -7,7 +7,7 @@ import { stateRoot, stateSubdir } from "./paths.mjs";
 import { emitEvent } from "./events.mjs";
 import { OPTIONS, CLASS_CAP } from "./policy.mjs";
 import { DIMENSIONS } from "./scoring.mjs";
-import { LIKELIHOODS, WHYS, classKey } from "./value.mjs";
+import { LIKELIHOODS, HISTORY_WHYS, classKey } from "./value.mjs";
 import { isTreeRef } from "./pin.mjs";
 import { trustedPs, processIdent } from "./proc.mjs";
 
@@ -85,7 +85,7 @@ const isClassOrNull = (/** @type {unknown} */ k) => k === null || isClassKey(k);
 function isTriage(t) {
   if (!isObject(t) || !hasExactly(t, TRIAGE_KEYS)) return false;
   if (![t.blocking, t.advisory, t.unvalued].every(isCount) || /** @type {number} */ (t.unvalued) > /** @type {number} */ (t.blocking)) return false;
-  if (!isObject(t.why) || !hasExactly(t.why, WHYS) || !Object.values(t.why).every(isCount)) return false;
+  if (!isObject(t.why) || !hasExactly(t.why, HISTORY_WHYS) || !Object.values(t.why).every(isCount)) return false;
   const total = Object.values(t.why).reduce((/** @type {number} */ s, n) => s + /** @type {number} */ (n), 0);
   return (
     total === /** @type {number} */ (t.blocking) + /** @type {number} */ (t.advisory) &&
