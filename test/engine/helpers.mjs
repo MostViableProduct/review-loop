@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { safeReadFile } from "../../plugin/engine/lib/fsutil.mjs";
 
 export const GIT_ENV = {
   ...process.env,
@@ -25,6 +26,60 @@ export function g(cwd, ...args) {
 export function tmpDir(prefix = "rl-") {
   // realpath: macOS /var → /private/var, so paths compare equal to git's --show-toplevel.
   return fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), prefix)));
+}
+
+const FIXTURE_MAX_BYTES = 256 * 1024;
+
+/**
+ * A committed fixture a test hands to something outside the process: a reviewed checkout can swap it for a symlink,
+ * so it is read without following links and from inside `root` only.
+ * @param {string} root the repository root @param {...string} rel
+ */
+export function readFixture(root, ...rel) {
+  return safeReadFile(path.join(root, ...rel), FIXTURE_MAX_BYTES, {}, { within: root }).toString("utf8");
+}
+
+/**
+ * Every directory from `root` to `dir` must be a real directory; `create` makes the missing ones.
+ * @param {string} root @param {string} dir @param {boolean} create
+ */
+function assertRealDir(root, dir, create) {
+  const rel = path.relative(root, dir);
+  if (rel.startsWith("..") || path.isAbsolute(rel)) throw new Error(`${dir}: outside ${root}`);
+  let at = root;
+  for (const part of rel.split(path.sep).filter(Boolean)) {
+    at = path.join(at, part);
+    const st = fs.lstatSync(at, { throwIfNoEntry: false });
+    if (st === undefined && create) fs.mkdirSync(at);
+    else if (st === undefined || !st.isDirectory()) throw new Error(`${at}: not a real directory (symlinks are never followed)`);
+  }
+}
+
+/**
+ * Names of the regular files in a fixture directory; a linked directory or a linked entry is refused, not followed.
+ * @param {string} root @param {string} dir
+ */
+export function listFixtures(root, dir) {
+  assertRealDir(root, dir, false);
+  return fs.readdirSync(dir, { withFileTypes: true }).map((e) => {
+    if (!e.isFile()) throw new Error(`${path.join(dir, e.name)}: not a regular file (symlinks are never followed)`);
+    return e.name;
+  });
+}
+
+/**
+ * Writes a recorded fixture: the directory must be real (created if absent) and the file itself is opened
+ * O_NOFOLLOW, so a reviewed symlink can't redirect the recording.
+ * @param {string} root the repository root @param {string} dir @param {string} name @param {string} text
+ */
+export function recordFixture(root, dir, name, text) {
+  assertRealDir(root, dir, true);
+  const fd = fs.openSync(path.join(dir, name), fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_TRUNC | fs.constants.O_NOFOLLOW, 0o644);
+  try {
+    fs.writeSync(fd, text);
+  } finally {
+    fs.closeSync(fd);
+  }
 }
 
 /** @param {string} [dir] */

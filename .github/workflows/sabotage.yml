@@ -82,6 +82,11 @@ on:
       - "test/contract/retention.test.mjs"
       - ".github/workflows/sabotage.yml"
       - "test/contract/ci-runners.test.mjs"
+      - "test/engine/helpers.mjs"
+      - "test/engine/golden.test.mjs"
+      - "cli/lib/livecheck.mjs"
+      - "test/cli/livecheck.test.mjs"
+      - "test/contract/fixture-guard.test.mjs"
       # The gate tests: a test edited to keep its name but lose its assertion re-runs the sabotage it must catch.
       - "test/contract/events.test.mjs"
       - "test/contract/content-discipline.test.mjs"
@@ -200,6 +205,11 @@ on:
       - "test/contract/retention.test.mjs"
       - ".github/workflows/sabotage.yml"
       - "test/contract/ci-runners.test.mjs"
+      - "test/engine/helpers.mjs"
+      - "test/engine/golden.test.mjs"
+      - "cli/lib/livecheck.mjs"
+      - "test/cli/livecheck.test.mjs"
+      - "test/contract/fixture-guard.test.mjs"
 permissions:
   contents: read
 concurrency:

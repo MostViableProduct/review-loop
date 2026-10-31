@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
-import { tmpDir, GIT_ENV } from "../engine/helpers.mjs";
+import { tmpDir, GIT_ENV, readFixture } from "../engine/helpers.mjs";
 import { makeFakeBin } from "../fakes/fakebin.mjs";
 
 const bin = path.join(tmpDir(), "bin");
@@ -196,7 +196,7 @@ test("T-SET-9: a failing Codex call → live_check_failed (exit 1), Codex text o
 test("T-SET-9b: Codex signed out (companion 1.0.6: exit 1, empty stderr, the 401 only in stdout) → setup and doctor --live say codex_auth / `codex login`; the 401 text stays off events", async () => {
   sandbox({ pluginInstalled: true, stubCodex: true });
   assert.equal(await main(["setup", "--yes", "--skip-live-check"], io([])), 0);
-  fs.copyFileSync(path.join(process.cwd(), "test", "fixtures", "companion-1.0.6-signed-out.json"), process.env.STUB_OUT);
+  fs.writeFileSync(process.env.STUB_OUT, readFixture(process.cwd(), "test", "fixtures", "companion-1.0.6-signed-out.json"));
   process.env.STUB_EXIT = "1";
   const o = io([]);
   assert.equal(await main(["setup", "--yes"], o), 1);

@@ -3,8 +3,8 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
-import { pathToFileURL } from "node:url";
-import { tmpDir } from "../engine/helpers.mjs";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { tmpDir, readFixture } from "../engine/helpers.mjs";
 import { enginePath } from "../../cli/lib/plugin.mjs";
 import { childEnv, isolatedConfigProblem, roundBrokers } from "./isolation.mjs";
 
@@ -98,7 +98,7 @@ test("e2e: a real Claude Code session through the installed plugin — Stop bloc
     });
   };
 
-  const fixture = fs.readFileSync(new URL("../../cli/fixtures/livecheck-doc.md", import.meta.url), "utf8");
+  const fixture = readFixture(fileURLToPath(new URL("../..", import.meta.url)), "cli", "fixtures", "livecheck-doc.md");
   const first = claude(["-p", `Use the Write tool to create docs/specs/e2e-design.md with exactly this content, then reply DONE.\n\n${fixture}`, "--allowedTools", "Write"]);
   const sid = first.find((m) => m.type === "system" && m.subtype === "init")?.session_id;
   assert.ok(typeof sid === "string", "stream-json init carries the session id");
