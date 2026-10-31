@@ -4,7 +4,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { tmpDir, makeRepo, commitFile, writeFile, g } from "./helpers.mjs";
+import { tmpDir, makeRepo, commitFile, writeFile, g, recordFixture } from "./helpers.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const RECORD = process.env.REVIEW_LOOP_GOLDEN === "record";
@@ -126,8 +126,7 @@ function corpus() {
 test("T-CFG-2: Default preset hook output is byte-equal to the recorded pre-preset engine", () => {
   const got = corpus();
   if (RECORD) {
-    fs.mkdirSync(DIR, { recursive: true });
-    for (const [k, v] of Object.entries(got)) fs.writeFileSync(path.join(DIR, `${k}.json`), JSON.stringify(v));
+    for (const [k, v] of Object.entries(got)) recordFixture(path.join(HERE, "..", ".."), DIR, `${k}.json`, JSON.stringify(v));
     return;
   }
   assert.equal(fs.readdirSync(DIR).filter((f) => f.endsWith(".json")).length, Object.keys(got).length, "every fixture has a case and vice versa");
