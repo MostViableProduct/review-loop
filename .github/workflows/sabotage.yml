@@ -77,6 +77,9 @@ on:
       - "plugin/skills/review-loop/SKILL.md"
       - "test/contract/skill.test.mjs"
       - "docs/superpowers/specs/2026-10-10-value-triage-design.md"
+      - "test/engine/state-compat.test.mjs"
+      - "test/engine/advisory-cap.test.mjs"
+      - "test/contract/retention.test.mjs"
       - ".github/workflows/sabotage.yml"
       - "test/contract/ci-runners.test.mjs"
       # The gate tests: a test edited to keep its name but lose its assertion re-runs the sabotage it must catch.
@@ -192,6 +195,9 @@ on:
       - "plugin/skills/review-loop/SKILL.md"
       - "test/contract/skill.test.mjs"
       - "docs/superpowers/specs/2026-10-10-value-triage-design.md"
+      - "test/engine/state-compat.test.mjs"
+      - "test/engine/advisory-cap.test.mjs"
+      - "test/contract/retention.test.mjs"
       - ".github/workflows/sabotage.yml"
       - "test/contract/ci-runners.test.mjs"
 permissions:
@@ -205,6 +211,8 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
+        with:
+          fetch-depth: 0
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020  # v4.4.0
         with:
           node-version: "22.x"

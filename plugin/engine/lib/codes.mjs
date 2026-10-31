@@ -1,7 +1,7 @@
 // The single registry of codes, event types and CLI exit codes (spec §8.3). README tables are generated from it.
 import { PRESET_NAMES } from "./presets.mjs";
 import { DIMENSIONS, SEVERITIES } from "./scoring.mjs";
-import { LIKELIHOODS, IMPACTS, WHYS } from "./value.mjs";
+import { LIKELIHOODS, IMPACTS, WHYS, ADVISORY_REPORT_CAP } from "./value.mjs";
 
 export const CLI_EXIT = Object.freeze({ ok: 0, user_action: 1, usage: 2, cancelled: 3, internal: 4 });
 
@@ -268,7 +268,7 @@ const histOf = (keys) => (/** @type {unknown} */ v) => {
   const rec = /** @type {Record<string, unknown>} */ (v);
   return Object.keys(rec).length === keys.length && keys.every((k) => tally(rec[k]) !== null) ? rec : null;
 };
-const ROUND_COUNTS = Object.freeze(["blocking", "advisory", "unvalued", ...WHYS.map((w) => `why_${w}`), "actor_not_trusted", "theoretical_floored", "unknown_accepted_risk", "accepted_risk_out_of_scope"]);
+const ROUND_COUNTS = Object.freeze(["blocking", "advisory", "unvalued", ...WHYS.map((w) => `why_${w}`), "actor_not_trusted", "theoretical_floored", "unknown_accepted_risk", "accepted_risk_out_of_scope", "advisory_shown", "advisory_omitted", "accepted_risk_distinct"]);
 /** Every field a scored round.result must carry, and an unscored one must not. */
 export const ROUND_COUNT_FIELDS = Object.freeze([...ROUND_COUNTS, ...Object.keys(ROUND_HISTOGRAMS)]);
 /** What every round.result says: which round ran, under which preset, and for how long. */
@@ -354,6 +354,12 @@ export function roundResultProblems(d) {
   if (WHYS.reduce((s, w) => s + n[`why_${w}`], 0) !== total) problems.push("why");
   for (const h of ["likelihoods", "impacts", "severities", "dimensions"]) if (sum(d[h]) !== total) problems.push(h);
   if (sum(d.advisory_dimensions) !== n.advisory) problems.push("advisory_dimensions");
+  // The report cap applies to every advisory row except one representative per accepted risk (spec D2), so the shown
+  // and omitted counts are fully determined by counts the event already carries.
+  const shown = n.accepted_risk_distinct + Math.min(n.advisory - n.accepted_risk_distinct, ADVISORY_REPORT_CAP);
+  if (n.why_accepted_risk > n.advisory || n.accepted_risk_distinct > n.why_accepted_risk || (n.accepted_risk_distinct > 0) !== (n.why_accepted_risk > 0)) problems.push("accepted_risk_distinct");
+  if (n.advisory_shown !== shown) problems.push("advisory_shown");
+  if (n.advisory_omitted !== n.advisory - n.advisory_shown) problems.push("advisory_omitted");
   return problems;
 }
 

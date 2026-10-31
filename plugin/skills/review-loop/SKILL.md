@@ -37,7 +37,7 @@ Never call an artifact reviewed/ready, and never ask for "go" on it, unless its 
 
 | Exit | Meaning | Do |
 |---|---|---|
-| 0 | passed (or nothing to review) | Report the dimension table, `score.arithmetic`, the `score.blocking`, `score.advisory` and `score.unvalued` counts, and `coveredScope`; list any advisory findings as in step 3. Done. For a PR: `$RR push --key <key>`, then retry the PR. For a PR, the engine also posts the `review-loop/<base>` status on the reviewed commit, so branch protection can require the review to have passed. |
+| 0 | passed (or nothing to review) | Report the dimension table, `score.arithmetic`, the `score.blocking`, `score.advisory` and `score.unvalued` counts, and `coveredScope`; list each reported advisory finding as in step 3, add the omission line when `score.advisory_omitted > 0` ("N more advisory findings were left out of this report (cap 5, plus one per accepted risk); their counts are in `score`"), and show `advisory_shown` of `advisory`. Done. For a PR: `$RR push --key <key>`, then retry the PR. For a PR, the engine also posts the `review-loop/<base>` status on the reviewed commit, so branch protection can require the review to have passed. |
 | 10 | needs fixes | Go to step 3. |
 | 20 / 21 | checkpoint / stall or diminishing returns (`awaiting.reason`) | **Page** (below) with `awaiting.options`. |
 | 22 | human decision (dispute deadlock, criss-cross history, head diverged, push rejected) | **Page** with `awaiting.options`. |
@@ -49,8 +49,9 @@ Never call an artifact reviewed/ready, and never ask for "go" on it, unless its 
    alone. Treat each one skeptically (if the `superpowers:receiving-code-review` skill is installed, use its
    posture; otherwise verify each finding against the code before acting). Report the `score.blocking`,
    `score.advisory` and `score.unvalued` counts with the score.
-   - **Advisory** findings (`blocking: false`): list each to the user in one line with its `why` and
-     `value.likelihood`. Don't change code for one unless the user asks, and never dispute one (the engine refuses it
+   - **Advisory** findings (`blocking: false`): list each reported advisory finding to the user in one line with its `why` and
+     `value.likelihood` (`findings` holds only the reported ones). When `score.advisory_omitted > 0`, add one line: "N more advisory findings were left out of this
+     report (cap 5, plus one per accepted risk); their counts are in `score`". Don't change code for one unless the user asks, and never dispute one (the engine refuses it
      with `dispute_advisory`).
    - **Valid** → fix it with a targeted edit. For a PR review, commit the fix (`review-loop round N fixes`).
    - **Invalid** → dispute with concrete evidence (file:line, test, doc):

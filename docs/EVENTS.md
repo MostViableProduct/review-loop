@@ -9,6 +9,10 @@ anywhere; this page is for teams that want to collect the file themselves.
 Each line is at most 4 KiB. The file rotates at 5 MiB to `events.jsonl.1` (one generation). To write it
 elsewhere: `review-loop config set events.path /abs/path.jsonl`.
 
+Fields are added to an event's `data` within schema `review-loop.event/1`: consumers must ignore keys they don't know.
+review-loop checks a line when it writes it (and `selftest` checks a fresh log), never over a log that already exists, so
+an older release neither rejects nor rewrites lines a newer one wrote.
+
 Ship it with any file-tailing agent (OpenTelemetry Collector, Vector, Fluent Bit, the Datadog agent).
 An OpenTelemetry Collector `filelog` example:
 
@@ -42,7 +46,7 @@ that does not pass its check is written as `null`.
 |---|---|---|
 | `cli.exit` | cli | `command`, `duration_ms` |
 | `gate.decision` | hook | `gate`, `outcome`, `preset`, `pending_count` |
-| `round.result` | round | `kind`, `round`, `pass`, `mean`, `dims`, `model`, `effort`, `effort_source`, `preset`, `duration_ms`, `scored`, `context`, `context_digest`, `blocking`, `advisory`, `unvalued`, `why_critical`, `why_unvalued`, `why_accepted_risk`, `why_money_data_security`, `why_repeat_class`, `why_realistic`, `why_low_value`, `actor_not_trusted`, `theoretical_floored`, `unknown_accepted_risk`, `accepted_risk_out_of_scope`, `likelihoods`, `impacts`, `severities`, `dimensions`, `advisory_dimensions` |
+| `round.result` | round | `kind`, `round`, `pass`, `mean`, `dims`, `model`, `effort`, `effort_source`, `preset`, `duration_ms`, `scored`, `context`, `context_digest`, `blocking`, `advisory`, `unvalued`, `why_critical`, `why_unvalued`, `why_accepted_risk`, `why_money_data_security`, `why_repeat_class`, `why_realistic`, `why_real_path_low`, `why_low_value`, `actor_not_trusted`, `theoretical_floored`, `unknown_accepted_risk`, `accepted_risk_out_of_scope`, `advisory_shown`, `advisory_omitted`, `accepted_risk_distinct`, `likelihoods`, `impacts`, `severities`, `dimensions`, `advisory_dimensions` |
 | `round.decision` | round | `kind`, `option`, `reason` |
 | `round.dispute` | round | `kind` |
 | `round.push` | round | — |

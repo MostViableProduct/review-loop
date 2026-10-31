@@ -281,7 +281,8 @@ const NO_CTX = { trustedActors: new Set(), acceptedRisks: new Map(), priorClasse
 const scoredData = () => ({
   kind: "spec", round: 1, pass: false, preset: "default", duration_ms: 5, mean: 8.4, dims: Object.fromEntries(DIMENSIONS.map((d) => [d, 8.4])),
   model: null, effort: null, effort_source: "codex-inherited", scored: true, context: "file", context_digest: "0123456789ab",
-  ...triageCounts([{ severity: "medium", dimension: "Safety", value: null, triage: classify({ severity: "medium", title: "[Safety] x", value: null }, NO_CTX) }]).event
+  ...triageCounts([{ severity: "medium", dimension: "Safety", value: null, triage: classify({ severity: "medium", title: "[Safety] x", value: null }, NO_CTX) }]).event,
+  advisory_shown: 0, advisory_omitted: 0, accepted_risk_distinct: 0
 });
 
 test("round.result: a scored event carries every count; histograms have exactly their enum's keys and agree with the total", () => {
@@ -359,4 +360,36 @@ test("a round.result without scored, or scored but missing a count or its score,
   assert.deepEqual([a, b, c], [false, false, false]);
   assert.deepEqual(said, Array(3).fill("review-loop: event_shape_invalid round.result\n"));
   assert.equal(fs.existsSync(file) ? fs.readFileSync(file, "utf8") : "", before, "nothing written");
+});
+
+const ADV_VALUE = { likelihood: "plausible", impact: "user_visible", fix_cost: "small", class: "c", actor: "none", accepted_risk: "none", trigger: "t" };
+/** n advisory rows' counts, with the report fields set as the engine sets them for n findings and no accepted risk. @param {number} n @param {Record<string, unknown>} [o] */
+const advisoryData = (n, o = {}) => ({
+  ...scoredData(),
+  ...triageCounts(Array.from({ length: n }, () => ({ severity: "low", dimension: "Usability", value: ADV_VALUE, triage: classify({ severity: "low", title: "[Usability] x", value: ADV_VALUE }, NO_CTX) }))).event,
+  advisory_shown: Math.min(n, 5), advisory_omitted: Math.max(0, n - 5), accepted_risk_distinct: 0,
+  ...o
+});
+
+test("round.result: the new report fields are written and survive buildEvent and validateLine", () => {
+  const line = buildEvent({ source: "round", event: "round.result", code: "needs_fixes", data: advisoryData(8) });
+  assert.deepEqual(validateLine(line), []);
+  assert.deepEqual([line.data.advisory_shown, line.data.advisory_omitted, line.data.accepted_risk_distinct, line.data.why_real_path_low], [5, 3, 0, 0]);
+  for (const f of ["advisory_shown", "advisory_omitted", "accepted_risk_distinct"]) {
+    assert.ok(roundResultProblems({ ...scoredData(), [f]: undefined }).includes(f), `a scored round must carry ${f}`);
+  }
+});
+
+test("round.result: the advisory partition is exact; an undercount, an ignored cap and an impossible accepted-risk count are refused", () => {
+  const p = (/** @type {number} */ n, /** @type {Record<string, unknown>} */ o = {}) => roundResultProblems(advisoryData(n, o));
+  assert.deepEqual(p(8), [], "control: five shown, three omitted");
+  assert.ok(p(8, { advisory_omitted: 2 }).includes("advisory_omitted"), "an undercount");
+  assert.ok(p(8, { advisory_shown: 8, advisory_omitted: 0 }).includes("advisory_shown"), "the cap ignored");
+  assert.ok(p(3, { advisory_omitted: 1 }).includes("advisory_omitted"), "omitting below the cap");
+  assert.ok(p(8, { accepted_risk_distinct: 1 }).includes("accepted_risk_distinct"), "a representative with no accepted-risk finding");
+  assert.ok(p(8, { why_accepted_risk: 1 }).includes("accepted_risk_distinct"), "an accepted-risk finding with no representative");
+  assert.ok(p(0, { why_accepted_risk: 1, accepted_risk_distinct: 1 }).includes("accepted_risk_distinct"), "accepted-risk findings with no advisory finding");
+  assert.ok(p(8, { why_accepted_risk: 2, accepted_risk_distinct: 2 }).includes("advisory_shown"), "representatives not counted in the shown total");
+  const ok = p(8, { why_accepted_risk: 2, accepted_risk_distinct: 2, advisory_shown: 7, advisory_omitted: 1 });
+  for (const f of ["advisory_shown", "advisory_omitted", "accepted_risk_distinct"]) assert.ok(!ok.includes(f), `control: two representatives, ${f} consistent`);
 });

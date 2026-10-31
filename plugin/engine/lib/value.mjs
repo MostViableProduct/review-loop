@@ -57,9 +57,16 @@ export const RULES = Object.freeze([
   { why: "money_data_security", blocking: true, when: "impact is money_or_data or security, and likelihood is real_path, plausible or requires_misconfig" },
   { why: "repeat_class", blocking: false, when: "its dimension and class were raised in an earlier round, it is not last round's blocking finding raised again, and likelihood is not real_path" },
   { why: "realistic", blocking: true, when: "severity is high or medium, and likelihood is real_path or plausible" },
+  { why: "real_path_low", blocking: true, when: "severity is low and likelihood is real_path" },
   { why: "low_value", blocking: false, when: "anything else" }
 ]);
 export const WHYS = Object.freeze(RULES.map((r) => r.why));
+// Persisted history keeps 1.1.0's shape: a real-path low is a finding that blocks on a realistic path, so the record
+// counts it under `realistic`. A new `why` key in a record would make 1.1.0 quarantine 1.2.0's records after a
+// downgrade (state.mjs isTriage requires exactly these keys). Only the event log carries the distinction.
+/** @type {Readonly<Record<string, string>>} */
+export const HISTORY_WHY_FOLD = Object.freeze({ real_path_low: "realistic" });
+export const HISTORY_WHYS = Object.freeze(WHYS.filter((w) => !Object.hasOwn(HISTORY_WHY_FOLD, w)));
 const BLOCKING = Object.freeze(Object.fromEntries(RULES.map((r) => [r.why, r.blocking])));
 const HARMS = new Set(["money_or_data", "security"]);
 
@@ -146,6 +153,7 @@ export function classify(finding, ctx) {
   if (HARMS.has(v.impact) && (likelihood === "real_path" || likelihood === "plausible" || likelihood === "requires_misconfig")) return done("money_data_security");
   if (!finding.blockedLastRound && ctx.priorClasses.has(key) && likelihood !== "real_path") return done("repeat_class");
   if ((finding.severity === "high" || finding.severity === "medium") && (likelihood === "real_path" || likelihood === "plausible")) return done("realistic");
+  if (finding.severity === "low" && likelihood === "real_path") return done("real_path_low");
   return done("low_value");
 }
 
@@ -159,6 +167,7 @@ const zeros = (keys) => /** @type {Record<string, number>} */ (Object.fromEntrie
  */
 export function triageCounts(rows) {
   const why = zeros(WHYS);
+  const histWhy = zeros(HISTORY_WHYS);
   const likelihoods = zeros([...LIKELIHOODS, "none"]);
   const impacts = zeros(IMPACTS);
   const severities = zeros(SEVERITIES);
@@ -171,6 +180,7 @@ export function triageCounts(rows) {
   let unvalued = 0;
   for (const r of rows) {
     why[r.triage.why] += 1;
+    histWhy[HISTORY_WHY_FOLD[r.triage.why] ?? r.triage.why] += 1;
     likelihoods[r.triage.likelihood ?? "none"] += 1;
     impacts[r.value?.impact ?? "none"] += 1;
     severities[r.severity] += 1;
@@ -188,7 +198,7 @@ export function triageCounts(rows) {
   const advisory = rows.length - blocking;
   return {
     /** @type {HistoryTriage} */
-    history: { blocking, advisory, unvalued, why, likelihoods: blockingLikelihoods },
+    history: { blocking, advisory, unvalued, why: histWhy, likelihoods: blockingLikelihoods },
     event: {
       blocking, advisory, unvalued,
       ...Object.fromEntries(WHYS.map((w) => [`why_${w}`, why[w]])),
@@ -196,4 +206,44 @@ export function triageCounts(rows) {
       likelihoods, impacts, severities, dimensions, advisory_dimensions: advisoryDimensions
     }
   };
+}
+
+/** Advisory findings a round reports, besides one per accepted risk (spec D2). The owner chose 5. */
+export const ADVISORY_REPORT_CAP = 5;
+
+/** Position in an enum's order; a null, missing or unknown value ranks after every member. @param {readonly string[]} order @param {string | null | undefined} k */
+const rankIn = (order, k) => {
+  const n = k === null || k === undefined ? -1 : order.indexOf(k);
+  return n === -1 ? order.length : n;
+};
+
+/**
+ * Which rows the round's report shows (spec D2): every blocking row; the first advisory row for each accepted risk that
+ * downgraded a finding (the representatives); and the first ADVISORY_REPORT_CAP of the other advisory rows, ranked by
+ * severity, impact, likelihood, then Codex's own order. `i` is the row's index in `rows`: a dispute indexes
+ * `lastFindings` by it, so it must not shift when the cap drops other rows. Presentation only: classification,
+ * scoring and the record see every row.
+ * @template {TriageRow} R
+ * @param {R[]} rows
+ * @returns {{ reported: Array<{ row: R, i: number }>, shown: number, omitted: number, distinct: number }}
+ */
+export function selectReported(rows) {
+  const indexed = rows.map((row, i) => ({ row, i }));
+  const advisory = indexed.filter((x) => !x.row.triage.blocking);
+  const seen = new Set();
+  const reps = [];
+  const rest = [];
+  for (const x of advisory) {
+    const id = x.row.triage.why === "accepted_risk" ? x.row.value?.accepted_risk : undefined;
+    if (id !== undefined && !seen.has(id)) { seen.add(id); reps.push(x); } else rest.push(x);
+  }
+  rest.sort((a, b) =>
+    rankIn(SEVERITIES, a.row.severity) - rankIn(SEVERITIES, b.row.severity) ||
+    rankIn(IMPACTS, a.row.value?.impact) - rankIn(IMPACTS, b.row.value?.impact) ||
+    rankIn(LIKELIHOODS, a.row.triage.likelihood) - rankIn(LIKELIHOODS, b.row.triage.likelihood) ||
+    a.i - b.i);
+  const kept = rest.slice(0, ADVISORY_REPORT_CAP);
+  const chosen = new Set([...reps, ...kept].map((x) => x.i));
+  const reported = indexed.filter((x) => x.row.triage.blocking || chosen.has(x.i));
+  return { reported, shown: reps.length + kept.length, omitted: advisory.length - reps.length - kept.length, distinct: reps.length };
 }

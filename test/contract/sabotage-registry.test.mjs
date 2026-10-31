@@ -477,3 +477,17 @@ test("every value-triage sabotage the spec requires is a registry row", () => {
   const ids = new Set(SABOTAGES.map((s) => s.id));
   assert.deepEqual(VALUE_TRIAGE_IDS.filter((id) => !ids.has(id)), []);
 });
+
+// Spec "Required sabotage rows" (1.2.0): each is a gate whose test must be proven able to fail.
+const V1_2_IDS = [
+  "classify-real-path-low", "history-why-fold", "history-fold-old-reader", "advisory-cap-slice", "advisory-cap-blocking", "advisory-cap-order",
+  "advisory-cap-accepted-risk-exempt", "advisory-cap-representative", "advisory-cap-first-row", "event-advisory-omitted", "event-partition",
+  "event-distinct-source", "real-path-low-before-accepted-risk", "report-index-preserved", "advisory-cap-class-memory", "pass-survives-upgrade", "skill-omission-pass-path", "retention-doc-stale",
+  "retention-readme-stale", "retention-outcome-note-moved", "retention-nonneg-note-moved"
+];
+
+test("every 1.2.0 sabotage the spec requires is a registry row", () => {
+  assert.equal(new Set(V1_2_IDS).size, 21);
+  const ids = new Set(SABOTAGES.map((s) => s.id));
+  assert.deepEqual(V1_2_IDS.filter((id) => !ids.has(id)), []);
+});

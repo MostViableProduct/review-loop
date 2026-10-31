@@ -216,7 +216,8 @@ waved through. Then the first matching rule decides:
 | 4 | impact is money_or_data or security, and likelihood is real_path, plausible or requires_misconfig | blocks | `money_data_security` |
 | 5 | its dimension and class were raised in an earlier round, it is not last round's blocking finding raised again, and likelihood is not real_path | advisory | `repeat_class` |
 | 6 | severity is high or medium, and likelihood is real_path or plausible | blocks | `realistic` |
-| 7 | anything else | advisory | `low_value` |
+| 7 | severity is low and likelihood is real_path | blocks | `real_path_low` |
+| 8 | anything else | advisory | `low_value` |
 
 | Field | Value | Meaning |
 |---|---|---|
@@ -245,6 +246,13 @@ waved through. Then the first matching rule decides:
 | trusted actor | `hosting_provider` | the platform the project runs on |
 | trusted actor | `same_user_processes` | other processes running as the same OS user |
 <!-- triage:end -->
+
+Rule 7, a `low` finding whose likelihood is `real_path`, blocks: normal use hits it, so it is fixed before a pass.
+
+A round reports every blocking finding and at most 5 other advisory findings, ranked by severity, then impact, then
+likelihood, then the order Codex gave them. It also reports the first finding for each accepted risk that downgraded a
+finding, so the text you wrote for it is always shown. The result's `score.advisory_omitted` counts the rest. They are
+still counted and recorded, but they do not enter the class history (only reported findings' classes do, so an omitted class never turns a later finding into a `repeat_class`); only their text is left out of the report.
 
 A round's output gives each finding's `blocking`, `why` and `value`, and the score's `blocking`, `advisory` and
 `unvalued` counts. The context file's format is in the README ("Telling Codex about your project").

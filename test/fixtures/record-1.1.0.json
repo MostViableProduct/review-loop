@@ -1,0 +1,198 @@
+{
+  "v": 1,
+  "identity": {
+    "kind": "spec",
+    "path": "/r/docs/specs/legacy.md"
+  },
+  "status": "awaiting_human",
+  "round": 3,
+  "mode": "capped",
+  "nextCheckpoint": 10,
+  "uncappedStart": null,
+  "bestSumTenths": null,
+  "sinceImprovement": 0,
+  "fingerprint": "fp2",
+  "reviewedFingerprint": null,
+  "reviewedContext": "default",
+  "history": [
+    {
+      "round": 1,
+      "sumTenths": 1019,
+      "dims": {
+        "Correctness": 95,
+        "Safety": 69,
+        "Reliability": 95,
+        "Observability": 95,
+        "Verifiability": 95,
+        "Efficiency": 95,
+        "Performance": 95,
+        "Simplicity": 95,
+        "Maintainability": 95,
+        "Coherence": 95,
+        "Usability": 95
+      },
+      "findings": 2,
+      "context": "default",
+      "triage": {
+        "blocking": 1,
+        "advisory": 1,
+        "unvalued": 0,
+        "why": {
+          "critical": 0,
+          "unvalued": 0,
+          "accepted_risk": 0,
+          "money_data_security": 1,
+          "repeat_class": 0,
+          "realistic": 0,
+          "low_value": 1
+        },
+        "likelihoods": [
+          "real_path"
+        ]
+      },
+      "at": "2026-10-30T16:39:30.110Z"
+    },
+    {
+      "round": 2,
+      "sumTenths": 1034,
+      "dims": {
+        "Correctness": 84,
+        "Safety": 95,
+        "Reliability": 95,
+        "Observability": 95,
+        "Verifiability": 95,
+        "Efficiency": 95,
+        "Performance": 95,
+        "Simplicity": 95,
+        "Maintainability": 95,
+        "Coherence": 95,
+        "Usability": 95
+      },
+      "findings": 1,
+      "context": "default",
+      "triage": {
+        "blocking": 1,
+        "advisory": 0,
+        "unvalued": 0,
+        "why": {
+          "critical": 0,
+          "unvalued": 0,
+          "accepted_risk": 0,
+          "money_data_security": 0,
+          "repeat_class": 0,
+          "realistic": 1,
+          "low_value": 0
+        },
+        "likelihoods": [
+          "plausible"
+        ]
+      },
+      "at": "2026-10-30T16:39:30.110Z"
+    },
+    {
+      "round": 3,
+      "sumTenths": 1034,
+      "dims": {
+        "Correctness": 95,
+        "Safety": 95,
+        "Reliability": 84,
+        "Observability": 95,
+        "Verifiability": 95,
+        "Efficiency": 95,
+        "Performance": 95,
+        "Simplicity": 95,
+        "Maintainability": 95,
+        "Coherence": 95,
+        "Usability": 95
+      },
+      "findings": 2,
+      "context": "default",
+      "triage": {
+        "blocking": 1,
+        "advisory": 1,
+        "unvalued": 0,
+        "why": {
+          "critical": 0,
+          "unvalued": 0,
+          "accepted_risk": 0,
+          "money_data_security": 0,
+          "repeat_class": 0,
+          "realistic": 1,
+          "low_value": 1
+        },
+        "likelihoods": [
+          "plausible"
+        ]
+      },
+      "at": "2026-10-30T16:39:30.110Z"
+    }
+  ],
+  "disputes": [
+    {
+      "title": "[Reliability] retry bound",
+      "file": "a.md",
+      "reason": "bounded at 3 in retry.mjs",
+      "raisedAgain": 0,
+      "class": null
+    }
+  ],
+  "waivers": [
+    {
+      "title": "[Usability] copy",
+      "file": "b.md",
+      "at": "2026-10-12T00:00:00.000Z",
+      "class": null
+    }
+  ],
+  "lastFindings": [],
+  "classes": [
+    {
+      "label": "token handling",
+      "key": "Safety:token handling",
+      "dimension": "Safety",
+      "rounds": [
+        3
+      ],
+      "disposition": "raised"
+    }
+  ],
+  "sinceValue": 2,
+  "awaiting": {
+    "reason": "diminishing_returns",
+    "detail": {
+      "rounds": [
+        {
+          "round": 2,
+          "blocking": 1,
+          "advisory": 0,
+          "unvalued": 0,
+          "likelihoods": [
+            "plausible"
+          ]
+        },
+        {
+          "round": 3,
+          "blocking": 1,
+          "advisory": 1,
+          "unvalued": 0,
+          "likelihoods": [
+            "plausible"
+          ]
+        }
+      ]
+    },
+    "options": [
+      "continue",
+      "accept",
+      "stop"
+    ],
+    "fingerprint": "fp2",
+    "context": "default"
+  },
+  "lastError": null,
+  "errorAttempts": 0,
+  "meta": {
+    "projectRoot": "/r"
+  },
+  "updatedAt": "2026-10-30T16:39:30.111Z"
+}
