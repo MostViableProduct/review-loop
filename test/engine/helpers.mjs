@@ -40,20 +40,40 @@ export function readFixture(root, ...rel) {
 }
 
 /**
- * Writes a recorded fixture: every directory from `root` to `dir` must be a real directory (created if absent) and
- * the file itself is opened O_NOFOLLOW, so a reviewed symlink can't redirect the recording.
- * @param {string} root the repository root @param {string} dir @param {string} name @param {string} text
+ * Every directory from `root` to `dir` must be a real directory; `create` makes the missing ones.
+ * @param {string} root @param {string} dir @param {boolean} create
  */
-export function recordFixture(root, dir, name, text) {
+function assertRealDir(root, dir, create) {
   const rel = path.relative(root, dir);
   if (rel.startsWith("..") || path.isAbsolute(rel)) throw new Error(`${dir}: outside ${root}`);
   let at = root;
   for (const part of rel.split(path.sep).filter(Boolean)) {
     at = path.join(at, part);
     const st = fs.lstatSync(at, { throwIfNoEntry: false });
-    if (st === undefined) fs.mkdirSync(at);
-    else if (!st.isDirectory()) throw new Error(`${at}: not a real directory (symlinks are never followed)`);
+    if (st === undefined && create) fs.mkdirSync(at);
+    else if (st === undefined || !st.isDirectory()) throw new Error(`${at}: not a real directory (symlinks are never followed)`);
   }
+}
+
+/**
+ * Names of the regular files in a fixture directory; a linked directory or a linked entry is refused, not followed.
+ * @param {string} root @param {string} dir
+ */
+export function listFixtures(root, dir) {
+  assertRealDir(root, dir, false);
+  return fs.readdirSync(dir, { withFileTypes: true }).map((e) => {
+    if (!e.isFile()) throw new Error(`${path.join(dir, e.name)}: not a regular file (symlinks are never followed)`);
+    return e.name;
+  });
+}
+
+/**
+ * Writes a recorded fixture: the directory must be real (created if absent) and the file itself is opened
+ * O_NOFOLLOW, so a reviewed symlink can't redirect the recording.
+ * @param {string} root the repository root @param {string} dir @param {string} name @param {string} text
+ */
+export function recordFixture(root, dir, name, text) {
+  assertRealDir(root, dir, true);
   const fd = fs.openSync(path.join(dir, name), fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_TRUNC | fs.constants.O_NOFOLLOW, 0o644);
   try {
     fs.writeSync(fd, text);

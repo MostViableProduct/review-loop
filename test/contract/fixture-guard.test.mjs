@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { tmpDir, readFixture, recordFixture } from "../engine/helpers.mjs";
+import { tmpDir, readFixture, recordFixture, listFixtures } from "../engine/helpers.mjs";
 
 const REPO = fileURLToPath(new URL("../..", import.meta.url));
 
@@ -56,4 +56,27 @@ test("fixture guard: recordFixture never writes through a symlinked directory or
 test("fixture guard: recordFixture refuses a directory outside the root", () => {
   const root = tmpDir("rl-root-");
   assert.throws(() => recordFixture(root, tmpDir("rl-elsewhere-"), "a.json", "{}"), /outside/);
+});
+
+test("fixture guard: listFixtures refuses a symlinked directory and a symlinked entry", () => {
+  const root = tmpDir("rl-root-");
+  const { outside, file } = sentinel();
+  fs.mkdirSync(path.join(root, "test"));
+  fs.symlinkSync(outside, path.join(root, "test", "golden"));
+  assert.throws(() => listFixtures(root, path.join(root, "test", "golden")), /not a real directory/);
+
+  fs.rmSync(path.join(root, "test", "golden"));
+  const real = path.join(root, "test", "golden");
+  fs.mkdirSync(real);
+  fs.writeFileSync(path.join(real, "a.json"), "{}");
+  assert.deepEqual(listFixtures(root, real), ["a.json"]);
+  fs.symlinkSync(file, path.join(real, "b.json"));
+  assert.throws(() => listFixtures(root, real), /not a regular file/);
+});
+
+test("fixture guard: the golden comparison reads fixtures through the guard", () => {
+  const src = fs.readFileSync(path.join(REPO, "test", "engine", "golden.test.mjs"), "utf8");
+  assert.match(src, /listFixtures\(ROOT, DIR\)/, "the directory is listed through listFixtures");
+  assert.match(src, /readFixture\(ROOT,/, "each case file is read through readFixture");
+  assert.doesNotMatch(src, /fs\.(readdirSync|readFileSync|writeFileSync)\(\s*(DIR|path\.join\(DIR)/, "no raw fs call on the fixture directory");
 });
