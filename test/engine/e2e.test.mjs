@@ -7,7 +7,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawnSync, spawn } from "node:child_process";
 import { makeFakeBin } from "../fakes/fakebin.mjs";
-import { g, makeRepo, commitFile, writeFile, tmpDir, GIT_ENV } from "./helpers.mjs";
+import { g, makeRepo, commitFile, writeFile, tmpDir, GIT_ENV, readFixture } from "./helpers.mjs";
 import { classify } from "../../cli/lib/livecheck.mjs";
 import { identityKey } from "../../plugin/engine/lib/state.mjs";
 
@@ -358,7 +358,7 @@ test("companion prints a valid approval but exits non-zero → exit 30 codex_fai
   assert.equal(again.code, 0, "control: the same payload with exit 0 passes");
 });
 
-const SIGNED_OUT = fs.readFileSync(path.join(HERE, "..", "fixtures", "companion-1.0.6-signed-out.json"), "utf8");
+const SIGNED_OUT = readFixture(path.join(HERE, "..", ".."), "test", "fixtures", "companion-1.0.6-signed-out.json");
 /** @param {string} dir @returns {string[]} every regular file under dir */
 const filesUnder = (dir) => fs.readdirSync(dir, { recursive: true }).map((p) => path.join(dir, String(p))).filter((f) => fs.lstatSync(f).isFile());
 

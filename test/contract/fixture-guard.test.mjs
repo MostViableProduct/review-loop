@@ -80,3 +80,15 @@ test("fixture guard: the golden comparison reads fixtures through the guard", ()
   assert.match(src, /readFixture\(ROOT,/, "each case file is read through readFixture");
   assert.doesNotMatch(src, /fs\.(readdirSync|readFileSync|writeFileSync)\(\s*(DIR|path\.join\(DIR)/, "no raw fs call on the fixture directory");
 });
+
+test("fixture guard: the companion fixture, which tests hand to a child process, is only read through readFixture", () => {
+  const dir = path.join(REPO, "test");
+  const users = fs.readdirSync(dir, { recursive: true }).map(String).filter((f) => f.endsWith(".mjs") && f !== path.join("contract", "fixture-guard.test.mjs"));
+  const found = users.filter((f) => fs.readFileSync(path.join(dir, f), "utf8").includes("companion-1.0.6-signed-out.json"));
+  assert.ok(found.length >= 3, "the scan finds the three tests that use it");
+  for (const f of found) {
+    const src = fs.readFileSync(path.join(dir, f), "utf8");
+    assert.match(src, /readFixture\(.*companion-1\.0\.6-signed-out\.json/, `${f} reads it through readFixture`);
+    assert.doesNotMatch(src, /fs\.(readFileSync|copyFileSync)\(.*companion-1\.0\.6/, `${f} has no raw fs read of it`);
+  }
+});
