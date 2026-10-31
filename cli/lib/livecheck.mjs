@@ -4,6 +4,7 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { pinFile } from "../../plugin/engine/lib/pin.mjs";
+import { safeReadFile } from "../../plugin/engine/lib/fsutil.mjs";
 import { enginePath } from "./plugin.mjs";
 import { CODES } from "../../plugin/engine/lib/codes.mjs";
 
@@ -29,6 +30,19 @@ export function classify(text) {
   return "unknown";
 }
 
+const FIXTURE = fileURLToPath(new URL("../fixtures/livecheck-doc.md", import.meta.url));
+const FIXTURE_MAX_BYTES = 64 * 1024;
+
+/**
+ * The document the live review sends to Codex. It ships inside the package, so a link there is a bad install or a
+ * hostile checkout: never followed, because its target's bytes would go to Codex.
+ * @param {string} [file]
+ * @returns {Buffer}
+ */
+export function readLiveFixture(file = FIXTURE) {
+  return safeReadFile(file, FIXTURE_MAX_BYTES, {}, { within: path.dirname(path.dirname(file)) });
+}
+
 /**
  * A real round on a tiny fixture in a temp repo and temp state (the user's history stays clean), with the real pin.
  * Exit 10 (needs fixes) is a pass: the fixture deliberately has a finding, and the check proves the chain works.
@@ -44,9 +58,16 @@ export async function liveCheck(io) {
   try {
     const init = spawnSync("git", ["init", "-q"], { cwd: repo });
     if (init.error || init.status !== 0) return { ok: false, detail: "git_failed", text: "could not create the temporary git repository" };
+    /** @type {Buffer} */
+    let fixture;
+    try {
+      fixture = readLiveFixture();
+    } catch (err) {
+      return { ok: false, detail: "unknown", text: `the live-check fixture is not a plain file inside the package: ${err instanceof Error ? err.message : "unreadable"}` };
+    }
     const doc = path.join(repo, "docs", "specs", "livecheck-design.md");
     fs.mkdirSync(path.dirname(doc), { recursive: true });
-    fs.copyFileSync(fileURLToPath(new URL("../fixtures/livecheck-doc.md", import.meta.url)), doc);
+    fs.writeFileSync(doc, fixture);
     io.err("Running the live review…\n");
     const r = spawnSync(process.execPath, [path.join(engine, "review-round.mjs"), "run", "--kind", "spec", "--path", doc, "--project-root", repo], {
       env: { ...process.env, REVIEW_LOOP_STATE_DIR: state, REVIEW_LOOP_PIN_FILE: pinFile() }, encoding: "utf8", timeout: 15 * 60_000

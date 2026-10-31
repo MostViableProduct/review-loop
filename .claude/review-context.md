@@ -1,0 +1,3 @@
+Developer CLI and Claude Code plugin; runs on the maintainer's machine and in CI on a fresh checkout of reviewed code.
+- AR-1 (2026-10-31) [Safety] class=unguarded fixture read: unit tests read this repo's committed fixtures with plain readFileSync and nothing they read leaves the process; every path that forwards a fixture to Codex or Claude (cli/lib/livecheck.mjs, test/e2e/live.test.mjs) or records or compares the golden fixtures reads through safeReadFile or the guards in test/engine/helpers.mjs, with test/contract/fixture-guard.test.mjs and test/cli/livecheck.test.mjs pinning them
+- AR-2 (2026-10-31) [Safety] class=unguarded test fixture read: the same scope as AR-1, under the label Codex has also used; a new forwarding path or a write is not covered
