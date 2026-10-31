@@ -81,13 +81,38 @@ test("fixture guard: the golden comparison reads fixtures through the guard", ()
   assert.doesNotMatch(src, /fs\.(readdirSync|readFileSync|writeFileSync)\(\s*(DIR|path\.join\(DIR)/, "no raw fs call on the fixture directory");
 });
 
+/**
+ * Test files under `dir` whose text names `needle`. A link is skipped, never followed, and every file is read through
+ * readFixture (lstat, a size cap), so an added `test/x.mjs` can't make this scan read outside the tree or hang.
+ * @param {string} root @param {string} dir @param {string} needle @returns {string[]} paths relative to dir
+ */
+function filesMentioning(root, dir, needle) {
+  const out = [];
+  for (const e of fs.readdirSync(dir, { recursive: true, withFileTypes: true })) {
+    if (!e.isFile() || !e.name.endsWith(".mjs")) continue;
+    const rel = path.relative(dir, path.join(e.parentPath, e.name));
+    if (readFixture(root, path.relative(root, dir), rel).includes(needle)) out.push(rel);
+  }
+  return out;
+}
+
+test("fixture guard: the scan skips links and refuses oversized files", () => {
+  const root = tmpDir("rl-root-");
+  const { file } = sentinel();
+  fs.mkdirSync(path.join(root, "test"));
+  fs.writeFileSync(path.join(root, "test", "a.mjs"), "needle");
+  fs.symlinkSync(file, path.join(root, "test", "link.mjs"));
+  assert.deepEqual(filesMentioning(root, path.join(root, "test"), "needle"), ["a.mjs"], "the link is skipped, not read");
+  fs.writeFileSync(path.join(root, "test", "big.mjs"), Buffer.alloc(300 * 1024));
+  assert.throws(() => filesMentioning(root, path.join(root, "test"), "needle"), /exceeds/);
+});
+
 test("fixture guard: the companion fixture, which tests hand to a child process, is only read through readFixture", () => {
   const dir = path.join(REPO, "test");
-  const users = fs.readdirSync(dir, { recursive: true }).map(String).filter((f) => f.endsWith(".mjs") && f !== path.join("contract", "fixture-guard.test.mjs"));
-  const found = users.filter((f) => fs.readFileSync(path.join(dir, f), "utf8").includes("companion-1.0.6-signed-out.json"));
+  const found = filesMentioning(REPO, dir, "companion-1.0.6-signed-out.json").filter((f) => f !== path.join("contract", "fixture-guard.test.mjs"));
   assert.ok(found.length >= 3, "the scan finds the three tests that use it");
   for (const f of found) {
-    const src = fs.readFileSync(path.join(dir, f), "utf8");
+    const src = readFixture(REPO, "test", f);
     assert.match(src, /readFixture\(.*companion-1\.0\.6-signed-out\.json/, `${f} reads it through readFixture`);
     assert.doesNotMatch(src, /fs\.(readFileSync|copyFileSync)\(.*companion-1\.0\.6/, `${f} has no raw fs read of it`);
   }
