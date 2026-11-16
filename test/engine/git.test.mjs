@@ -308,15 +308,41 @@ test("committedPaths: commits since the start commit, by range not date; a start
   await assert.rejects(committedPaths(repo, "0".repeat(40)), (e) => e.code === "detection_failed");
 });
 
-test("committedPaths: a commit a remote-tracking ref already holds (a pull brought it in) is not this session's; commit metadata decides nothing", async () => {
+test("committedPaths: a fast-forward pull's commits are not the session's; a pushed session commit and a merge that creates a commit are", async () => {
+  const root = tmpDir();
+  const bare = path.join(root, "up.git");
+  g(root, "init", "--bare", "-q", bare);
+  const seed = makeRepo();
+  commitFile(seed, "a.md", "a");
+  g(seed, "push", "-q", bare, "HEAD:main");
+  const local = path.join(root, "local");
+  const other = path.join(root, "other");
+  g(root, "clone", "-q", bare, local);
+  g(root, "clone", "-q", bare, other);
+  const start = g(local, "rev-parse", "HEAD");
+
+  commitFile(other, "theirs.md", "t");
+  g(other, "push", "-q", "origin", "HEAD:main");
+  g(local, "pull", "-q", "--ff-only");
+  assert.deepEqual(await committedPaths(local, start), [], "brought in by git pull --ff-only: not flagged");
+
+  commitFile(local, "pushed.md", "p");
+  g(local, "push", "-q", "origin", "HEAD:main");
+  g(local, "fetch", "-q");
+  assert.deepEqual(await committedPaths(local, start), ["pushed.md"], "pushed to the remote and fetched back: still the session's");
+
+  g(other, "pull", "-q", "--ff-only");
+  commitFile(other, "theirs2.md", "t2");
+  g(other, "push", "-q", "origin", "HEAD:main");
+  commitFile(local, "mine.md", "m");
+  g(local, "pull", "-q", "--no-rebase", "--no-edit");
+  assert.deepEqual((await committedPaths(local, start)).sort(), ["mine.md", "pushed.md", "theirs2.md"], "a pull that makes a merge commit is not read as a fast-forward");
+});
+
+test("committedPaths: a commit made under another committer identity and date is still the session's", async () => {
   const repo = makeRepo();
   commitFile(repo, "a.md", "a");
   const start = g(repo, "rev-parse", "HEAD");
-  const theirs = commitFile(repo, "theirs.md", "x");
-  // What `git fetch` leaves behind before `git pull --ff-only` moves HEAD there.
-  g(repo, "update-ref", "refs/remotes/origin/main", theirs);
-  assert.deepEqual(await committedPaths(repo, start), [], "reachable from origin/main: not flagged");
-  // The same commit made under another committer identity and date, but held by no remote: still the session's.
   fs.writeFileSync(path.join(repo, "forged.md"), "x");
   g(repo, "add", "forged.md");
   execFileSync("git", ["-c", "commit.gpgsign=false", "commit", "-q", "-m", "forged"], {

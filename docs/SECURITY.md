@@ -26,10 +26,11 @@ can't hold is percent-encoded: for base `release/1.x`, require `review-loop/rele
   rules match the plain ways to do it (`Edit`, `Write`, a shell command naming the file), as they do for the kill
   switch and `override`: a path built at run time can get past them. For a pull request it is read from the base
   branch, so it changes the gate only once it is on that branch.
-- At Stop, a spec or plan in a commit that a remote-tracking ref already holds counts as reviewed where it was
-  written, because a pull brings in other people's work. Claude can put its own commit under such a ref (`git
-  update-ref refs/remotes/...`, or a push before its review), and Stop then stops listing it. The pull request
-  review and the required check still cover that commit before it merges.
+- At Stop, a spec or plan that arrived by a fast-forward `git pull` or `git merge` counts as reviewed where it was
+  written, because a pull brings in other people's work. review-loop reads this from HEAD's reflog, which git
+  writes, so a commit Claude made and pushed is still listed. Claude can write a false reflog entry on purpose
+  (`git update-ref -m "pull: Fast-forward" HEAD`), and Stop then stops listing the commits it moves HEAD over. The
+  pull request review and the required check still cover those commits before they merge.
 - Without `gh` (GitHub MCP tools only), review-loop can't check or contain a new PR's head commit, so
   under `default` and `balanced` Claude is stopped after each PR it creates. Install and sign in to `gh`
   (`brew install gh && gh auth login`) for automatic checks.
