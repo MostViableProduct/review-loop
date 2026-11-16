@@ -634,6 +634,64 @@ test("a spec edited and committed through the shell during the session stays pen
   const r = hook("stop", S);
   assert.equal(r.out?.decision, "block", JSON.stringify(r.out));
   assert.match(r.out.reason, /spec .*feature-spec\.md/);
+  assert.match(r.out.reason, /\[pending: committed_since_session_start\]/, "the Stop text says why it is listed");
+});
+
+/** A commit under another committer's identity (what a squash merge looks like), carrying a spec. */
+function commitAsOtherCommitter(/** @type {string} */ repo, /** @type {string} */ rel) {
+  const abs = path.join(repo, rel);
+  fs.mkdirSync(path.dirname(abs), { recursive: true });
+  fs.writeFileSync(abs, "merged elsewhere and pulled in");
+  spawnSync("git", ["add", "--", rel], { cwd: repo, env: GIT_ENV });
+  const c = spawnSync("git", ["-c", "commit.gpgsign=false", "commit", "-q", "-m", "squash merge"], { cwd: repo, env: { ...GIT_ENV, GIT_COMMITTER_NAME: "GitHub", GIT_COMMITTER_EMAIL: "noreply@github.com" } });
+  assert.equal(c.status, 0, c.stderr?.toString());
+}
+
+/** A bare upstream with one commit, a clone the session works in, and a second clone another person commits from. */
+function upstreamWithClones() {
+  const root = tmpDir();
+  const bare = path.join(root, "up.git");
+  g(root, "init", "--bare", "-q", bare);
+  const seed = specRepo();
+  g(seed, "push", "-q", bare, "HEAD:main");
+  const local = path.join(root, "local");
+  const other = path.join(root, "other");
+  g(root, "clone", "-q", bare, local);
+  g(root, "clone", "-q", bare, other);
+  return { local, other };
+}
+
+test("a spec brought in by a fast-forward pull is not flagged at Stop", () => {
+  const { local, other } = upstreamWithClones();
+  const S = { session_id: "e2e-session", cwd: local, stop_hook_active: false };
+  hook("session", S);
+  commitFile(other, "docs/specs/pulled-spec.md", "written and reviewed elsewhere");
+  g(other, "push", "-q", "origin", "HEAD:main");
+  g(local, "pull", "-q", "--ff-only");
+  const r = hook("stop", S);
+  assert.equal(r.out?.decision, undefined, JSON.stringify(r.out));
+});
+
+test("a spec the session committed and pushed before its review is still flagged at Stop", () => {
+  const { local } = upstreamWithClones();
+  const S = { session_id: "e2e-session", cwd: local, stop_hook_active: false };
+  hook("session", S);
+  commitFile(local, "docs/specs/pushed-spec.md", "written here, pushed before review");
+  g(local, "push", "-q", "origin", "HEAD:main");
+  g(local, "fetch", "-q");
+  const r = hook("stop", S);
+  assert.equal(r.out?.decision, "block", JSON.stringify(r.out));
+  assert.match(r.out.reason, /spec .*pushed-spec\.md/);
+});
+
+test("a spec committed under another committer identity is still flagged: commit metadata is the session's to set", () => {
+  const repo = specRepo();
+  const S = { session_id: "e2e-session", cwd: repo, stop_hook_active: false };
+  hook("session", S);
+  commitAsOtherCommitter(repo, "docs/specs/forged-spec.md");
+  const r = hook("stop", S);
+  assert.equal(r.out?.decision, "block", JSON.stringify(r.out));
+  assert.match(r.out.reason, /spec .*forged-spec\.md/);
 });
 
 test("a spec committed with a backdated committer date during the session still stays pending at Stop", () => {

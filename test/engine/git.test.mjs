@@ -307,3 +307,97 @@ test("committedPaths: commits since the start commit, by range not date; a start
   assert.deepEqual(await committedPaths(repo, start), ["old.md"], "a backdated commit is still in the range");
   await assert.rejects(committedPaths(repo, "0".repeat(40)), (e) => e.code === "detection_failed");
 });
+
+/** A bare upstream with one commit, the clone a session works in, a second clone another person commits from, and the session's start commit. */
+function bareWithClones() {
+  const root = tmpDir();
+  const bare = path.join(root, "up.git");
+  g(root, "init", "--bare", "-q", bare);
+  const seed = makeRepo();
+  commitFile(seed, "a.md", "a");
+  g(seed, "push", "-q", bare, "HEAD:main");
+  const local = path.join(root, "local");
+  const other = path.join(root, "other");
+  g(root, "clone", "-q", bare, local);
+  g(root, "clone", "-q", bare, other);
+  return { root, local, other, start: g(local, "rev-parse", "HEAD") };
+}
+
+test("committedPaths: a fast-forward pull's commits are not the session's; a pushed session commit and a merge that creates a commit are", async () => {
+  const { local, other, start } = bareWithClones();
+
+  commitFile(other, "theirs.md", "t");
+  g(other, "push", "-q", "origin", "HEAD:main");
+  g(local, "pull", "-q", "--ff-only");
+  assert.deepEqual(await committedPaths(local, start), [], "brought in by git pull --ff-only: not flagged");
+
+  commitFile(local, "pushed.md", "p");
+  g(local, "push", "-q", "origin", "HEAD:main");
+  g(local, "fetch", "-q");
+  assert.deepEqual(await committedPaths(local, start), ["pushed.md"], "pushed to the remote and fetched back: still the session's");
+
+  g(other, "pull", "-q", "--ff-only");
+  commitFile(other, "theirs2.md", "t2");
+  g(other, "push", "-q", "origin", "HEAD:main");
+  commitFile(local, "mine.md", "m");
+  g(local, "pull", "-q", "--no-rebase", "--no-edit");
+  assert.deepEqual((await committedPaths(local, start)).sort(), ["mine.md", "pushed.md", "theirs2.md"], "a pull that makes a merge commit is not read as a fast-forward");
+});
+
+test("committedPaths: a local branch fast-forwarded in is the session's work, pushed or not", async () => {
+  const { root, local, start } = bareWithClones();
+
+  // Made in a linked worktree (no entry in this HEAD's reflog) and never pushed.
+  const wt = path.join(root, "wt");
+  g(local, "worktree", "add", "-q", "-b", "feat", wt);
+  commitFile(wt, "feat.md", "f");
+  g(local, "merge", "-q", "--ff-only", "feat");
+  assert.deepEqual(await committedPaths(local, start), ["feat.md"], "a local branch is not an incoming commit");
+
+  // Pushing a later branch that contains it puts it under a remote-tracking ref, but a push is not a fetch.
+  g(local, "checkout", "-q", "-b", "feat2");
+  commitFile(local, "feat2.md", "f2");
+  g(local, "push", "-q", "origin", "feat2");
+  g(local, "checkout", "-q", "main");
+  g(local, "merge", "-q", "--ff-only", "feat2");
+  assert.deepEqual((await committedPaths(local, start)).sort(), ["feat.md", "feat2.md"], "pushing it, or a branch holding it, does not make it incoming");
+});
+
+test("committedPaths: fetching a local fast-forward's tip afterwards does not make it incoming", async () => {
+  const { root, local, start } = bareWithClones();
+  const wt = path.join(root, "wt");
+  g(local, "worktree", "add", "-q", "-b", "feat", wt);
+  commitFile(wt, "feat.md", "f");
+  g(local, "merge", "-q", "--ff-only", "feat");
+  // Reflog times are whole seconds. Pushed by URL, no tracking ref moves; the fetch then records the tip as fetched.
+  await new Promise((resolve) => setTimeout(resolve, 1100));
+  g(local, "push", "-q", path.join(root, "up.git"), "feat:refs/heads/feat3");
+  g(local, "fetch", "-q");
+  assert.deepEqual(await committedPaths(local, start), ["feat.md"]);
+});
+
+test("committedPaths: a commit this checkout made stays the session's when a fast-forward pull brings it back with someone else's", async () => {
+  const { local, other, start } = bareWithClones();
+  g(local, "checkout", "-q", "-b", "side");
+  commitFile(local, "mine.md", "m");
+  g(local, "push", "-q", "origin", "side:main");
+  g(local, "checkout", "-q", "main");
+  g(other, "pull", "-q", "--ff-only");
+  commitFile(other, "theirs.md", "t");
+  g(other, "push", "-q", "origin", "HEAD:main");
+  g(local, "pull", "-q", "--ff-only");
+  assert.deepEqual(await committedPaths(local, start), ["mine.md"], "theirs.md arrived by the pull; mine.md was committed here");
+});
+
+test("committedPaths: a commit made under another committer identity and date is still the session's", async () => {
+  const repo = makeRepo();
+  commitFile(repo, "a.md", "a");
+  const start = g(repo, "rev-parse", "HEAD");
+  fs.writeFileSync(path.join(repo, "forged.md"), "x");
+  g(repo, "add", "forged.md");
+  execFileSync("git", ["-c", "commit.gpgsign=false", "commit", "-q", "-m", "forged"], {
+    cwd: repo,
+    env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@example.com", GIT_COMMITTER_NAME: "GitHub", GIT_COMMITTER_EMAIL: "noreply@github.com", GIT_AUTHOR_DATE: "2001-01-01T00:00:00Z", GIT_COMMITTER_DATE: "2001-01-01T00:00:00Z" }
+  });
+  assert.deepEqual(await committedPaths(repo, start), ["forged.md"]);
+});

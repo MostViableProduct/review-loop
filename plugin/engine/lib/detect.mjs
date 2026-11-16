@@ -30,7 +30,7 @@ const START_OK = "session-start-completed";
 
 /**
  * @typedef {import("./state.mjs").Identity} Identity
- * @typedef {{ identity: Identity, key: string, fingerprint: string, projectRoot: string | null, carriedFrom?: Identity }} Artifact
+ * @typedef {{ identity: Identity, key: string, fingerprint: string, projectRoot: string | null, carriedFrom?: Identity, via?: "commits" }} Artifact
  */
 
 /**
@@ -156,7 +156,7 @@ async function committedDocs(root, startHead) {
     // Deleted (or no longer a file) since: nothing left to review, as for a deletion in `git status`.
     if (!fs.lstatSync(abs, { throwIfNoEntry: false })?.isFile()) continue;
     const identity = /** @type {Identity} */ ({ kind, path: abs });
-    out.push({ identity, key: identityKey(identity), fingerprint: docFingerprint(abs, root).fingerprint, projectRoot: root });
+    out.push({ identity, key: identityKey(identity), fingerprint: docFingerprint(abs, root).fingerprint, projectRoot: root, via: "commits" });
   }
   return out;
 }
@@ -412,7 +412,7 @@ async function scanSession(session, cwd) {
           ? "round_in_progress"
           : exhausted
             ? `${rec?.lastError?.code ?? "op_error"}, ${rec?.errorAttempts} attempts — retries exhausted: report it; the user decides`
-            : contextChanged ? (current === "error" ? "review_context_invalid" : "context_changed") : rec?.awaiting?.reason ?? rec?.lastError?.code ?? (a.fingerprint.startsWith("error:") ? a.fingerprint.split(":")[1] : null),
+            : contextChanged ? (current === "error" ? "review_context_invalid" : "context_changed") : rec?.awaiting?.reason ?? rec?.lastError?.code ?? (a.fingerprint.startsWith("error:") ? a.fingerprint.split(":")[1] : a.via === "commits" ? "committed_since_session_start" : null),
       command: status === "reviewing" ? `wait for the running round to finish and act on its exit code (re-running now returns busy): ${runCommand}` : runCommand,
       blocking
     });

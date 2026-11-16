@@ -103,6 +103,73 @@ export async function headSha(root) {
 }
 
 const MAX_COMMITTED_PATHS = 5000;
+const MAX_REFLOG_ENTRIES = 2000;
+const MAX_FAST_FORWARDS = 100;
+/** The reflog subject git writes when HEAD moves by `git pull` or `git merge` and nothing is created: `pull --ff-only: Fast-forward`. */
+const FAST_FORWARD = /^(pull|merge)\b[^:]*: Fast-forward$/;
+/** What a remote-tracking ref's reflog says when a fetch, a pull or a clone moved it (a push says `update by push`). */
+const FETCHED = /^(fetch|pull|clone)\b/;
+/** The reflog subjects of work done in this checkout: a commit, an amend, a rebased or picked commit, a revert, an applied patch. */
+const MADE_HERE = /^(commit|cherry-pick|rebase|am|revert)\b/;
+
+/**
+ * Commits that HEAD's reflog shows arriving by a fast-forward pull or merge (each entry's `previous..new`), and only
+ * those that came from outside this checkout:
+ * - the entry's new tip must be one a remote-tracking ref's own reflog shows being fetched, pulled or cloned (a push is
+ *   logged `update by push`) at or before the move, so `git merge feat` of a local branch is not taken for a pull, and
+ *   neither pushing a later branch that contains the commit nor fetching the tip afterwards turns it into one; and
+ * - a commit this HEAD's own reflog shows being committed, rebased, picked, reverted or applied is never incoming, so
+ *   a branch committed on here, pushed, and fast-forwarded in later stays the session's.
+ * A push never moves HEAD, so a commit the session made and pushed is not in a fast-forward; a reset and a merge that
+ * creates a commit are not either, and stay flagged. Past MAX_REFLOG_ENTRIES entries or MAX_FAST_FORWARDS
+ * fast-forwards the older ones are not read (over-review), and with no reflog the set is empty. The subject and the
+ * remote-tracking ref are text and refs any writer can set (`git update-ref`), so this is a guardrail against a stale
+ * view, not against Claude writing false entries on purpose (docs/SECURITY.md).
+ * @param {string} root
+ * @returns {Promise<Set<string>>}
+ */
+async function fastForwardedIn(root) {
+  const incoming = new Set();
+  const log = await reflogRows(root, ["HEAD"]);
+  const tracking = await reflogRows(root, ["--glob=refs/remotes/*"]);
+  if (log === null || tracking === null) return incoming;
+  // The first moment a remote-tracking ref was moved to each tip by a fetch, a pull or a clone.
+  /** @type {Map<string, number>} */
+  const fetchedAt = new Map();
+  for (const e of tracking) if (FETCHED.test(e.subject) && e.at < (fetchedAt.get(e.sha) ?? Infinity)) fetchedAt.set(e.sha, e.at);
+  const madeHere = new Set(log.filter((e) => MADE_HERE.test(e.subject)).map((e) => e.sha));
+  let read = 0;
+  // Newest first: entry i+1 is where HEAD was before entry i; the oldest entry has no previous and is never read.
+  for (let i = 0; i < log.length - 1 && read < MAX_FAST_FORWARDS; i++) {
+    if (!FAST_FORWARD.test(log[i].subject)) continue;
+    read++;
+    // A fetch of the same tip after the move (a later `git fetch` of a branch pushed by URL) does not make it incoming.
+    if (!((fetchedAt.get(log[i].sha) ?? Infinity) <= log[i].at)) continue;
+    const r = await git(root, ["rev-list", `${log[i + 1].sha}..${log[i].sha}`, "--"], { maxBuffer: 8 * MiB });
+    if (r.code === 0) for (const sha of r.stdout.split("\n")) if (sha !== "" && !madeHere.has(sha)) incoming.add(sha);
+  }
+  return incoming;
+}
+
+/**
+ * The reflog entries of the given refs, newest first, each with the commit it points at, its subject and the unix
+ * second git wrote it. Null when git cannot read them.
+ * @param {string} root
+ * @param {string[]} refs a ref, or a `--glob=` pattern
+ * @returns {Promise<Array<{ sha: string, subject: string, at: number }> | null>}
+ */
+async function reflogRows(root, refs) {
+  const r = await git(root, ["reflog", "show", "--date=unix", "--format=%H%x1f%gs%x1f%gd", `--max-count=${MAX_REFLOG_ENTRIES}`, ...refs, "--"], { maxBuffer: 8 * MiB });
+  if (r.code !== 0) return null;
+  return r.stdout
+    .split("\n")
+    .filter(Boolean)
+    .map((l) => {
+      const [sha = "", subject = "", selector = ""] = l.split("\x1f");
+      const at = /@\{(\d+)\}$/.exec(selector);
+      return { sha, subject, at: at ? Number(at[1]) : Infinity };
+    });
+}
 
 /**
  * Paths touched by commits made since the session began, on the current history (start..HEAD): a shell edit committed
@@ -112,6 +179,10 @@ const MAX_COMMITTED_PATHS = 5000;
  * A commit moved off the current history (a switch away, a reset) is outside Stop's view by design (author's decision,
  * round 22): its file is not in the working tree to review, and the PR gate reviews every commit in a PR's diff
  * (head against the merge-base) before it can merge.
+ * Commits a fast-forward pull or merge brought in are left out (see `fastForwardedIn`): they are other people's and
+ * other sessions' commits, whose specs and plans were reviewed where they were written. Commit metadata (committer,
+ * author, date) and remote-tracking refs are no basis for the choice: the session sets the first, and a push puts its
+ * own commit under the second.
  * @param {string} root
  * @param {string | null} startHead HEAD at session start (null: no commit yet, so every commit is this session's)
  * @returns {Promise<string[]>} repo-relative paths
@@ -123,7 +194,16 @@ export async function committedPaths(root, startHead) {
     throw new ReviewLoopError("detection_failed", "the commit HEAD pointed at when the session began is no longer in the repository");
   }
   const range = startHead === null ? "HEAD" : `${startHead}..HEAD`;
-  const out = await gitOk(root, ["log", "--format=", "--name-only", "--no-renames", "-z", range, "--"], { maxBuffer: 8 * MiB, code: "detection_failed" });
+  const incoming = await fastForwardedIn(root);
+  let out;
+  if (incoming.size === 0) {
+    out = await gitOk(root, ["log", "--format=", "--name-only", "--no-renames", "-z", range, "--"], { maxBuffer: 8 * MiB, code: "detection_failed" });
+  } else {
+    const all = await gitOk(root, ["rev-list", range, "--"], { maxBuffer: 8 * MiB, code: "detection_failed" });
+    const own = all.split("\n").filter((sha) => sha !== "" && !incoming.has(sha));
+    if (own.length === 0) return [];
+    out = await gitOk(root, ["log", "--no-walk=unsorted", "--stdin", "--format=", "--name-only", "--no-renames", "-z", "--"], { input: own.join("\n") + "\n", maxBuffer: 8 * MiB, code: "detection_failed" });
+  }
   const paths = [...new Set(out.split("\0").map((p) => p.replace(/^\n+/, "")).filter(Boolean))];
   if (paths.length > MAX_COMMITTED_PATHS) throw new ReviewLoopError("detection_failed", `commits made this session touch ${paths.length} paths (limit ${MAX_COMMITTED_PATHS})`);
   return paths;
