@@ -27,10 +27,13 @@ can't hold is percent-encoded: for base `release/1.x`, require `review-loop/rele
   switch and `override`: a path built at run time can get past them. For a pull request it is read from the base
   branch, so it changes the gate only once it is on that branch.
 - At Stop, a spec or plan that arrived by a fast-forward `git pull` or `git merge` counts as reviewed where it was
-  written, because a pull brings in other people's work. review-loop reads this from HEAD's reflog, which git
-  writes, so a commit Claude made and pushed is still listed. Claude can write a false reflog entry on purpose
-  (`git update-ref -m "pull: Fast-forward" HEAD`), and Stop then stops listing the commits it moves HEAD over. The
-  pull request review and the required check still cover those commits before they merge.
+  written, because a pull brings in other people's work. review-loop reads this from the reflogs git writes: HEAD's
+  shows the fast-forward and what this checkout committed, and a remote-tracking ref's shows whether the new tip
+  was fetched or pushed. A commit Claude made here, a local branch it merged, and a commit it pushed all stay
+  listed. Claude can write false reflog entries on purpose (`git update-ref -m "pull: Fast-forward" HEAD`, and
+  the same for a remote-tracking ref), and Stop then stops listing the commits that move HEAD over. A commit made
+  in another checkout and fast-forwarded in after being fetched is left to that checkout's own Stop. The pull
+  request review and the required check still cover those commits before they merge.
 - Without `gh` (GitHub MCP tools only), review-loop can't check or contain a new PR's head commit, so
   under `default` and `balanced` Claude is stopped after each PR it creates. Install and sign in to `gh`
   (`brew install gh && gh auth login`) for automatic checks.

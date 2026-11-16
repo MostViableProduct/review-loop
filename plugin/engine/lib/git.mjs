@@ -107,14 +107,24 @@ const MAX_REFLOG_ENTRIES = 2000;
 const MAX_FAST_FORWARDS = 100;
 /** The reflog subject git writes when HEAD moves by `git pull` or `git merge` and nothing is created: `pull --ff-only: Fast-forward`. */
 const FAST_FORWARD = /^(pull|merge)\b[^:]*: Fast-forward$/;
+/** What a remote-tracking ref's reflog says when a fetch, a pull or a clone moved it (a push says `update by push`). */
+const FETCHED = /^(fetch|pull|clone)\b/;
+/** The reflog subjects of work done in this checkout: a commit, an amend, a rebased or picked commit, a revert, an applied patch. */
+const MADE_HERE = /^(commit|cherry-pick|rebase|am|revert)\b/;
 
 /**
- * Commits that HEAD's reflog shows arriving by a fast-forward pull or merge (each entry's `previous..new`). A push never
- * moves HEAD, so a commit the session made and pushed is not here; a commit, a rebase, a reset and a merge that
+ * Commits that HEAD's reflog shows arriving by a fast-forward pull or merge (each entry's `previous..new`), and only
+ * those that came from outside this checkout:
+ * - the entry's new tip must be one a remote-tracking ref's own reflog shows being fetched, pulled or cloned (a push is
+ *   logged `update by push`), so `git merge feat` of a local branch is not taken for a pull, and pushing a later
+ *   branch that contains the commit does not turn it into one; and
+ * - a commit this HEAD's own reflog shows being committed, rebased, picked, reverted or applied is never incoming, so
+ *   a branch committed on here, pushed, and fast-forwarded in later stays the session's.
+ * A push never moves HEAD, so a commit the session made and pushed is not in a fast-forward; a reset and a merge that
  * creates a commit are not either, and stay flagged. Past MAX_REFLOG_ENTRIES entries or MAX_FAST_FORWARDS
- * fast-forwards the older ones are not read (over-review), and with no reflog the set is empty. The subject is text any
- * writer of the reflog can set (`git update-ref -m`), so this is a guardrail against a stale view, not against Claude
- * writing a false entry on purpose (docs/SECURITY.md).
+ * fast-forwards the older ones are not read (over-review), and with no reflog the set is empty. The subject and the
+ * remote-tracking ref are text and refs any writer can set (`git update-ref`), so this is a guardrail against a stale
+ * view, not against Claude writing false entries on purpose (docs/SECURITY.md).
  * @param {string} root
  * @returns {Promise<Set<string>>}
  */
@@ -122,14 +132,26 @@ async function fastForwardedIn(root) {
   const incoming = new Set();
   const log = await git(root, ["reflog", "show", "--format=%H%x1f%gs", `--max-count=${MAX_REFLOG_ENTRIES}`, "HEAD", "--"], { maxBuffer: 8 * MiB });
   if (log.code !== 0) return incoming;
+  const tracking = await git(root, ["reflog", "show", "--glob=refs/remotes/*", "--format=%H%x1f%gs", `--max-count=${MAX_REFLOG_ENTRIES}`, "--"], { maxBuffer: 8 * MiB });
+  if (tracking.code !== 0) return incoming;
+  const fetched = new Set(
+    tracking.stdout
+      .split("\n")
+      .filter(Boolean)
+      .map((l) => l.split("\x1f"))
+      .filter((e) => FETCHED.test(e[1] ?? ""))
+      .map((e) => e[0])
+  );
   const entries = log.stdout.split("\n").filter(Boolean).map((l) => l.split("\x1f"));
+  const madeHere = new Set(entries.filter((e) => MADE_HERE.test(e[1] ?? "")).map((e) => e[0]));
   let read = 0;
   // Newest first: entry i+1 is where HEAD was before entry i; the oldest entry has no previous and is never read.
   for (let i = 0; i < entries.length - 1 && read < MAX_FAST_FORWARDS; i++) {
     if (!FAST_FORWARD.test(entries[i][1] ?? "")) continue;
     read++;
+    if (!fetched.has(entries[i][0])) continue;
     const r = await git(root, ["rev-list", `${entries[i + 1][0]}..${entries[i][0]}`, "--"], { maxBuffer: 8 * MiB });
-    if (r.code === 0) for (const sha of r.stdout.split("\n")) if (sha !== "") incoming.add(sha);
+    if (r.code === 0) for (const sha of r.stdout.split("\n")) if (sha !== "" && !madeHere.has(sha)) incoming.add(sha);
   }
   return incoming;
 }
