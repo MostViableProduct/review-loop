@@ -29,7 +29,7 @@ can't hold is percent-encoded: for base `release/1.x`, require `review-loop/rele
 - At Stop, a spec or plan that arrived by a fast-forward `git pull` or `git merge` counts as reviewed where it was
   written, because a pull brings in other people's work. review-loop reads this from the reflogs git writes: HEAD's
   shows the fast-forward and what this checkout committed, and a remote-tracking ref's shows whether the new tip
-  was fetched or pushed. A commit Claude made here, a local branch it merged, and a commit it pushed all stay
+  was fetched (before the move) or pushed. A commit Claude made here, a local branch it merged, and a commit it pushed all stay
   listed. Claude can write false reflog entries on purpose (`git update-ref -m "pull: Fast-forward" HEAD`, and
   the same for a remote-tracking ref), and Stop then stops listing the commits that move HEAD over. A commit made
   in another checkout and fast-forwarded in after being fetched is left to that checkout's own Stop. The pull

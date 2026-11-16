@@ -363,6 +363,19 @@ test("committedPaths: a local branch fast-forwarded in is the session's work, pu
   assert.deepEqual((await committedPaths(local, start)).sort(), ["feat.md", "feat2.md"], "pushing it, or a branch holding it, does not make it incoming");
 });
 
+test("committedPaths: fetching a local fast-forward's tip afterwards does not make it incoming", async () => {
+  const { root, local, start } = bareWithClones();
+  const wt = path.join(root, "wt");
+  g(local, "worktree", "add", "-q", "-b", "feat", wt);
+  commitFile(wt, "feat.md", "f");
+  g(local, "merge", "-q", "--ff-only", "feat");
+  // Reflog times are whole seconds. Pushed by URL, no tracking ref moves; the fetch then records the tip as fetched.
+  await new Promise((resolve) => setTimeout(resolve, 1100));
+  g(local, "push", "-q", path.join(root, "up.git"), "feat:refs/heads/feat3");
+  g(local, "fetch", "-q");
+  assert.deepEqual(await committedPaths(local, start), ["feat.md"]);
+});
+
 test("committedPaths: a commit this checkout made stays the session's when a fast-forward pull brings it back with someone else's", async () => {
   const { local, other, start } = bareWithClones();
   g(local, "checkout", "-q", "-b", "side");

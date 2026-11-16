@@ -116,8 +116,8 @@ const MADE_HERE = /^(commit|cherry-pick|rebase|am|revert)\b/;
  * Commits that HEAD's reflog shows arriving by a fast-forward pull or merge (each entry's `previous..new`), and only
  * those that came from outside this checkout:
  * - the entry's new tip must be one a remote-tracking ref's own reflog shows being fetched, pulled or cloned (a push is
- *   logged `update by push`), so `git merge feat` of a local branch is not taken for a pull, and pushing a later
- *   branch that contains the commit does not turn it into one; and
+ *   logged `update by push`) at or before the move, so `git merge feat` of a local branch is not taken for a pull, and
+ *   neither pushing a later branch that contains the commit nor fetching the tip afterwards turns it into one; and
  * - a commit this HEAD's own reflog shows being committed, rebased, picked, reverted or applied is never incoming, so
  *   a branch committed on here, pushed, and fast-forwarded in later stays the session's.
  * A push never moves HEAD, so a commit the session made and pushed is not in a fast-forward; a reset and a merge that
@@ -130,30 +130,45 @@ const MADE_HERE = /^(commit|cherry-pick|rebase|am|revert)\b/;
  */
 async function fastForwardedIn(root) {
   const incoming = new Set();
-  const log = await git(root, ["reflog", "show", "--format=%H%x1f%gs", `--max-count=${MAX_REFLOG_ENTRIES}`, "HEAD", "--"], { maxBuffer: 8 * MiB });
-  if (log.code !== 0) return incoming;
-  const tracking = await git(root, ["reflog", "show", "--glob=refs/remotes/*", "--format=%H%x1f%gs", `--max-count=${MAX_REFLOG_ENTRIES}`, "--"], { maxBuffer: 8 * MiB });
-  if (tracking.code !== 0) return incoming;
-  const fetched = new Set(
-    tracking.stdout
-      .split("\n")
-      .filter(Boolean)
-      .map((l) => l.split("\x1f"))
-      .filter((e) => FETCHED.test(e[1] ?? ""))
-      .map((e) => e[0])
-  );
-  const entries = log.stdout.split("\n").filter(Boolean).map((l) => l.split("\x1f"));
-  const madeHere = new Set(entries.filter((e) => MADE_HERE.test(e[1] ?? "")).map((e) => e[0]));
+  const log = await reflogRows(root, ["HEAD"]);
+  const tracking = await reflogRows(root, ["--glob=refs/remotes/*"]);
+  if (log === null || tracking === null) return incoming;
+  // The first moment a remote-tracking ref was moved to each tip by a fetch, a pull or a clone.
+  /** @type {Map<string, number>} */
+  const fetchedAt = new Map();
+  for (const e of tracking) if (FETCHED.test(e.subject) && e.at < (fetchedAt.get(e.sha) ?? Infinity)) fetchedAt.set(e.sha, e.at);
+  const madeHere = new Set(log.filter((e) => MADE_HERE.test(e.subject)).map((e) => e.sha));
   let read = 0;
   // Newest first: entry i+1 is where HEAD was before entry i; the oldest entry has no previous and is never read.
-  for (let i = 0; i < entries.length - 1 && read < MAX_FAST_FORWARDS; i++) {
-    if (!FAST_FORWARD.test(entries[i][1] ?? "")) continue;
+  for (let i = 0; i < log.length - 1 && read < MAX_FAST_FORWARDS; i++) {
+    if (!FAST_FORWARD.test(log[i].subject)) continue;
     read++;
-    if (!fetched.has(entries[i][0])) continue;
-    const r = await git(root, ["rev-list", `${entries[i + 1][0]}..${entries[i][0]}`, "--"], { maxBuffer: 8 * MiB });
+    // A fetch of the same tip after the move (a later `git fetch` of a branch pushed by URL) does not make it incoming.
+    if (!((fetchedAt.get(log[i].sha) ?? Infinity) <= log[i].at)) continue;
+    const r = await git(root, ["rev-list", `${log[i + 1].sha}..${log[i].sha}`, "--"], { maxBuffer: 8 * MiB });
     if (r.code === 0) for (const sha of r.stdout.split("\n")) if (sha !== "" && !madeHere.has(sha)) incoming.add(sha);
   }
   return incoming;
+}
+
+/**
+ * The reflog entries of the given refs, newest first, each with the commit it points at, its subject and the unix
+ * second git wrote it. Null when git cannot read them.
+ * @param {string} root
+ * @param {string[]} refs a ref, or a `--glob=` pattern
+ * @returns {Promise<Array<{ sha: string, subject: string, at: number }> | null>}
+ */
+async function reflogRows(root, refs) {
+  const r = await git(root, ["reflog", "show", "--date=unix", "--format=%H%x1f%gs%x1f%gd", `--max-count=${MAX_REFLOG_ENTRIES}`, ...refs, "--"], { maxBuffer: 8 * MiB });
+  if (r.code !== 0) return null;
+  return r.stdout
+    .split("\n")
+    .filter(Boolean)
+    .map((l) => {
+      const [sha = "", subject = "", selector = ""] = l.split("\x1f");
+      const at = /@\{(\d+)\}$/.exec(selector);
+      return { sha, subject, at: at ? Number(at[1]) : Infinity };
+    });
 }
 
 /**
