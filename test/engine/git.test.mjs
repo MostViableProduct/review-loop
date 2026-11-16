@@ -307,3 +307,21 @@ test("committedPaths: commits since the start commit, by range not date; a start
   assert.deepEqual(await committedPaths(repo, start), ["old.md"], "a backdated commit is still in the range");
   await assert.rejects(committedPaths(repo, "0".repeat(40)), (e) => e.code === "detection_failed");
 });
+
+test("committedPaths: a commit a remote-tracking ref already holds (a pull brought it in) is not this session's; commit metadata decides nothing", async () => {
+  const repo = makeRepo();
+  commitFile(repo, "a.md", "a");
+  const start = g(repo, "rev-parse", "HEAD");
+  const theirs = commitFile(repo, "theirs.md", "x");
+  // What `git fetch` leaves behind before `git pull --ff-only` moves HEAD there.
+  g(repo, "update-ref", "refs/remotes/origin/main", theirs);
+  assert.deepEqual(await committedPaths(repo, start), [], "reachable from origin/main: not flagged");
+  // The same commit made under another committer identity and date, but held by no remote: still the session's.
+  fs.writeFileSync(path.join(repo, "forged.md"), "x");
+  g(repo, "add", "forged.md");
+  execFileSync("git", ["-c", "commit.gpgsign=false", "commit", "-q", "-m", "forged"], {
+    cwd: repo,
+    env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@example.com", GIT_COMMITTER_NAME: "GitHub", GIT_COMMITTER_EMAIL: "noreply@github.com", GIT_AUTHOR_DATE: "2001-01-01T00:00:00Z", GIT_COMMITTER_DATE: "2001-01-01T00:00:00Z" }
+  });
+  assert.deepEqual(await committedPaths(repo, start), ["forged.md"]);
+});

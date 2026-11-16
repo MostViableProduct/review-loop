@@ -112,6 +112,11 @@ const MAX_COMMITTED_PATHS = 5000;
  * A commit moved off the current history (a switch away, a reset) is outside Stop's view by design (author's decision,
  * round 22): its file is not in the working tree to review, and the PR gate reviews every commit in a PR's diff
  * (head against the merge-base) before it can merge.
+ * Commits already reachable from a remote-tracking ref are left out: a pull or a merge brings in other people's and
+ * other sessions' commits, whose specs and plans were reviewed where they were written, and only a fetch moves those
+ * refs (this plugin never writes under refs/remotes). Commit metadata (committer, author, date) is no basis for the
+ * choice: the session sets all of it. The one way past this is a push of a commit before its review; the PR gate still
+ * reviews that commit's diff before it can merge.
  * @param {string} root
  * @param {string | null} startHead HEAD at session start (null: no commit yet, so every commit is this session's)
  * @returns {Promise<string[]>} repo-relative paths
@@ -123,7 +128,7 @@ export async function committedPaths(root, startHead) {
     throw new ReviewLoopError("detection_failed", "the commit HEAD pointed at when the session began is no longer in the repository");
   }
   const range = startHead === null ? "HEAD" : `${startHead}..HEAD`;
-  const out = await gitOk(root, ["log", "--format=", "--name-only", "--no-renames", "-z", range, "--"], { maxBuffer: 8 * MiB, code: "detection_failed" });
+  const out = await gitOk(root, ["log", "--format=", "--name-only", "--no-renames", "-z", range, "--not", "--remotes", "--"], { maxBuffer: 8 * MiB, code: "detection_failed" });
   const paths = [...new Set(out.split("\0").map((p) => p.replace(/^\n+/, "")).filter(Boolean))];
   if (paths.length > MAX_COMMITTED_PATHS) throw new ReviewLoopError("detection_failed", `commits made this session touch ${paths.length} paths (limit ${MAX_COMMITTED_PATHS})`);
   return paths;

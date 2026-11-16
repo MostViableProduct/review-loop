@@ -634,6 +634,38 @@ test("a spec edited and committed through the shell during the session stays pen
   const r = hook("stop", S);
   assert.equal(r.out?.decision, "block", JSON.stringify(r.out));
   assert.match(r.out.reason, /spec .*feature-spec\.md/);
+  assert.match(r.out.reason, /\[pending: committed_since_session_start\]/, "the Stop text says why it is listed");
+});
+
+/** A commit under another committer's identity (what a squash merge looks like), carrying a spec. */
+function commitAsOtherCommitter(/** @type {string} */ repo, /** @type {string} */ rel) {
+  const abs = path.join(repo, rel);
+  fs.mkdirSync(path.dirname(abs), { recursive: true });
+  fs.writeFileSync(abs, "merged elsewhere and pulled in");
+  spawnSync("git", ["add", "--", rel], { cwd: repo, env: GIT_ENV });
+  const c = spawnSync("git", ["-c", "commit.gpgsign=false", "commit", "-q", "-m", "squash merge"], { cwd: repo, env: { ...GIT_ENV, GIT_COMMITTER_NAME: "GitHub", GIT_COMMITTER_EMAIL: "noreply@github.com" } });
+  assert.equal(c.status, 0, c.stderr?.toString());
+}
+
+test("a spec a remote-tracking ref already holds (pulled in) is not flagged at Stop", () => {
+  const repo = specRepo();
+  const S = { session_id: "e2e-session", cwd: repo, stop_hook_active: false };
+  hook("session", S);
+  commitAsOtherCommitter(repo, "docs/specs/pulled-spec.md");
+  // The fetch that preceded the pull: origin/main now holds the commit.
+  g(repo, "update-ref", "refs/remotes/origin/main", "HEAD");
+  const r = hook("stop", S);
+  assert.equal(r.out?.decision, undefined, JSON.stringify(r.out));
+});
+
+test("a spec committed under another committer identity that no remote holds is still flagged: commit metadata is the session's to set", () => {
+  const repo = specRepo();
+  const S = { session_id: "e2e-session", cwd: repo, stop_hook_active: false };
+  hook("session", S);
+  commitAsOtherCommitter(repo, "docs/specs/forged-spec.md");
+  const r = hook("stop", S);
+  assert.equal(r.out?.decision, "block", JSON.stringify(r.out));
+  assert.match(r.out.reason, /spec .*forged-spec\.md/);
 });
 
 test("a spec committed with a backdated committer date during the session still stays pending at Stop", () => {
