@@ -427,8 +427,9 @@ test("committedPaths: a branch committed in another worktree and pushed, but nev
   const wt = path.join(root, "wt");
   g(local, "worktree", "add", "-q", "-b", "feat", wt);
   commitFile(wt, "feat.md", "f");
-  // A push from a linked worktree moves the shared remote-tracking ref, logged `update by push`, not as a fetch.
-  g(wt, "push", "-q", "origin", "feat");
+  // A push from a linked worktree moves the shared remote-tracking ref, logged `update by push`, not as a fetch. Pinned to
+  // an earlier second than the merge, so only its kind, never the tie rule, keeps the commit listed.
+  gAt(wt, EARLIER, "push", "-q", "origin", "feat");
   g(local, "merge", "-q", "--ff-only", "feat");
   assert.deepEqual(await committedPaths(local, start), ["feat.md"]);
 });
@@ -450,8 +451,9 @@ test("committedPaths: a tip that is really fetched after the move does not make 
 
 test("committedPaths: the oldest reflog row has no known predecessor and is never read as a move", async () => {
   const { local } = bareWithClones();
-  // The clone's first row is a fetched tip holding the whole history. With no start commit every commit is the session's,
-  // so reading that row as a move would hand all of it to "incoming".
+  // A fetch row from an earlier second than the clone's own, holding the whole history: without the guard the clone's
+  // first row would read as a move onto a fetched tip. With no start commit every commit is the session's.
+  gAt(local, EARLIER, "update-ref", "-m", "fetch: seeded", "refs/remotes/origin/seeded", g(local, "rev-parse", "HEAD"));
   assert.deepEqual(await committedPaths(local, null), ["a.md"]);
 });
 
