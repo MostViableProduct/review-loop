@@ -107,6 +107,8 @@ const MAX_REFLOG_ENTRIES = 2000;
 const MAX_MOVES_CHECKED = 100;
 /** What a remote-tracking ref's reflog says when a fetch, a pull or a clone moved it (a push says `update by push`). */
 const FETCHED = /^(fetch|pull|clone)\b/;
+/** `git pull` fetches and then moves HEAD in one command, so its own fetch precedes its move even within one second. */
+const PULL = /^pull\b/;
 /**
  * The reflog subjects of work done in this checkout: a commit, an amend, a rebased or picked commit, a revert, an
  * applied patch. `rebase (start)` only moves HEAD onto the base, which is someone else's commit.
@@ -117,7 +119,7 @@ const MADE_HERE = /^(commit|cherry-pick|am|revert)\b|^rebase\b(?! \(start\))/;
  * Commits that arrived from outside this checkout, read from HEAD's reflog. HEAD's moves are replayed oldest first,
  * each commit belonging to the first move that made it reachable, and a move brings its new commits in when:
  * - its new tip is contained in a tip that a remote-tracking ref's own reflog shows being fetched, pulled or cloned
- *   (a push is logged `update by push`) at or before the move: a fast-forward pull, a switch to a branch already
+ *   (a push is logged `update by push`) before the move, in an earlier second unless the move is a pull: a fast-forward pull, a switch to a branch already
  *   fetched, a reset or a rebase onto a fetched tip, a checkout of FETCH_HEAD; or
  * - it is a merge of two parents whose second is so contained: what that side brings in is incoming, and the merge
  *   commit and what was made on the first side are not.
@@ -139,14 +141,15 @@ async function incomingCommits(root, startHead) {
   if (log === null || tracking === null) return incoming;
   /** The fetched tips of each remote-tracking ref, oldest first. @type {Map<string, Array<{ sha: string, at: number }>>} */
   const fetchedTips = new Map();
-  for (const e of tracking.slice().reverse()) if (FETCHED.test(e.subject)) fetchedTips.set(e.ref, [...(fetchedTips.get(e.ref) ?? []), { sha: e.sha, at: e.at }]);
-  // The newest tip of each ref fetched at or before `at`. A ref's older tips are ancestors of its newest unless it was
-  // forced, and then the move is simply not recognised (over-review).
-  const fetchedBy = (/** @type {number} */ at) => {
+  for (const e of tracking.slice().reverse()) if (FETCHED.test(e.subject)) fetchedTips.set(e.ref, [...(fetchedTips.get(e.ref) ?? []), { sha: e.sha, at: e.at, subject: e.subject }]);
+  // The newest tip of each ref fetched before `move`. Reflog times are whole seconds and two reflogs have no common
+  // order, so a fetch in the same second as the move is not known to be earlier, except for a pull's own. A ref's
+  // older tips are ancestors of its newest unless it was forced, and then the move is simply not recognised.
+  const fetchedBy = (/** @type {{ at: number, subject: string }} */ move) => {
     /** @type {string[]} */
     const tips = [];
     for (const list of fetchedTips.values()) {
-      const t = list.filter((x) => x.at <= at).at(-1);
+      const t = list.filter((x) => x.at < move.at || (x.at === move.at && PULL.test(move.subject) && PULL.test(x.subject))).at(-1);
       if (t) tips.push(t.sha);
     }
     return tips;
@@ -178,7 +181,7 @@ async function incomingCommits(root, startHead) {
     // A merge made here after a conflict is logged `commit (merge)`: its second parent still decides, whatever the subject.
     const second = parents.get(e.sha)?.length === 2 ? parents.get(e.sha)?.[1] : undefined;
     if (!MADE_HERE.test(e.subject) || second !== undefined) {
-      const tips = fetchedBy(e.at);
+      const tips = fetchedBy(e);
       const from = !MADE_HERE.test(e.subject) && (await containedIn(e.sha, tips)) ? e.sha : second !== undefined && (await containedIn(second, tips)) ? second : null;
       if (from !== null) for (const sha of (await fresh(from)) ?? []) incoming.add(sha);
     }

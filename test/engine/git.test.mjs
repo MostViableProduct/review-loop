@@ -16,7 +16,7 @@ import {
   readArtifact
 } from "../../plugin/engine/lib/git.mjs";
 import { streamHash, streamLines } from "../../plugin/engine/lib/proc.mjs";
-import { g, makeRepo, commitFile, writeFile, crissCrossRepo, tmpDir } from "./helpers.mjs";
+import { g, makeRepo, commitFile, writeFile, crissCrossRepo, tmpDir, GIT_ENV } from "./helpers.mjs";
 import { repoRoot, committedPaths } from "../../plugin/engine/lib/git.mjs";
 
 test("blobId matches git hash-object --stdin", () => {
@@ -349,6 +349,12 @@ test("committedPaths: a fast-forward pull's commits are not the session's; a pus
 /** Waits out the reflog's whole-second clock so a later fetch is strictly after an earlier move. */
 const nextSecond = () => new Promise((resolve) => setTimeout(resolve, 1100));
 
+/** git with the committer date pinned, which is also the second its reflog rows get: tests choose the order of two rows. */
+const gAt = (cwd, when, ...args) => execFileSync("git", ["-c", "commit.gpgsign=false", ...args], { cwd, env: { ...GIT_ENV, GIT_COMMITTER_DATE: `${when} +0000` }, encoding: "utf8", stdio: ["pipe", "pipe", "pipe"] }).trim();
+/** A second well before any move the tests make now, for a fetch that must precede one. */
+const EARLIER = 1_700_000_000;
+const NOW = () => Math.floor(Date.now() / 1000);
+
 test("committedPaths: merging a fetched tip, with or without a conflict, brings only that side in", async () => {
   const { local, other, start } = bareWithClones();
   commitFile(other, "c.md", "other side\n");
@@ -356,7 +362,7 @@ test("committedPaths: merging a fetched tip, with or without a conflict, brings 
   g(other, "push", "-q", "origin", "HEAD:main");
   commitFile(local, "c.md", "local side\n");
   commitFile(local, "mine.md", "m");
-  g(local, "fetch", "-q");
+  gAt(local, EARLIER, "fetch", "-q");
   assert.throws(() => g(local, "merge", "--no-edit", "origin/main"), (e) => /CONFLICT/.test(String(e.stdout)), "the merge must stop on a conflict for this test to mean anything");
   fs.writeFileSync(path.join(local, "c.md"), "resolved\n");
   g(local, "add", "c.md");
@@ -389,13 +395,13 @@ test("committedPaths: switching to, or resetting onto, what was fetched is incom
   g(other, "checkout", "-q", "-b", "topic");
   commitFile(other, "topic.md", "t");
   g(other, "push", "-q", "origin", "topic");
-  g(local, "fetch", "-q");
+  gAt(local, EARLIER, "fetch", "-q");
   g(local, "checkout", "-q", "-b", "x", "origin/topic");
   assert.deepEqual(await committedPaths(local, start), [], "a branch created at a fetched tip brings nothing of ours");
 
   commitFile(other, "topic2.md", "t2");
   g(other, "push", "-q", "origin", "topic");
-  g(local, "fetch", "-q");
+  gAt(local, EARLIER, "fetch", "-q");
   g(local, "reset", "-q", "--hard", "origin/topic");
   assert.deepEqual(await committedPaths(local, start), [], "a hard reset onto a fetched tip brings nothing of ours");
 
@@ -411,7 +417,7 @@ test("committedPaths: rebasing onto a fetched tip brings the base in; the rebase
   commitFile(local, "mine.md", "m");
   commitFile(other, "theirs.md", "t");
   g(other, "push", "-q", "origin", "HEAD:main");
-  g(local, "fetch", "-q");
+  gAt(local, EARLIER, "fetch", "-q");
   g(local, "rebase", "-q", "origin/main");
   assert.deepEqual(await committedPaths(local, start), ["mine.md"], "theirs.md is the new base; mine.md was committed here, and again by the rebase");
 });
@@ -449,6 +455,28 @@ test("committedPaths: the oldest reflog row has no known predecessor and is neve
   assert.deepEqual(await committedPaths(local, null), ["a.md"]);
 });
 
+test("committedPaths: a fetch in the same second as a move is not known to be earlier, except for a pull's own", async () => {
+  const { root, local, other, start } = bareWithClones();
+  const wt = path.join(root, "wt");
+  g(local, "worktree", "add", "-q", "-b", "feat", wt);
+  commitFile(wt, "feat.md", "f");
+  const T = NOW() + 300;
+  gAt(local, T, "merge", "-q", "--ff-only", "feat");
+  // The tip reaches the remote through another clone and is fetched in the very second of the merge: the order is unknowable.
+  g(other, "fetch", "-q", local, "main");
+  g(other, "push", "-q", "origin", "FETCH_HEAD:refs/heads/feat3");
+  gAt(local, T, "fetch", "-q");
+  assert.match(g(local, "reflog", "show", "--format=%gs", "refs/remotes/origin/feat3"), /^fetch/, "the tracking ref was moved by a fetch");
+  assert.deepEqual(await committedPaths(local, start), ["feat.md"], "a tie between a move and a fetch keeps the commits listed");
+
+  // A pull in one second: its own fetch and its fast-forward cannot be told apart by time, and it is the order that is certain.
+  const fresh = bareWithClones();
+  commitFile(fresh.other, "theirs.md", "t");
+  g(fresh.other, "push", "-q", "origin", "HEAD:main");
+  gAt(fresh.local, NOW() + 300, "pull", "-q", "--ff-only");
+  assert.deepEqual(await committedPaths(fresh.local, fresh.start), [], "a pull's commits are incoming though its fetch and move share a second");
+});
+
 test("committedPaths: a commit that arrived unfetched is not made incoming by a later move onto a fetched tip that contains it", async () => {
   const { root, local, other, start } = bareWithClones();
   const wt = path.join(root, "wt");
@@ -460,8 +488,9 @@ test("committedPaths: a commit that arrived unfetched is not made incoming by a 
   g(other, "pull", "-q", "--ff-only");
   commitFile(other, "theirs.md", "t");
   g(other, "push", "-q", "origin", "HEAD:main");
-  g(local, "fetch", "-q");
-  g(local, "checkout", "-q", "--detach", "origin/main");
+  // Strictly between the two moves: after the merge that brought feat.md in, before the checkout that brings theirs.md.
+  gAt(local, NOW() + 60, "fetch", "-q");
+  gAt(local, NOW() + 120, "checkout", "-q", "--detach", "origin/main");
   assert.deepEqual(await committedPaths(local, start), ["feat.md"], "feat.md arrived before any fetch of it; theirs.md arrived with the fetched tip");
 });
 

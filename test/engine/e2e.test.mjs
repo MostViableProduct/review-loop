@@ -683,7 +683,9 @@ test("a spec brought in by merging a fetched tip, or by switching to a fetched b
   g(other, "checkout", "-q", "-b", "topic");
   commitFile(other, "docs/specs/topic-spec.md", "on a branch already pushed");
   g(other, "push", "-q", "origin", "topic");
-  g(local, "fetch", "-q");
+  // Pinned to an earlier second than the checkout below: a fetch in the checkout's own second is not known to precede it.
+  const f = spawnSync("git", ["fetch", "-q"], { cwd: local, env: { ...GIT_ENV, GIT_COMMITTER_DATE: "1700000000 +0000" } });
+  assert.equal(f.status, 0, f.stderr?.toString());
   g(local, "checkout", "-q", "-b", "x", "origin/topic");
   const r = hook("stop", S);
   assert.equal(r.out?.decision, undefined, JSON.stringify(r.out));
