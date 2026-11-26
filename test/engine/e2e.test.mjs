@@ -672,6 +672,25 @@ test("a spec brought in by a fast-forward pull is not flagged at Stop", () => {
   assert.equal(r.out?.decision, undefined, JSON.stringify(r.out));
 });
 
+test("a spec brought in by merging a fetched tip, or by switching to a fetched branch, is not flagged at Stop", () => {
+  const { local, other } = upstreamWithClones();
+  const S = { session_id: "e2e-session", cwd: local, stop_hook_active: false };
+  hook("session", S);
+  commitFile(other, "docs/specs/merged-in-spec.md", "written and reviewed elsewhere");
+  g(other, "push", "-q", "origin", "HEAD:main");
+  commitFile(local, "notes.txt", "work of this session, so the pull cannot fast-forward");
+  g(local, "pull", "-q", "--no-rebase", "--no-edit");
+  g(other, "checkout", "-q", "-b", "topic");
+  commitFile(other, "docs/specs/topic-spec.md", "on a branch already pushed");
+  g(other, "push", "-q", "origin", "topic");
+  // Pinned to an earlier second than the checkout below: a fetch in the checkout's own second is not known to precede it.
+  const f = spawnSync("git", ["fetch", "-q"], { cwd: local, env: { ...GIT_ENV, GIT_COMMITTER_DATE: "1700000000 +0000" } });
+  assert.equal(f.status, 0, f.stderr?.toString());
+  g(local, "checkout", "-q", "-b", "x", "origin/topic");
+  const r = hook("stop", S);
+  assert.equal(r.out?.decision, undefined, JSON.stringify(r.out));
+});
+
 test("a spec the session committed and pushed before its review is still flagged at Stop", () => {
   const { local } = upstreamWithClones();
   const S = { session_id: "e2e-session", cwd: local, stop_hook_active: false };
