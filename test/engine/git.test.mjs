@@ -323,7 +323,7 @@ function bareWithClones() {
   return { root, local, other, start: g(local, "rev-parse", "HEAD") };
 }
 
-test("committedPaths: a fast-forward pull's commits are not the session's; a pushed session commit and a merge that creates a commit are", async () => {
+test("committedPaths: a fast-forward pull's commits are not the session's; a pushed session commit is, and so is what a merge commit holds of ours", async () => {
   const { local, other, start } = bareWithClones();
 
   commitFile(other, "theirs.md", "t");
@@ -341,7 +341,121 @@ test("committedPaths: a fast-forward pull's commits are not the session's; a pus
   g(other, "push", "-q", "origin", "HEAD:main");
   commitFile(local, "mine.md", "m");
   g(local, "pull", "-q", "--no-rebase", "--no-edit");
-  assert.deepEqual((await committedPaths(local, start)).sort(), ["mine.md", "pushed.md", "theirs2.md"], "a pull that makes a merge commit is not read as a fast-forward");
+  // The premise changed on purpose (merges of a fetched tip are incoming, like fast-forwards): theirs2.md came from
+  // the fetched side of the merge and is no longer listed; mine.md and pushed.md were committed here and stay.
+  assert.deepEqual((await committedPaths(local, start)).sort(), ["mine.md", "pushed.md"], "a pull that makes a merge commit brings the fetched side in; ours stays");
+});
+
+/** Waits out the reflog's whole-second clock so a later fetch is strictly after an earlier move. */
+const nextSecond = () => new Promise((resolve) => setTimeout(resolve, 1100));
+
+test("committedPaths: merging a fetched tip, with or without a conflict, brings only that side in", async () => {
+  const { local, other, start } = bareWithClones();
+  commitFile(other, "c.md", "other side\n");
+  commitFile(other, "theirs.md", "t");
+  g(other, "push", "-q", "origin", "HEAD:main");
+  commitFile(local, "c.md", "local side\n");
+  commitFile(local, "mine.md", "m");
+  g(local, "fetch", "-q");
+  assert.throws(() => g(local, "merge", "--no-edit", "origin/main"), (e) => /CONFLICT/.test(String(e.stdout)), "the merge must stop on a conflict for this test to mean anything");
+  fs.writeFileSync(path.join(local, "c.md"), "resolved\n");
+  g(local, "add", "c.md");
+  g(local, "commit", "-q", "-m", "Merge origin/main");
+  const paths = (await committedPaths(local, start)).sort();
+  assert.ok(!paths.includes("theirs.md"), "theirs.md came in through the merge of a fetched tip");
+  assert.ok(paths.includes("mine.md") && paths.includes("c.md"), "the commits made here stay listed");
+});
+
+test("committedPaths: a merge of a branch that was never fetched, and an octopus, stay the session's", async () => {
+  const { root, local, start } = bareWithClones();
+  const wt = path.join(root, "wt");
+  g(local, "worktree", "add", "-q", "-b", "feat", wt);
+  commitFile(wt, "feat.md", "f");
+  commitFile(local, "mine.md", "m");
+  g(local, "merge", "-q", "--no-edit", "feat");
+  assert.deepEqual((await committedPaths(local, start)).sort(), ["feat.md", "mine.md"], "a local branch is not incoming");
+  const wt2 = path.join(root, "wt2");
+  g(local, "worktree", "add", "-q", "-b", "a", wt2);
+  commitFile(wt2, "oa.md", "a");
+  const wt3 = path.join(root, "wt3");
+  g(local, "worktree", "add", "-q", "-b", "b", wt3);
+  commitFile(wt3, "ob.md", "b");
+  g(local, "merge", "-q", "--no-edit", "a", "b");
+  assert.deepEqual((await committedPaths(local, start)).sort(), ["feat.md", "mine.md", "oa.md", "ob.md"], "an octopus is read as the session's, never partly skipped");
+});
+
+test("committedPaths: switching to, or resetting onto, what was fetched is incoming; an unpushed branch is not", async () => {
+  const { root, local, other, start } = bareWithClones();
+  g(other, "checkout", "-q", "-b", "topic");
+  commitFile(other, "topic.md", "t");
+  g(other, "push", "-q", "origin", "topic");
+  g(local, "fetch", "-q");
+  g(local, "checkout", "-q", "-b", "x", "origin/topic");
+  assert.deepEqual(await committedPaths(local, start), [], "a branch created at a fetched tip brings nothing of ours");
+
+  commitFile(other, "topic2.md", "t2");
+  g(other, "push", "-q", "origin", "topic");
+  g(local, "fetch", "-q");
+  g(local, "reset", "-q", "--hard", "origin/topic");
+  assert.deepEqual(await committedPaths(local, start), [], "a hard reset onto a fetched tip brings nothing of ours");
+
+  const wt = path.join(root, "wt");
+  g(local, "worktree", "add", "-q", "-b", "feat", wt);
+  commitFile(wt, "feat.md", "f");
+  g(local, "checkout", "-q", "--detach", "feat");
+  assert.deepEqual(await committedPaths(local, start), ["feat.md"], "a branch that was never pushed and fetched is the session's");
+});
+
+test("committedPaths: rebasing onto a fetched tip brings the base in; the rebased commits stay the session's", async () => {
+  const { local, other, start } = bareWithClones();
+  commitFile(local, "mine.md", "m");
+  commitFile(other, "theirs.md", "t");
+  g(other, "push", "-q", "origin", "HEAD:main");
+  g(local, "fetch", "-q");
+  g(local, "rebase", "-q", "origin/main");
+  assert.deepEqual(await committedPaths(local, start), ["mine.md"], "theirs.md is the new base; mine.md was committed here, and again by the rebase");
+});
+
+test("committedPaths: a branch committed in another worktree and pushed, but never fetched, is the session's", async () => {
+  const { root, local, start } = bareWithClones();
+  const wt = path.join(root, "wt");
+  g(local, "worktree", "add", "-q", "-b", "feat", wt);
+  commitFile(wt, "feat.md", "f");
+  // A push from a linked worktree moves the shared remote-tracking ref, logged `update by push`, not as a fetch.
+  g(wt, "push", "-q", "origin", "feat");
+  g(local, "merge", "-q", "--ff-only", "feat");
+  assert.deepEqual(await committedPaths(local, start), ["feat.md"]);
+});
+
+test("committedPaths: a tip that is really fetched after the move does not make the move incoming", async () => {
+  const { root, local, other, start } = bareWithClones();
+  const wt = path.join(root, "wt");
+  g(local, "worktree", "add", "-q", "-b", "feat", wt);
+  commitFile(wt, "feat.md", "f");
+  g(local, "merge", "-q", "--ff-only", "feat");
+  await nextSecond();
+  // The commit reaches the remote through another clone, so this checkout learns of it only by a later fetch.
+  g(other, "fetch", "-q", local, "main");
+  g(other, "push", "-q", "origin", "FETCH_HEAD:refs/heads/feat3");
+  g(local, "fetch", "-q");
+  assert.match(g(local, "reflog", "show", "--format=%gs", "refs/remotes/origin/feat3"), /^fetch/, "the tracking ref was moved by a fetch, not a push");
+  assert.deepEqual(await committedPaths(local, start), ["feat.md"]);
+});
+
+test("committedPaths: a commit that arrived unfetched is not made incoming by a later move onto a fetched tip that contains it", async () => {
+  const { root, local, other, start } = bareWithClones();
+  const wt = path.join(root, "wt");
+  g(local, "worktree", "add", "-q", "-b", "feat", wt);
+  commitFile(wt, "feat.md", "f");
+  g(local, "merge", "-q", "--ff-only", "feat");
+  await nextSecond();
+  g(local, "push", "-q", "origin", "HEAD:main");
+  g(other, "pull", "-q", "--ff-only");
+  commitFile(other, "theirs.md", "t");
+  g(other, "push", "-q", "origin", "HEAD:main");
+  g(local, "fetch", "-q");
+  g(local, "checkout", "-q", "--detach", "origin/main");
+  assert.deepEqual(await committedPaths(local, start), ["feat.md"], "feat.md arrived before any fetch of it; theirs.md arrived with the fetched tip");
 });
 
 test("committedPaths: a local branch fast-forwarded in is the session's work, pushed or not", async () => {

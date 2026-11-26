@@ -104,59 +104,99 @@ export async function headSha(root) {
 
 const MAX_COMMITTED_PATHS = 5000;
 const MAX_REFLOG_ENTRIES = 2000;
-const MAX_FAST_FORWARDS = 100;
-/** The reflog subject git writes when HEAD moves by `git pull` or `git merge` and nothing is created: `pull --ff-only: Fast-forward`. */
-const FAST_FORWARD = /^(pull|merge)\b[^:]*: Fast-forward$/;
+const MAX_MOVES_CHECKED = 100;
 /** What a remote-tracking ref's reflog says when a fetch, a pull or a clone moved it (a push says `update by push`). */
 const FETCHED = /^(fetch|pull|clone)\b/;
-/** The reflog subjects of work done in this checkout: a commit, an amend, a rebased or picked commit, a revert, an applied patch. */
-const MADE_HERE = /^(commit|cherry-pick|rebase|am|revert)\b/;
+/**
+ * The reflog subjects of work done in this checkout: a commit, an amend, a rebased or picked commit, a revert, an
+ * applied patch. `rebase (start)` only moves HEAD onto the base, which is someone else's commit.
+ */
+const MADE_HERE = /^(commit|cherry-pick|am|revert)\b|^rebase\b(?! \(start\))/;
 
 /**
- * Commits that HEAD's reflog shows arriving by a fast-forward pull or merge (each entry's `previous..new`), and only
- * those that came from outside this checkout:
- * - the entry's new tip must be one a remote-tracking ref's own reflog shows being fetched, pulled or cloned (a push is
- *   logged `update by push`) at or before the move, so `git merge feat` of a local branch is not taken for a pull, and
- *   neither pushing a later branch that contains the commit nor fetching the tip afterwards turns it into one; and
- * - a commit this HEAD's own reflog shows being committed, rebased, picked, reverted or applied is never incoming, so
- *   a branch committed on here, pushed, and fast-forwarded in later stays the session's.
- * A push never moves HEAD, so a commit the session made and pushed is not in a fast-forward; a reset and a merge that
- * creates a commit are not either, and stay flagged. Past MAX_REFLOG_ENTRIES entries or MAX_FAST_FORWARDS
- * fast-forwards the older ones are not read (over-review), and with no reflog the set is empty. The subject and the
- * remote-tracking ref are text and refs any writer can set (`git update-ref`), so this is a guardrail against a stale
- * view, not against Claude writing false entries on purpose (docs/SECURITY.md).
+ * Commits that arrived from outside this checkout, read from HEAD's reflog. HEAD's moves are replayed oldest first,
+ * each commit belonging to the first move that made it reachable, and a move brings its new commits in when:
+ * - its new tip is contained in a tip that a remote-tracking ref's own reflog shows being fetched, pulled or cloned
+ *   (a push is logged `update by push`) at or before the move: a fast-forward pull, a switch to a branch already
+ *   fetched, a reset or a rebase onto a fetched tip, a checkout of FETCH_HEAD; or
+ * - it is a merge of two parents whose second is so contained: what that side brings in is incoming, and the merge
+ *   commit and what was made on the first side are not.
+ * Each commit belongs to its first move, so pushing it, or fetching a tip that holds it, afterwards never makes it
+ * incoming; a commit made here belongs to the move that recorded it (a commit, a pick, an amend), which is never a
+ * fetched tip; and a branch committed in another checkout and merged in before it was fetched is not incoming.
+ * Past MAX_MOVES_CHECKED moves that are not commits made here, or MAX_REFLOG_ENTRIES entries, the older moves are not
+ * read (over-review), and with no reflog the set is empty. The subject and the remote-tracking ref are text and refs
+ * any writer can set (`git update-ref`), so this is a guardrail against a stale view, not against Claude writing false
+ * entries on purpose (docs/SECURITY.md).
  * @param {string} root
+ * @param {string | null} startHead HEAD at session start; commits reachable from it are not new
  * @returns {Promise<Set<string>>}
  */
-async function fastForwardedIn(root) {
+async function incomingCommits(root, startHead) {
   const incoming = new Set();
   const log = await reflogRows(root, ["HEAD"]);
   const tracking = await reflogRows(root, ["--glob=refs/remotes/*"]);
   if (log === null || tracking === null) return incoming;
-  // The first moment a remote-tracking ref was moved to each tip by a fetch, a pull or a clone.
-  /** @type {Map<string, number>} */
-  const fetchedAt = new Map();
-  for (const e of tracking) if (FETCHED.test(e.subject) && e.at < (fetchedAt.get(e.sha) ?? Infinity)) fetchedAt.set(e.sha, e.at);
-  const madeHere = new Set(log.filter((e) => MADE_HERE.test(e.subject)).map((e) => e.sha));
-  let read = 0;
-  // Newest first: entry i+1 is where HEAD was before entry i; the oldest entry has no previous and is never read.
-  for (let i = 0; i < log.length - 1 && read < MAX_FAST_FORWARDS; i++) {
-    if (!FAST_FORWARD.test(log[i].subject)) continue;
-    read++;
-    // A fetch of the same tip after the move (a later `git fetch` of a branch pushed by URL) does not make it incoming.
-    if (!((fetchedAt.get(log[i].sha) ?? Infinity) <= log[i].at)) continue;
-    const r = await git(root, ["rev-list", `${log[i + 1].sha}..${log[i].sha}`, "--"], { maxBuffer: 8 * MiB });
-    if (r.code === 0) for (const sha of r.stdout.split("\n")) if (sha !== "" && !madeHere.has(sha)) incoming.add(sha);
+  /** The fetched tips of each remote-tracking ref, oldest first. @type {Map<string, Array<{ sha: string, at: number }>>} */
+  const fetchedTips = new Map();
+  for (const e of tracking.slice().reverse()) if (FETCHED.test(e.subject)) fetchedTips.set(e.ref, [...(fetchedTips.get(e.ref) ?? []), { sha: e.sha, at: e.at }]);
+  // The newest tip of each ref fetched at or before `at`. A ref's older tips are ancestors of its newest unless it was
+  // forced, and then the move is simply not recognised (over-review).
+  const fetchedBy = (/** @type {number} */ at) => {
+    /** @type {string[]} */
+    const tips = [];
+    for (const list of fetchedTips.values()) {
+      const t = list.filter((x) => x.at <= at).at(-1);
+      if (t) tips.push(t.sha);
+    }
+    return tips;
+  };
+  // Newest first, up to MAX_MOVES_CHECKED moves that are not commits made here; whatever is older is taken as arrived.
+  let checked = 0;
+  let end = 0;
+  while (end < log.length && checked < MAX_MOVES_CHECKED) if (!MADE_HERE.test(log[end++].subject)) checked++;
+  const moves = log.slice(0, end).reverse();
+  const seen = [...(startHead ? [startHead] : []), ...(log[end] ? [log[end].sha] : [])];
+  const parents = await parentsOf(root, moves.map((e) => e.sha));
+  /** @type {(tip: string) => Promise<string[] | null>} The commits reachable from `tip` and not from anything seen. */
+  const fresh = async (tip) => {
+    const r = await git(root, ["rev-list", "--stdin"], { input: [tip, ...seen.map((s) => `^${s}`)].join("\n") + "\n", maxBuffer: 8 * MiB });
+    return r.code === 0 ? r.stdout.split("\n").filter(Boolean) : null;
+  };
+  const containedIn = async (/** @type {string} */ tip, /** @type {string[]} */ tips) => {
+    if (tips.length === 0) return false;
+    const r = await git(root, ["rev-list", "--count", "--stdin"], { input: [tip, ...tips.map((s) => `^${s}`)].join("\n") + "\n", maxBuffer: 8 * MiB });
+    return r.code === 0 && r.stdout.trim() === "0";
+  };
+  for (const e of moves) {
+    // A merge made here after a conflict is logged `commit (merge)`: its second parent still decides, whatever the subject.
+    const second = parents.get(e.sha)?.length === 2 ? parents.get(e.sha)?.[1] : undefined;
+    if (!MADE_HERE.test(e.subject) || second !== undefined) {
+      const tips = fetchedBy(e.at);
+      const from = !MADE_HERE.test(e.subject) && (await containedIn(e.sha, tips)) ? e.sha : second !== undefined && (await containedIn(second, tips)) ? second : null;
+      if (from !== null) for (const sha of (await fresh(from)) ?? []) incoming.add(sha);
+    }
+    seen.push(e.sha);
   }
   return incoming;
 }
 
+/** @param {string} root @param {string[]} shas @returns {Promise<Map<string, string[]>>} each commit's parents */
+async function parentsOf(root, shas) {
+  /** @type {Map<string, string[]>} */
+  const out = new Map();
+  if (shas.length === 0) return out;
+  const r = await git(root, ["rev-list", "--no-walk=unsorted", "--parents", "--stdin"], { input: [...new Set(shas)].join("\n") + "\n", maxBuffer: 8 * MiB });
+  if (r.code === 0) for (const l of r.stdout.split("\n")) { const [c, ...ps] = l.split(" ").filter(Boolean); if (c) out.set(c, ps); }
+  return out;
+}
+
 /**
- * The reflog entries of the given refs, newest first, each with the commit it points at, its subject and the unix
- * second git wrote it. Null when git cannot read them.
+ * The reflog entries of the given refs, newest first, each with the commit it points at, its subject, the ref it is
+ * the log of and the unix second git wrote it. Null when git cannot read them.
  * @param {string} root
  * @param {string[]} refs a ref, or a `--glob=` pattern
- * @returns {Promise<Array<{ sha: string, subject: string, at: number }> | null>}
+ * @returns {Promise<Array<{ sha: string, subject: string, ref: string, at: number }> | null>}
  */
 async function reflogRows(root, refs) {
   const r = await git(root, ["reflog", "show", "--date=unix", "--format=%H%x1f%gs%x1f%gd", `--max-count=${MAX_REFLOG_ENTRIES}`, ...refs, "--"], { maxBuffer: 8 * MiB });
@@ -167,7 +207,7 @@ async function reflogRows(root, refs) {
     .map((l) => {
       const [sha = "", subject = "", selector = ""] = l.split("\x1f");
       const at = /@\{(\d+)\}$/.exec(selector);
-      return { sha, subject, at: at ? Number(at[1]) : Infinity };
+      return { sha, subject, ref: selector.replace(/@\{\d+\}$/, ""), at: at ? Number(at[1]) : Infinity };
     });
 }
 
@@ -179,7 +219,7 @@ async function reflogRows(root, refs) {
  * A commit moved off the current history (a switch away, a reset) is outside Stop's view by design (author's decision,
  * round 22): its file is not in the working tree to review, and the PR gate reviews every commit in a PR's diff
  * (head against the merge-base) before it can merge.
- * Commits a fast-forward pull or merge brought in are left out (see `fastForwardedIn`): they are other people's and
+ * Commits that arrived from outside this checkout are left out (see `incomingCommits`): they are other people's and
  * other sessions' commits, whose specs and plans were reviewed where they were written. Commit metadata (committer,
  * author, date) and remote-tracking refs are no basis for the choice: the session sets the first, and a push puts its
  * own commit under the second.
@@ -194,7 +234,7 @@ export async function committedPaths(root, startHead) {
     throw new ReviewLoopError("detection_failed", "the commit HEAD pointed at when the session began is no longer in the repository");
   }
   const range = startHead === null ? "HEAD" : `${startHead}..HEAD`;
-  const incoming = await fastForwardedIn(root);
+  const incoming = await incomingCommits(root, startHead);
   let out;
   if (incoming.size === 0) {
     out = await gitOk(root, ["log", "--format=", "--name-only", "--no-renames", "-z", range, "--"], { maxBuffer: 8 * MiB, code: "detection_failed" });

@@ -26,14 +26,20 @@ can't hold is percent-encoded: for base `release/1.x`, require `review-loop/rele
   rules match the plain ways to do it (`Edit`, `Write`, a shell command naming the file), as they do for the kill
   switch and `override`: a path built at run time can get past them. For a pull request it is read from the base
   branch, so it changes the gate only once it is on that branch.
-- At Stop, a spec or plan that arrived by a fast-forward `git pull` or `git merge` counts as reviewed where it was
-  written, because a pull brings in other people's work. review-loop reads this from the reflogs git writes: HEAD's
-  shows the fast-forward and what this checkout committed, and a remote-tracking ref's shows whether the new tip
-  was fetched (before the move) or pushed. A commit Claude made here, a local branch it merged, and a commit it pushed all stay
-  listed. Claude can write false reflog entries on purpose (`git update-ref -m "pull: Fast-forward" HEAD`, and
-  the same for a remote-tracking ref), and Stop then stops listing the commits that move HEAD over. A commit made
-  in another checkout and fast-forwarded in after being fetched is left to that checkout's own Stop. The pull
-  request review and the required check still cover those commits before they merge.
+- At Stop, a spec or plan that arrived from outside this checkout counts as reviewed where it was written, because a
+  pull, a merge of `origin/main` or a switch to a pushed branch brings in other people's work. A move of HEAD
+  brings its new commits in when its new tip is contained in a tip that a remote-tracking ref shows being fetched
+  before the move: a fast-forward pull, a switch to a branch already pushed, `git reset --hard origin/main`, a
+  rebase onto it, a checkout of `FETCH_HEAD`. A merge brings in its second parent's side the same way, whether or
+  not it stopped on a conflict. review-loop reads this from the reflogs git writes: HEAD's shows each move, and a
+  remote-tracking ref's shows whether a tip was fetched (before the move) or pushed. Each commit belongs to the
+  first move that made it reachable, so a commit Claude made here, a local branch it merged, a commit it pushed,
+  and a tip fetched only afterwards all stay listed, and so does a merge of three or more parents. Claude can write
+  false reflog entries on purpose (`git update-ref -m "pull: Fast-forward" HEAD`, and the same for a remote-tracking
+  ref), and Stop then stops listing the commits that move HEAD over. A commit made in another checkout and moved in
+  after being fetched is left to that checkout's own Stop, and so is a spec a collaborator merged to `main` without
+  review. Moves older than the newest 100 that are not commits made here are not read, so their commits stay listed.
+  The pull request review and the required check still cover those commits before they merge.
 - Without `gh` (GitHub MCP tools only), review-loop can't check or contain a new PR's head commit, so
   under `default` and `balanced` Claude is stopped after each PR it creates. Install and sign in to `gh`
   (`brew install gh && gh auth login`) for automatic checks.
