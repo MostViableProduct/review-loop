@@ -442,6 +442,13 @@ test("committedPaths: a tip that is really fetched after the move does not make 
   assert.deepEqual(await committedPaths(local, start), ["feat.md"]);
 });
 
+test("committedPaths: the oldest reflog row has no known predecessor and is never read as a move", async () => {
+  const { local } = bareWithClones();
+  // The clone's first row is a fetched tip holding the whole history. With no start commit every commit is the session's,
+  // so reading that row as a move would hand all of it to "incoming".
+  assert.deepEqual(await committedPaths(local, null), ["a.md"]);
+});
+
 test("committedPaths: a commit that arrived unfetched is not made incoming by a later move onto a fetched tip that contains it", async () => {
   const { root, local, other, start } = bareWithClones();
   const wt = path.join(root, "wt");

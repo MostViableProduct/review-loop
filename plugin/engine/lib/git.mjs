@@ -157,6 +157,12 @@ async function incomingCommits(root, startHead) {
   while (end < log.length && checked < MAX_MOVES_CHECKED) if (!MADE_HERE.test(log[end++].subject)) checked++;
   const moves = log.slice(0, end).reverse();
   const seen = [...(startHead ? [startHead] : []), ...(log[end] ? [log[end].sha] : [])];
+  // The oldest row read has no known predecessor (the log's first entry, or the MAX_REFLOG_ENTRIES cap), so what it made
+  // reachable cannot be told from what came before it: it is taken as already seen, never read as a move.
+  if (end === log.length) {
+    const oldest = moves.shift();
+    if (oldest) seen.push(oldest.sha);
+  }
   const parents = await parentsOf(root, moves.map((e) => e.sha));
   /** @type {(tip: string) => Promise<string[] | null>} The commits reachable from `tip` and not from anything seen. */
   const fresh = async (tip) => {
