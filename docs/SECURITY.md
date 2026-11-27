@@ -31,7 +31,9 @@ can't hold is percent-encoded: for base `release/1.x`, require `review-loop/rele
   brings its new commits in when its new tip is contained in a tip that a remote-tracking ref shows being fetched
   before the move: a fast-forward pull, a switch to a branch already pushed, `git reset --hard origin/main`, a
   rebase onto it, a checkout of `FETCH_HEAD`. A merge brings in its second parent's side the same way, whether or
-  not it stopped on a conflict. review-loop reads this from the reflogs git writes: HEAD's shows each move, and a
+  not it stopped on a conflict. What a merge commit itself changed against every parent (a hand-resolved conflict, a
+  file added in the merge) is the session's own edit and is listed, through `git log --cc`; a clean merge, or one that
+  takes a side wholesale, adds nothing. review-loop reads this from the reflogs git writes: HEAD's shows each move, and a
   remote-tracking ref's shows whether a tip was fetched (before the move) or pushed. Reflog times are whole
   seconds, so a fetch in the same second as a move is not known to be earlier and the commits stay listed, except for
   a `git pull`, whose own fetch always comes first. Each commit belongs to the

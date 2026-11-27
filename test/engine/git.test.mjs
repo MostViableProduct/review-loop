@@ -372,6 +372,74 @@ test("committedPaths: merging a fetched tip, with or without a conflict, brings 
   assert.ok(paths.includes("mine.md") && paths.includes("c.md"), "the commits made here stay listed");
 });
 
+test("committedPaths: a file that exists only in a merge commit is the session's, whether hand-resolved or added", async () => {
+  const repo = makeRepo();
+  commitFile(repo, "base.md", "base\n");
+  const start = g(repo, "rev-parse", "HEAD");
+  g(repo, "switch", "-q", "-c", "side");
+  commitFile(repo, "side.md", "side\n");
+  commitFile(repo, "conflict.md", "side version\n");
+  g(repo, "switch", "-q", "main");
+  commitFile(repo, "main.md", "main\n");
+  commitFile(repo, "conflict.md", "main version\n");
+  try {
+    g(repo, "merge", "--no-edit", "side");
+  } catch {
+    // The merge stops on the conflict; the resolution below is the session's own edit.
+  }
+  writeFile(repo, "conflict.md", "hand-resolved from both\n");
+  writeFile(repo, "added-in-merge.md", "exists only in the merge commit\n");
+  g(repo, "add", "-A");
+  g(repo, "commit", "-q", "-m", "Merge side");
+  assert.deepEqual((await committedPaths(repo, start)).sort(), ["added-in-merge.md", "conflict.md", "main.md", "side.md"]);
+});
+
+test("committedPaths: a merge of a fetched tip lists what the merge commit itself adds and still skips the fetched side", async () => {
+  const { local, other, start } = bareWithClones();
+  commitFile(other, "theirs.md", "t");
+  g(other, "push", "-q", "origin", "HEAD:main");
+  commitFile(local, "mine.md", "m");
+  gAt(local, EARLIER, "fetch", "-q");
+  g(local, "merge", "-q", "--no-commit", "--no-ff", "origin/main");
+  writeFile(local, "added-in-merge.md", "only in this merge commit\n");
+  g(local, "add", "-A");
+  g(local, "commit", "-q", "-m", "Merge origin/main");
+  assert.deepEqual((await committedPaths(local, start)).sort(), ["added-in-merge.md", "mine.md"]);
+});
+
+test("committedPaths: a clean merge, and one that takes a side wholesale, add no paths of their own", async () => {
+  const repo = makeRepo();
+  commitFile(repo, "base.md", "base\n");
+  const start = g(repo, "rev-parse", "HEAD");
+  g(repo, "switch", "-q", "-c", "side");
+  commitFile(repo, "side.md", "side\n");
+  g(repo, "switch", "-q", "main");
+  commitFile(repo, "main.md", "main\n");
+  g(repo, "merge", "-q", "--no-edit", "side");
+  assert.deepEqual((await committedPaths(repo, start)).sort(), ["main.md", "side.md"], "a clean merge lists only the commits' own files");
+  g(repo, "switch", "-q", "-c", "side2", start);
+  commitFile(repo, "side2.md", "side2\n");
+  g(repo, "switch", "-q", "main");
+  g(repo, "merge", "-q", "--no-edit", "-s", "ours", "side2");
+  assert.deepEqual((await committedPaths(repo, start)).sort(), ["main.md", "side.md", "side2.md"], "taking a side wholesale is not a new edit");
+});
+
+test("committedPaths: a merge commit that arrives from upstream with an edit of its own stays skipped", async () => {
+  const { local, other, start } = bareWithClones();
+  g(other, "switch", "-q", "-c", "topic");
+  commitFile(other, "topic.md", "t");
+  g(other, "switch", "-q", "main");
+  commitFile(other, "main2.md", "m");
+  g(other, "merge", "-q", "--no-commit", "--no-ff", "topic");
+  writeFile(other, "added-upstream.md", "only in the upstream merge commit\n");
+  g(other, "add", "-A");
+  g(other, "commit", "-q", "-m", "Merge topic");
+  g(other, "push", "-q", "origin", "HEAD:main");
+  gAt(local, EARLIER, "fetch", "-q");
+  g(local, "merge", "-q", "--ff-only", "origin/main");
+  assert.deepEqual(await committedPaths(local, start), [], "other people's merge, and what it added, is incoming");
+});
+
 test("committedPaths: a merge of a branch that was never fetched, and an octopus, stay the session's", async () => {
   const { root, local, start } = bareWithClones();
   const wt = path.join(root, "wt");

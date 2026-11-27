@@ -637,6 +637,24 @@ test("a spec edited and committed through the shell during the session stays pen
   assert.match(r.out.reason, /\[pending: committed_since_session_start\]/, "the Stop text says why it is listed");
 });
 
+test("a spec that exists only in a merge commit stays pending at Stop, though no commit of the session touches it", () => {
+  const repo = specRepo();
+  const S = { session_id: "e2e-session", cwd: repo, stop_hook_active: false };
+  hook("session", S);
+  g(repo, "switch", "-q", "-c", "side");
+  commitFile(repo, "src/side.ts", "side");
+  g(repo, "switch", "-q", "main");
+  commitFile(repo, "src/main.ts", "main");
+  g(repo, "merge", "-q", "--no-commit", "--no-ff", "side");
+  writeFile(repo, "docs/specs/merge-only-spec.md", "# Written while merging\nNo commit of either side holds it.\n");
+  g(repo, "add", "-A");
+  g(repo, "commit", "-q", "-m", "Merge side");
+  assert.equal(spawnSync("git", ["status", "--porcelain"], { cwd: repo, encoding: "utf8" }).stdout, "", "git status is clean");
+  const r = hook("stop", S);
+  assert.equal(r.out?.decision, "block", JSON.stringify(r.out));
+  assert.match(r.out.reason, /spec .*merge-only-spec\.md/);
+});
+
 /** A commit under another committer's identity (what a squash merge looks like), carrying a spec. */
 function commitAsOtherCommitter(/** @type {string} */ repo, /** @type {string} */ rel) {
   const abs = path.join(repo, rel);

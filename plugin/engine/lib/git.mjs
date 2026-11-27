@@ -228,6 +228,8 @@ async function reflogRows(root, refs) {
  * A commit moved off the current history (a switch away, a reset) is outside Stop's view by design (author's decision,
  * round 22): its file is not in the working tree to review, and the PR gate reviews every commit in a PR's diff
  * (head against the merge-base) before it can merge.
+ * `--cc` makes a merge commit list the files it changed against every parent (a hand-resolved conflict, a file added in
+ * the merge), which a plain `--name-only` prints nothing for; a clean merge, or one that takes a side wholesale, adds none.
  * Commits that arrived from outside this checkout are left out (see `incomingCommits`): they are other people's and
  * other sessions' commits, whose specs and plans were reviewed where they were written. Commit metadata (committer,
  * author, date) and remote-tracking refs are no basis for the choice: the session sets the first, and a push puts its
@@ -246,12 +248,12 @@ export async function committedPaths(root, startHead) {
   const incoming = await incomingCommits(root, startHead);
   let out;
   if (incoming.size === 0) {
-    out = await gitOk(root, ["log", "--format=", "--name-only", "--no-renames", "-z", range, "--"], { maxBuffer: 8 * MiB, code: "detection_failed" });
+    out = await gitOk(root, ["log", "--cc", "--format=", "--name-only", "--no-renames", "-z", range, "--"], { maxBuffer: 8 * MiB, code: "detection_failed" });
   } else {
     const all = await gitOk(root, ["rev-list", range, "--"], { maxBuffer: 8 * MiB, code: "detection_failed" });
     const own = all.split("\n").filter((sha) => sha !== "" && !incoming.has(sha));
     if (own.length === 0) return [];
-    out = await gitOk(root, ["log", "--no-walk=unsorted", "--stdin", "--format=", "--name-only", "--no-renames", "-z", "--"], { input: own.join("\n") + "\n", maxBuffer: 8 * MiB, code: "detection_failed" });
+    out = await gitOk(root, ["log", "--cc", "--no-walk=unsorted", "--stdin", "--format=", "--name-only", "--no-renames", "-z", "--"], { input: own.join("\n") + "\n", maxBuffer: 8 * MiB, code: "detection_failed" });
   }
   const paths = [...new Set(out.split("\0").map((p) => p.replace(/^\n+/, "")).filter(Boolean))];
   if (paths.length > MAX_COMMITTED_PATHS) throw new ReviewLoopError("detection_failed", `commits made this session touch ${paths.length} paths (limit ${MAX_COMMITTED_PATHS})`);
